@@ -185,6 +185,37 @@ final class YorozuUITests: XCTestCase {
     }
 
     @MainActor
+    func testKeyboardSelectionKeepsEveryRootRowVisibleWhileMovingBothDirections() {
+        continueAfterFailure = false
+        let application = XCUIApplication()
+        application.launchArguments = ["--ui-testing", "--ui-testing-sticky"]
+        application.launch()
+
+        let searchField = application.searchFields["launcher.search"]
+        let footer = application.buttons["launcher.footer.primary"]
+        XCTAssertTrue(searchField.waitForExistence(timeout: 5))
+        XCTAssertTrue(footer.waitForExistence(timeout: 2))
+
+        for _ in 0..<25 {
+            application.typeKey(.downArrow, modifierFlags: [])
+            assertSelectedRootRowIsVisible(
+                in: application,
+                below: searchField,
+                above: footer
+            )
+        }
+
+        for _ in 0..<25 {
+            application.typeKey(.upArrow, modifierFlags: [])
+            assertSelectedRootRowIsVisible(
+                in: application,
+                below: searchField,
+                above: footer
+            )
+        }
+    }
+
+    @MainActor
     func testReducedTransparencyAndMotionKeepPaletteUsable() {
         continueAfterFailure = false
         let application = XCUIApplication()
@@ -263,6 +294,46 @@ final class YorozuUITests: XCTestCase {
 
         XCTAssertTrue(aliasField.waitForNonExistence(timeout: 2))
         XCTAssertTrue(aliases.exists)
+    }
+
+    @MainActor
+    private func assertSelectedRootRowIsVisible(
+        in application: XCUIApplication,
+        below searchField: XCUIElement,
+        above footer: XCUIElement,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        let resultRows = application.descendants(matching: .any).matching(
+            NSPredicate(
+                format: "identifier BEGINSWITH %@",
+                "launcher.row."
+            )
+        )
+        guard let selectedRow = resultRows.allElementsBoundByIndex.first(
+            where: \.isSelected
+        ) else {
+            XCTFail(
+                "The selected result row is not visible.",
+                file: file,
+                line: line
+            )
+            return
+        }
+
+        let selectedFrame = selectedRow.frame
+        XCTAssertGreaterThanOrEqual(
+            selectedFrame.minY,
+            searchField.frame.maxY - 1,
+            file: file,
+            line: line
+        )
+        XCTAssertLessThanOrEqual(
+            selectedFrame.maxY,
+            footer.frame.minY + 1,
+            file: file,
+            line: line
+        )
     }
 
 }

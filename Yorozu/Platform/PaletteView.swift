@@ -301,7 +301,7 @@ struct PaletteView: View {
                                 hoveredResultID = nil
                             }
                         }
-                        .onScrollVisibilityChange(threshold: 0.5) { isVisible in
+                        .onScrollVisibilityChange(threshold: 0.999) { isVisible in
                             if isVisible {
                                 visibleResults.ids.insert(result.id)
                             } else {
@@ -317,7 +317,7 @@ struct PaletteView: View {
             }
             .scrollIndicators(.automatic)
             .background(Color.clear)
-            .onChange(of: viewModel.selectedID) { _, selectedID in
+            .onChange(of: viewModel.selectedID) { previousID, selectedID in
                 if focusedResultID != nil {
                     focusedResultID = selectedID
                 }
@@ -325,7 +325,13 @@ struct PaletteView: View {
                       !visibleResults.ids.contains(selectedID) else {
                     return
                 }
-                proxy.scrollTo(selectedID, anchor: .center)
+                proxy.scrollTo(
+                    selectedID,
+                    anchor: selectionScrollAnchor(
+                        from: previousID,
+                        to: selectedID
+                    )
+                )
             }
             .onChange(of: viewModel.resultsRevision) {
                 visibleResults.ids.removeAll()
@@ -351,6 +357,29 @@ struct PaletteView: View {
                 proxy.scrollTo(selectedID, anchor: .center)
             }
         }
+    }
+
+    private func selectionScrollAnchor(
+        from previousID: CommandResultID?,
+        to selectedID: CommandResultID
+    ) -> UnitPoint {
+        guard let previousID,
+              let previousIndex = viewModel.results.firstIndex(
+                  where: { $0.id == previousID }
+              ),
+              let selectedIndex = viewModel.results.firstIndex(
+                  where: { $0.id == selectedID }
+              ) else {
+            return .center
+        }
+
+        if selectedIndex > previousIndex {
+            return .bottom
+        }
+        if selectedIndex < previousIndex {
+            return .top
+        }
+        return .center
     }
 
     @ViewBuilder
