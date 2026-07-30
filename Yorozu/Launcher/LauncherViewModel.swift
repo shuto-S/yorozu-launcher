@@ -60,6 +60,7 @@ final class LauncherViewModel: ObservableObject {
     @Published private(set) var route: PaletteRoute = .root
     @Published private(set) var presentationOrigin: PalettePresentationOrigin = .direct
     @Published private(set) var results: [CommandResult] = []
+    @Published private(set) var resultsRevision = 0
     @Published var selectedID: CommandResultID? {
         didSet {
             guard selectedID != oldValue, !isApplyingRouteState else { return }
@@ -126,7 +127,6 @@ final class LauncherViewModel: ObservableObject {
     @Published private(set) var aliasFocusRequest = 0
     @Published private(set) var aliasDeletionCandidate: LaunchableApplication?
 
-    var selectedRowFrame: CGRect?
     var dismissForLaunch: (() -> Void)?
     var reopenAfterLaunchFailure: (() -> Void)?
     var dismissAndRestorePreviousApplication: (() -> Void)?
@@ -415,16 +415,33 @@ final class LauncherViewModel: ObservableObject {
     func start() {
         guard !hasStarted else { return }
         hasStarted = true
+
         Task {
-            async let applicationSnapshot = catalog.loadCachedApplications()
-            async let featureSnapshot = featureCatalog.load()
-            async let clipboardSnapshot = clipboardCatalog.load()
-            async let snippetSnapshot = snippetCatalog.load()
-            apply(snapshot: await applicationSnapshot)
-            apply(featureSnapshot: await featureSnapshot)
-            apply(clipboardSnapshot: await clipboardSnapshot)
-            apply(snippetSnapshot: await snippetSnapshot)
-            refreshSearch()
+            let snapshot = await clipboardCatalog.load()
+            apply(clipboardSnapshot: snapshot)
+            if route == .clipboard {
+                refreshSearch(preserveSelection: true)
+            }
+        }
+        Task {
+            let snapshot = await snippetCatalog.load()
+            apply(snippetSnapshot: snapshot)
+            if route == .snippets {
+                refreshSearch(preserveSelection: true)
+            }
+        }
+        Task {
+            let snapshot = await featureCatalog.load()
+            apply(featureSnapshot: snapshot)
+            if route == .root {
+                refreshSearch(preserveSelection: true)
+            }
+        }
+        Task {
+            apply(snapshot: await catalog.loadCachedApplications())
+            if route == .root || route == .aliases {
+                refreshSearch(preserveSelection: true)
+            }
             await reindex()
         }
     }
@@ -1119,6 +1136,7 @@ final class LauncherViewModel: ObservableObject {
         presentationOrigin = origin
         let initialResults = cachedDefaultResults(for: newRoute) ?? []
         results = initialResults
+        resultsRevision &+= 1
         let rememberedSelection = selectionByRoute[newRoute]
         if let rememberedSelection,
            initialResults.contains(where: { $0.id == rememberedSelection }) {
@@ -1177,6 +1195,7 @@ final class LauncherViewModel: ObservableObject {
 
         if results != matches {
             results = matches
+            resultsRevision &+= 1
         }
         if selectedID != nextSelection {
             selectedID = nextSelection

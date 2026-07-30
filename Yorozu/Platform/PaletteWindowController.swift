@@ -21,9 +21,12 @@ enum PaletteAnimationPolicy {
         systemReducesMotion: Bool,
         overrides: AccessibilityDisplayOverrides
     ) -> NSWindow.AnimationBehavior {
-        systemReducesMotion || overrides.reduceMotion
-            ? .none
-            : .utilityWindow
+        // Yorozu is opened repeatedly throughout the day. Even the standard
+        // utility-window transition makes a warm panel feel slower than the
+        // measured presentation time, so the palette always appears directly.
+        _ = systemReducesMotion
+        _ = overrides
+        return .none
     }
 }
 
@@ -134,6 +137,36 @@ struct PalettePresentationPerformanceReport: Codable, Equatable {
         )
         return sorted[index]
     }
+}
+
+struct ClipboardInteractionPerformanceDistribution: Codable, Equatable {
+    let sampleCount: Int
+    let p50Milliseconds: Double
+    let p95Milliseconds: Double
+    let maximumMilliseconds: Double
+
+    init(samples: [Double]) {
+        let sorted = samples.sorted()
+        sampleCount = sorted.count
+        p50Milliseconds = Self.percentile(0.50, in: sorted)
+        p95Milliseconds = Self.percentile(0.95, in: sorted)
+        maximumMilliseconds = sorted.last ?? 0
+    }
+
+    private static func percentile(_ percentile: Double, in sorted: [Double]) -> Double {
+        guard !sorted.isEmpty else { return 0 }
+        let index = max(
+            0,
+            min(sorted.count - 1, Int(ceil(percentile * Double(sorted.count))) - 1)
+        )
+        return sorted[index]
+    }
+}
+
+struct ClipboardInteractionPerformanceReport: Codable, Equatable {
+    let rootToClipboard: ClipboardInteractionPerformanceDistribution
+    let selectionMovement: ClipboardInteractionPerformanceDistribution
+    let settledDetailPresentation: ClipboardInteractionPerformanceDistribution
 }
 #endif
 
@@ -316,6 +349,126 @@ final class PaletteWindowController: NSWindowController, NSWindowDelegate, NSPop
         }
 
         return PalettePresentationPerformanceReport(samples: samples)
+    }
+
+    func runClipboardInteractionStressTest(
+        routeIterations: Int = 30,
+        selectionIterations: Int = 100,
+        settledDetailIterations: Int = 20
+    ) async -> ClipboardInteractionPerformanceReport {
+        guard let panel = window else {
+            return ClipboardInteractionPerformanceReport(
+                rootToClipboard: ClipboardInteractionPerformanceDistribution(samples: []),
+                selectionMovement: ClipboardInteractionPerformanceDistribution(samples: []),
+                settledDetailPresentation:
+                    ClipboardInteractionPerformanceDistribution(samples: [])
+            )
+        }
+
+        show(route: .root)
+        await flushRenderedContent(in: panel)
+
+        var routeSamples: [Double] = []
+        routeSamples.reserveCapacity(max(0, routeIterations))
+        for _ in 0..<max(0, routeIterations) {
+            if viewModel.route != .root {
+                viewModel.returnToRoot()
+                await flushRenderedContent(in: panel)
+            }
+
+            let startedAt = ProcessInfo.processInfo.systemUptime
+            viewModel.openFeature(.clipboardHistory)
+            await flushRenderedContent(in: panel)
+            routeSamples.append(
+                (ProcessInfo.processInfo.systemUptime - startedAt) * 1_000
+            )
+        }
+
+        if viewModel.route != .clipboard {
+            viewModel.openFeature(.clipboardHistory)
+            await flushRenderedContent(in: panel)
+        }
+
+        var selectionSamples: [Double] = []
+        selectionSamples.reserveCapacity(max(0, selectionIterations))
+        if viewModel.results.count > 1 {
+            var direction = 1
+            for _ in 0..<max(0, selectionIterations) {
+                guard let selectedID = viewModel.selectedID,
+                      let selectedIndex = viewModel.results.firstIndex(
+                          where: { $0.id == selectedID }
+                      ) else {
+                    break
+                }
+                if selectedIndex == viewModel.results.count - 1 {
+                    direction = -1
+                } else if selectedIndex == 0 {
+                    direction = 1
+                }
+
+                let startedAt = ProcessInfo.processInfo.systemUptime
+                viewModel.moveSelection(by: direction)
+                await flushRenderedContent(in: panel)
+                selectionSamples.append(
+                    (ProcessInfo.processInfo.systemUptime - startedAt) * 1_000
+                )
+            }
+        }
+
+        var settledDetailSamples: [Double] = []
+        settledDetailSamples.reserveCapacity(max(0, settledDetailIterations))
+        if viewModel.results.count > 1 {
+            var direction = 1
+            for _ in 0..<max(0, settledDetailIterations) {
+                guard let selectedID = viewModel.selectedID,
+                      let selectedIndex = viewModel.results.firstIndex(
+                          where: { $0.id == selectedID }
+                      ) else {
+                    break
+                }
+                if selectedIndex == viewModel.results.count - 1 {
+                    direction = -1
+                } else if selectedIndex == 0 {
+                    direction = 1
+                }
+
+                let startedAt = ProcessInfo.processInfo.systemUptime
+                viewModel.moveSelection(by: direction)
+                // The detail pane intentionally follows a stable selection so
+                // rapid arrow movement never blocks the list highlight.
+                try? await Task.sleep(for: .milliseconds(50))
+                await flushRenderedContent(in: panel)
+                settledDetailSamples.append(
+                    (ProcessInfo.processInfo.systemUptime - startedAt) * 1_000
+                )
+            }
+        }
+
+        hide(restorePreviousApplication: false)
+        return ClipboardInteractionPerformanceReport(
+            rootToClipboard: ClipboardInteractionPerformanceDistribution(
+                samples: routeSamples
+            ),
+            selectionMovement: ClipboardInteractionPerformanceDistribution(
+                samples: selectionSamples
+            ),
+            settledDetailPresentation:
+                ClipboardInteractionPerformanceDistribution(
+                    samples: settledDetailSamples
+                )
+        )
+    }
+
+    private func flushRenderedContent(in panel: NSWindow) async {
+        // SwiftUI observes the route or selection change asynchronously. Yield
+        // before forcing AppKit layout/display so the sample includes the
+        // resulting two-pane hierarchy rather than only the model mutation.
+        await Task.yield()
+        panel.contentView?.layoutSubtreeIfNeeded()
+        panel.displayIfNeeded()
+        await Task.yield()
+        panel.contentView?.layoutSubtreeIfNeeded()
+        panel.displayIfNeeded()
     }
     #endif
 

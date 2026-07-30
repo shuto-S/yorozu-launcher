@@ -1,4 +1,5 @@
 import AppKit
+@preconcurrency import LinkPresentation
 import XCTest
 @testable import Yorozu
 
@@ -137,7 +138,7 @@ final class LauncherViewModelTests: XCTestCase {
                 systemReducesMotion: false,
                 overrides: disabled
             ),
-            .utilityWindow
+            .none
         )
     }
 
@@ -150,6 +151,53 @@ final class LauncherViewModelTests: XCTestCase {
         XCTAssertEqual(report.p50Milliseconds, 50)
         XCTAssertEqual(report.p95Milliseconds, 95)
         XCTAssertEqual(report.maximumMilliseconds, 100)
+    }
+
+    func testClipboardInteractionPerformanceDistributionUsesNearestRankPercentiles() {
+        let distribution = ClipboardInteractionPerformanceDistribution(
+            samples: Array(1...100).map(Double.init)
+        )
+
+        XCTAssertEqual(distribution.sampleCount, 100)
+        XCTAssertEqual(distribution.p50Milliseconds, 50)
+        XCTAssertEqual(distribution.p95Milliseconds, 95)
+        XCTAssertEqual(distribution.maximumMilliseconds, 100)
+    }
+
+    func testFailedURLPreviewIsNotFetchedAgainAfterRefocus() async {
+        let providerFactory = FailingURLPreviewMetadataProviderFactory()
+        let service = URLPreviewService(
+            store: nil,
+            metadataProviderFactory: {
+                providerFactory.makeProvider()
+            },
+            fetchDelay: .zero
+        )
+        let failedURL = "https://example.com/preview-failure"
+
+        service.load(rawURL: failedURL, isEnabled: true)
+        await waitForFailedPreview(failedURL, in: service)
+        XCTAssertEqual(providerFactory.fetchCount, 1)
+
+        service.cancel(resetState: true)
+        service.load(rawURL: failedURL, isEnabled: true)
+
+        XCTAssertEqual(
+            service.state,
+            .unavailable(
+                try! XCTUnwrap(URL(string: failedURL)),
+                .failed
+            )
+        )
+        XCTAssertEqual(providerFactory.fetchCount, 1)
+
+        service.cancel(resetState: true)
+        service.load(
+            rawURL: "https://example.com/different-preview",
+            isEnabled: true
+        )
+        await waitForFetchCount(2, in: providerFactory)
+        XCTAssertEqual(providerFactory.fetchCount, 2)
     }
 
     func testFeatureRouteFirstUsableListPerformanceWithTwoThousandItems() async throws {
@@ -973,6 +1021,33 @@ final class LauncherViewModelTests: XCTestCase {
         XCTAssertNotNil(preference.lastLaunchedAt)
     }
 
+    private func waitForFailedPreview(
+        _ rawURL: String,
+        in service: URLPreviewService
+    ) async {
+        let expectedURL = try! XCTUnwrap(URL(string: rawURL))
+        for _ in 0..<100 {
+            if service.state == .unavailable(expectedURL, .failed) {
+                return
+            }
+            try? await Task.sleep(for: .milliseconds(1))
+        }
+        XCTFail("Timed out waiting for the URL preview failure.")
+    }
+
+    private func waitForFetchCount(
+        _ expectedCount: Int,
+        in factory: FailingURLPreviewMetadataProviderFactory
+    ) async {
+        for _ in 0..<100 {
+            if factory.fetchCount == expectedCount {
+                return
+            }
+            try? await Task.sleep(for: .milliseconds(1))
+        }
+        XCTFail("Timed out waiting for the URL preview fetch.")
+    }
+
     private func makeFixture(
         launcherShouldFail: Bool,
         applicationName: String = "Fixture",
@@ -1078,6 +1153,47 @@ private actor DelayedClipboardImageDecoder: ClipboardImageDecoding {
             intent: .defaultIntent
         )
     }
+}
+
+@MainActor
+private final class FailingURLPreviewMetadataProviderFactory {
+    private(set) var fetchCount = 0
+
+    func makeProvider() -> any URLPreviewMetadataProviding {
+        FailingURLPreviewMetadataProvider { [weak self] in
+            self?.fetchCount += 1
+        }
+    }
+}
+
+@MainActor
+private final class FailingURLPreviewMetadataProvider:
+    URLPreviewMetadataProviding
+{
+    var shouldFetchSubresources = false
+    var timeout: TimeInterval = 0
+
+    private let onFetch: () -> Void
+
+    init(onFetch: @escaping () -> Void) {
+        self.onFetch = onFetch
+    }
+
+    func startFetchingMetadata(
+        for url: URL,
+        completionHandler: @escaping @Sendable (LPLinkMetadata?, Error?) -> Void
+    ) {
+        onFetch()
+        completionHandler(
+            nil,
+            NSError(
+                domain: "URLPreviewMetadataProviderTests",
+                code: 1
+            )
+        )
+    }
+
+    func cancel() {}
 }
 
 @MainActor

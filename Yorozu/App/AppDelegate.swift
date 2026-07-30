@@ -89,6 +89,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         #if DEBUG
+        if arguments.contains("--performance-testing-clipboard-interaction") {
+            Task {
+                try? await Task.sleep(for: .milliseconds(750))
+                let report = await paletteController.runClipboardInteractionStressTest()
+                do {
+                    let encoder = JSONEncoder()
+                    encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+                    let data = try encoder.encode(report)
+                    try data.write(
+                        to: URL(
+                            fileURLWithPath:
+                                "/private/tmp/yorozu-clipboard-interaction-performance.json"
+                        ),
+                        options: .atomic
+                    )
+                    logger.notice(
+                        "Clipboard interaction stress test completed: route p95 \(report.rootToClipboard.p95Milliseconds, privacy: .public) ms, selection p95 \(report.selectionMovement.p95Milliseconds, privacy: .public) ms, settled detail p95 \(report.settledDetailPresentation.p95Milliseconds, privacy: .public) ms"
+                    )
+                } catch {
+                    logger.error(
+                        "Clipboard interaction stress report failed: \(error.localizedDescription, privacy: .public)"
+                    )
+                }
+                NSApp.terminate(nil)
+            }
+            return
+        }
+
         let performanceRoute: (route: PaletteRoute, fileName: String)? = {
             if arguments.contains("--performance-testing-clipboard") {
                 return (.clipboard, "yorozu-palette-performance-clipboard.json")

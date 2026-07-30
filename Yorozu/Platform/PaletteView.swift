@@ -4,6 +4,9 @@ import SwiftUI
 
 struct PaletteView: View {
     @ObservedObject var viewModel: LauncherViewModel
+    @State private var visibleResults = ResultVisibilityTracker()
+    @State private var hoveredResultID: CommandResultID?
+    @FocusState private var focusedResultID: CommandResultID?
 
     var body: some View {
         ZStack(alignment: .bottomTrailing) {
@@ -31,9 +34,6 @@ struct PaletteView: View {
         }
         .frame(minWidth: 760, idealWidth: 760, maxWidth: 760)
         .coordinateSpace(name: "palette.content")
-        .onPreferenceChange(SelectedRowFramePreferenceKey.self) { frame in
-            viewModel.selectedRowFrame = frame
-        }
         .ignoresSafeArea(.container, edges: .top)
         .accessibilityElement(children: .contain)
         .alert(
@@ -179,13 +179,8 @@ struct PaletteView: View {
             Divider()
                 .accessibilityHidden(true)
 
-            FeatureDetailView(
-                result: viewModel.selectedResult,
-                clipboardPreferences: viewModel.clipboardPreferences,
-                urlPreviewService: viewModel.urlPreviewService,
-                selectedClipboardImage: viewModel.selectedClipboardImage,
-                isClipboardImageLoading: viewModel.isClipboardImageLoading
-            )
+            DeferredFeatureDetailView(viewModel: viewModel)
+                .id(viewModel.route)
                 .frame(minWidth: 380, maxWidth: .infinity, maxHeight: .infinity)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -236,72 +231,126 @@ struct PaletteView: View {
 
     private func resultList(compact: Bool) -> some View {
         ScrollViewReader { proxy in
-            List(viewModel.results, selection: $viewModel.selectedID) { result in
-                Group {
-                    if compact {
-                        if viewModel.route == .aliases {
-                            AliasCommandResultRow(result: result)
-                        } else {
-                            CompactCommandResultRow(result: result)
+            ScrollView {
+                LazyVStack(spacing: 0) {
+                    ForEach(viewModel.results) { result in
+                        Group {
+                            if compact {
+                                if viewModel.route == .aliases {
+                                    AliasCommandResultRow(result: result)
+                                } else {
+                                    CompactCommandResultRow(result: result)
+                                }
+                            } else {
+                                CommandResultRow(result: result)
+                            }
                         }
-                    } else {
-                        CommandResultRow(result: result)
-                    }
-                }
-                .tag(result.id)
-                .id(result.id)
-                .listRowInsets(
-                    EdgeInsets(
-                        top: 3,
-                        leading: 4,
-                        bottom: 3,
-                        trailing: 10
-                    )
-                )
-                .listRowSeparator(.hidden)
-                .listRowBackground(resultRowSeparatorBackground)
-                .contentShape(Rectangle())
-                .background {
-                    if viewModel.selectedID == result.id {
-                        GeometryReader { geometry in
-                            Color.clear.preference(
-                                key: SelectedRowFramePreferenceKey.self,
-                                value: geometry.frame(in: .named("palette.content"))
+                        .padding(
+                            EdgeInsets(
+                                top: 6,
+                                leading: 8,
+                                bottom: 6,
+                                trailing: 10
                             )
+                        )
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .contentShape(Rectangle())
+                        .background {
+                            if viewModel.selectedID == result.id {
+                                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                    .fill(.quaternary)
+                            } else if hoveredResultID == result.id {
+                                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                    .fill(.quinary)
+                            }
+                        }
+                        .overlay(alignment: .bottom) {
+                            Divider()
+                                .padding(.horizontal, 6)
+                        }
+                        .id(result.id)
+                        .focusable()
+                        .focused($focusedResultID, equals: result.id)
+                        .accessibilityElement(children: .combine)
+                        .accessibilityLabel(result.title)
+                        .accessibilityIdentifier(
+                            "launcher.row.\(result.id.rawValue)"
+                        )
+                        .accessibilityAddTraits(
+                            viewModel.selectedID == result.id
+                                ? [.isButton, .isSelected]
+                                : [.isButton]
+                        )
+                        .accessibilityAction {
+                            viewModel.selectedID = result.id
+                            viewModel.performPrimaryAction()
+                        }
+                        .onTapGesture(count: 2) {
+                            viewModel.selectedID = result.id
+                            viewModel.performPrimaryAction()
+                        }
+                        .simultaneousGesture(
+                            TapGesture().onEnded {
+                                viewModel.selectedID = result.id
+                            }
+                        )
+                        .onHover { isHovering in
+                            if isHovering {
+                                hoveredResultID = result.id
+                            } else if hoveredResultID == result.id {
+                                hoveredResultID = nil
+                            }
+                        }
+                        .onScrollVisibilityChange(threshold: 0.5) { isVisible in
+                            if isVisible {
+                                visibleResults.ids.insert(result.id)
+                            } else {
+                                visibleResults.ids.remove(result.id)
+                            }
+                        }
+                        .contextMenu {
+                            contextMenu(for: result)
                         }
                     }
                 }
-                .onTapGesture(count: 2) {
-                    viewModel.selectedID = result.id
-                    viewModel.performPrimaryAction()
+                .padding(.horizontal, 4)
+            }
+            .scrollIndicators(.automatic)
+            .background(Color.clear)
+            .onChange(of: viewModel.selectedID) { _, selectedID in
+                if focusedResultID != nil {
+                    focusedResultID = selectedID
                 }
-                .simultaneousGesture(
-                    TapGesture().onEnded {
-                        viewModel.selectedID = result.id
-                    }
-                )
-                .contextMenu {
-                    contextMenu(for: result)
+                guard let selectedID,
+                      !visibleResults.ids.contains(selectedID) else {
+                    return
+                }
+                proxy.scrollTo(selectedID, anchor: .center)
+            }
+            .onChange(of: viewModel.resultsRevision) {
+                visibleResults.ids.removeAll()
+                guard let selectedID = viewModel.selectedID else { return }
+                Task { @MainActor in
+                    await Task.yield()
+                    proxy.scrollTo(selectedID, anchor: .center)
                 }
             }
-            .listStyle(.plain)
-            .scrollContentBackground(.hidden)
-            .background(
-                Color.clear
-            )
-            .onChange(of: viewModel.selectedID) { _, selectedID in
-                guard let selectedID else { return }
-                proxy.scrollTo(selectedID)
+            .onChange(of: focusedResultID) { _, focusedResultID in
+                guard let focusedResultID,
+                      viewModel.results.contains(
+                          where: { $0.id == focusedResultID }
+                      ) else {
+                    return
+                }
+                viewModel.selectedID = focusedResultID
+            }
+            .task(id: viewModel.route) {
+                visibleResults.ids.removeAll()
+                await Task.yield()
+                guard let selectedID = viewModel.selectedID else { return }
+                proxy.scrollTo(selectedID, anchor: .center)
             }
         }
-    }
-
-    private var resultRowSeparatorBackground: some View {
-        Color.clear
-            .overlay(alignment: .bottom) {
-                Divider()
-                    .padding(.horizontal, 6)
-            }
     }
 
     @ViewBuilder
@@ -462,6 +511,11 @@ struct PaletteView: View {
     }
 }
 
+@MainActor
+private final class ResultVisibilityTracker {
+    var ids: Set<CommandResultID> = []
+}
+
 private struct ActionPanelView: View {
     @ObservedObject var viewModel: LauncherViewModel
     @FocusState private var isSearchFocused: Bool
@@ -595,14 +649,6 @@ private struct AdaptiveActionPanelSurface: ViewModifier {
             content
                 .glassEffect(.regular, in: .rect(cornerRadius: 16))
         }
-    }
-}
-
-private struct SelectedRowFramePreferenceKey: PreferenceKey {
-    static let defaultValue: CGRect? = nil
-
-    static func reduce(value: inout CGRect?, nextValue: () -> CGRect?) {
-        value = nextValue() ?? value
     }
 }
 
@@ -1062,7 +1108,77 @@ private struct FeatureDetailView: View {
     }
 }
 
+private struct DeferredFeatureDetailView: View {
+    @ObservedObject var viewModel: LauncherViewModel
+    @State private var displayedResult: CommandResult?
+
+    private var selectionKey: FeatureDetailSelectionKey {
+        FeatureDetailSelectionKey(result: viewModel.selectedResult)
+    }
+
+    var body: some View {
+        FeatureDetailView(
+            result: displayedResult,
+            clipboardPreferences: viewModel.clipboardPreferences,
+            urlPreviewService: viewModel.urlPreviewService,
+            selectedClipboardImage: viewModel.selectedClipboardImage,
+            isClipboardImageLoading: viewModel.isClipboardImageLoading
+        )
+        .task(id: selectionKey) {
+            do {
+                // Let the list selection reach the screen before constructing
+                // LinkPresentation or image detail content.
+                try await Task.sleep(for: .milliseconds(40))
+            } catch {
+                return
+            }
+            guard !Task.isCancelled else { return }
+            displayedResult = viewModel.selectedResult
+        }
+    }
+}
+
+private struct FeatureDetailSelectionKey: Hashable {
+    let id: CommandResultID?
+    let revision: Revision
+
+    init(result: CommandResult?) {
+        id = result?.id
+        switch result?.payload {
+        case let .application(application):
+            revision = .application(
+                alias: application.preference.alias,
+                isPinned: application.preference.isPinned,
+                launchCount: application.preference.launchCount,
+                lastLaunchedAt: application.preference.lastLaunchedAt
+            )
+        case let .clipboard(item):
+            revision = .dated(item.updatedAt)
+        case let .snippet(snippet):
+            revision = .dated(snippet.updatedAt)
+        case let .feature(feature):
+            revision = .feature(feature)
+        case nil:
+            revision = .none
+        }
+    }
+
+    enum Revision: Hashable {
+        case none
+        case application(
+            alias: String?,
+            isPinned: Bool,
+            launchCount: Int,
+            lastLaunchedAt: Date?
+        )
+        case dated(Date)
+        case feature(FeatureCommand)
+    }
+}
+
 private struct ClipboardDetailView: View {
+    private static let maximumPreviewCharacters = 1_000
+
     let item: ClipboardItem
     @ObservedObject var preferences: ClipboardPreferences
     @ObservedObject var urlPreviewService: URLPreviewService
@@ -1117,11 +1233,21 @@ private struct ClipboardDetailView: View {
 
     private func textPreview(_ text: String) -> some View {
         ScrollView {
-            Text(text)
-                .font(.body)
-                .textSelection(.enabled)
-                .frame(maxWidth: .infinity, alignment: .topLeading)
-                .padding(18)
+            VStack(alignment: .leading, spacing: 12) {
+                Text(String(text.prefix(Self.maximumPreviewCharacters)))
+                    .font(.body)
+                    .frame(maxWidth: .infinity, alignment: .topLeading)
+
+                if text.count > Self.maximumPreviewCharacters {
+                    Label(
+                        "Preview truncated. Use Copy to get the full content.",
+                        systemImage: "ellipsis"
+                    )
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                }
+            }
+            .padding(18)
         }
         .scrollContentBackground(.hidden)
         .background(Color.clear)
@@ -1146,7 +1272,6 @@ private struct ClipboardDetailView: View {
                                 .font(.subheadline)
                                 .foregroundStyle(.secondary)
                                 .lineLimit(2)
-                                .textSelection(.enabled)
                         }
                     }
                 }
@@ -1219,7 +1344,6 @@ private struct URLClipboardPreview: View {
                     .foregroundStyle(.secondary)
                     .lineLimit(2)
                     .truncationMode(.middle)
-                    .textSelection(.enabled)
             }
 
             previewContent
@@ -1366,16 +1490,32 @@ private final class LinkPreviewContainerView: NSView {
 }
 
 private struct SnippetDetailView: View {
+    private static let maximumPreviewCharacters = 1_000
+
     let snippet: Snippet
 
     var body: some View {
         VStack(spacing: 0) {
             ScrollView {
-                Text(snippet.content)
+                VStack(alignment: .leading, spacing: 12) {
+                    Text(
+                        String(
+                            snippet.content.prefix(Self.maximumPreviewCharacters)
+                        )
+                    )
                     .font(.body)
-                    .textSelection(.enabled)
                     .frame(maxWidth: .infinity, alignment: .topLeading)
-                    .padding(18)
+
+                    if snippet.content.count > Self.maximumPreviewCharacters {
+                        Label(
+                            "Preview truncated. Use Copy to get the full content.",
+                            systemImage: "ellipsis"
+                        )
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    }
+                }
+                .padding(18)
             }
             .scrollContentBackground(.hidden)
             .background(Color.clear)
@@ -1440,7 +1580,6 @@ private struct DetailMetadataRow: View {
                 .font(.subheadline)
                 .multilineTextAlignment(.trailing)
                 .lineLimit(2)
-                .textSelection(.enabled)
         }
         .padding(.vertical, 6)
         .overlay(alignment: .bottom) {

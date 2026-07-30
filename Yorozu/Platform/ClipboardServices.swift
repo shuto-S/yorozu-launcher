@@ -141,19 +141,44 @@ enum URLPreviewUnavailableReason: Equatable {
 }
 
 @MainActor
+protocol URLPreviewMetadataProviding: AnyObject {
+    var shouldFetchSubresources: Bool { get set }
+    var timeout: TimeInterval { get set }
+
+    func startFetchingMetadata(
+        for url: URL,
+        completionHandler: @escaping @Sendable (LPLinkMetadata?, Error?) -> Void
+    )
+    func cancel()
+}
+
+extension LPMetadataProvider: URLPreviewMetadataProviding {}
+
+@MainActor
 final class URLPreviewService: ObservableObject {
     @Published private(set) var state: URLPreviewState = .idle
 
     private static let cacheLifetime: TimeInterval = 7 * 86_400
     private let store: LauncherStore?
+    private let metadataProviderFactory: () -> any URLPreviewMetadataProviding
+    private let fetchDelay: Duration
     private var delayedTask: Task<Void, Never>?
-    private var metadataProvider: LPMetadataProvider?
+    private var metadataProvider: (any URLPreviewMetadataProviding)?
     private var requestID = UUID()
     private var requestedRawURL: String?
     private var requestedEnabled = false
+    private var failedPreviewURLs: Set<String> = []
 
-    init(store: LauncherStore?) {
+    init(
+        store: LauncherStore?,
+        metadataProviderFactory: @escaping () -> any URLPreviewMetadataProviding = {
+            LPMetadataProvider()
+        },
+        fetchDelay: Duration = .milliseconds(350)
+    ) {
         self.store = store
+        self.metadataProviderFactory = metadataProviderFactory
+        self.fetchDelay = fetchDelay
     }
 
     func load(rawURL: String, isEnabled: Bool) {
@@ -170,6 +195,10 @@ final class URLPreviewService: ObservableObject {
             }
             return
         }
+        guard !failedPreviewURLs.contains(url.absoluteString) else {
+            state = .unavailable(url, .failed)
+            return
+        }
 
         let currentRequestID = UUID()
         requestID = currentRequestID
@@ -179,7 +208,7 @@ final class URLPreviewService: ObservableObject {
             if await self.loadCachedMetadata(for: url, requestID: currentRequestID) {
                 return
             }
-            try? await Task.sleep(for: .milliseconds(350))
+            try? await Task.sleep(for: self.fetchDelay)
             guard !Task.isCancelled else { return }
             self.fetchMetadata(for: url, requestID: currentRequestID)
         }
@@ -215,7 +244,7 @@ final class URLPreviewService: ObservableObject {
     private func fetchMetadata(for url: URL, requestID: UUID) {
         guard self.requestID == requestID else { return }
 
-        let provider = LPMetadataProvider()
+        let provider = metadataProviderFactory()
         provider.shouldFetchSubresources = true
         provider.timeout = 8
         metadataProvider = provider
@@ -247,6 +276,7 @@ final class URLPreviewService: ObservableObject {
         guard self.requestID == requestID else { return }
         metadataProvider = nil
         guard let metadataData else {
+            failedPreviewURLs.insert(url.absoluteString)
             state = .unavailable(url, .failed)
             return
         }
@@ -752,9 +782,9 @@ struct PasteCoordinatorDependencies {
         sleep: { duration in
             try? await Task.sleep(for: duration)
         },
-        activationPollInterval: .milliseconds(40),
-        activationPollAttempts: 25,
-        activationGracePeriod: .milliseconds(20),
+        activationPollInterval: .milliseconds(16),
+        activationPollAttempts: 20,
+        activationGracePeriod: .milliseconds(8),
         restorationDelay: .milliseconds(800)
     )
 }
