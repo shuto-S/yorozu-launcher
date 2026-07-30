@@ -1,0 +1,26 @@
+# macOS
+.DS_Store
+
+# Xcode user state and build products
+xcuserdata/
+*.xcuserstate
+DerivedData/
+build/
+.build/
+*.xcresult
+
+# SwiftPM local state
+.swiftpm/
+
+# Local code-signing configuration
+Config/Local.xcconfig
+
+# Local databases and runtime data
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+
+# Local visual QA evidence may contain application names or clipboard content.
+audit-artifacts/
+design-qa-artifacts/
+design-qa.md

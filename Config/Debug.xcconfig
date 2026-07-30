@@ -1,0 +1,7 @@
+// Public defaults keep the project buildable without a personal Apple account.
+YOROZU_DEVELOPMENT_TEAM =
+YOROZU_CODE_SIGN_IDENTITY = -
+YOROZU_CODE_SIGN_STYLE = Manual
+
+// Local.xcconfig is ignored by Git and may override the values above.
+#include? "Local.xcconfig"
