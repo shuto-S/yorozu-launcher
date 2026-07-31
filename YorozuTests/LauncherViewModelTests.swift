@@ -495,6 +495,124 @@ final class LauncherViewModelTests: XCTestCase {
         )
     }
 
+    func testCopyingClipboardAndSnippetMovesEachUsedItemFirst() async throws {
+        let now = Date()
+        let newestClipboardItem = ClipboardItem(
+            id: UUID(),
+            kind: .text,
+            contentHash: "newest clipboard",
+            textContent: "Newest clipboard",
+            filePaths: [],
+            imageData: nil,
+            imageByteCount: nil,
+            imageWidth: nil,
+            imageHeight: nil,
+            normalizedSearchText: "newest clipboard",
+            sourceBundleIdentifier: nil,
+            sourceApplicationName: nil,
+            isPinned: false,
+            pinnedAt: nil,
+            copiedAt: now,
+            updatedAt: now
+        )
+        let olderClipboardItem = ClipboardItem(
+            id: UUID(),
+            kind: .text,
+            contentHash: "older clipboard",
+            textContent: "Older clipboard",
+            filePaths: [],
+            imageData: nil,
+            imageByteCount: nil,
+            imageWidth: nil,
+            imageHeight: nil,
+            normalizedSearchText: "older clipboard",
+            sourceBundleIdentifier: nil,
+            sourceApplicationName: nil,
+            isPinned: false,
+            pinnedAt: nil,
+            copiedAt: now.addingTimeInterval(-60),
+            updatedAt: now.addingTimeInterval(-60)
+        )
+        let firstSnippet = try Snippet.validated(
+            name: "A First",
+            keyword: ";first",
+            content: "First",
+            now: now
+        )
+        let secondSnippet = try Snippet.validated(
+            name: "B Second",
+            keyword: ";second",
+            content: "Second",
+            now: now
+        )
+        let defaults = UserDefaults(suiteName: UUID().uuidString)!
+        let viewModel = LauncherViewModel(
+            catalog: ApplicationCatalog(
+                store: nil,
+                discoverer: StubApplicationDiscoverer(applications: [])
+            ),
+            featureCatalog: FeatureCommandCatalog(store: nil),
+            clipboardCatalog: ClipboardCatalog(
+                store: nil,
+                initialItems: [newestClipboardItem, olderClipboardItem]
+            ),
+            snippetCatalog: SnippetCatalog(
+                store: nil,
+                initialSnippets: [firstSnippet, secondSnippet]
+            ),
+            clipboardPreferences: ClipboardPreferences(defaults: defaults),
+            urlPreviewService: URLPreviewService(store: nil),
+            launcher: StubApplicationLauncher(shouldFail: false)
+        )
+        viewModel.copyContent = { _ in true }
+        viewModel.pasteContent = { _, completion in
+            completion(.pasted)
+        }
+        viewModel.start()
+        try await waitUntil {
+            viewModel.clipboardItems.count == 2
+                && viewModel.snippets.count == 2
+        }
+
+        viewModel.prepareForPresentation(route: .clipboard, origin: .direct)
+        viewModel.selectedID = CommandResultID(
+            rawValue: "clipboard:\(olderClipboardItem.id.uuidString)"
+        )
+        viewModel.copySelected()
+        try await waitUntil {
+            viewModel.clipboardItems.first?.id == olderClipboardItem.id
+        }
+        XCTAssertEqual(viewModel.selectedClipboardItem?.id, olderClipboardItem.id)
+
+        viewModel.selectedID = CommandResultID(
+            rawValue: "clipboard:\(newestClipboardItem.id.uuidString)"
+        )
+        viewModel.pasteSelected()
+        try await waitUntil {
+            viewModel.clipboardItems.first?.id == newestClipboardItem.id
+        }
+        XCTAssertEqual(viewModel.selectedClipboardItem?.id, newestClipboardItem.id)
+
+        viewModel.prepareForPresentation(route: .snippets, origin: .direct)
+        viewModel.selectedID = CommandResultID(
+            rawValue: "snippet:\(secondSnippet.id.uuidString)"
+        )
+        viewModel.copySelected()
+        try await waitUntil {
+            viewModel.snippets.first?.id == secondSnippet.id
+        }
+        XCTAssertEqual(viewModel.selectedSnippet?.id, secondSnippet.id)
+
+        viewModel.selectedID = CommandResultID(
+            rawValue: "snippet:\(firstSnippet.id.uuidString)"
+        )
+        viewModel.pasteSelected()
+        try await waitUntil {
+            viewModel.snippets.first?.id == firstSnippet.id
+        }
+        XCTAssertEqual(viewModel.selectedSnippet?.id, firstSnippet.id)
+    }
+
     func testClipboardSnapshotDiffPreservesSelectionAndLatestQueryWins() async throws {
         let now = Date()
         func item(_ title: String, offset: TimeInterval) -> ClipboardItem {

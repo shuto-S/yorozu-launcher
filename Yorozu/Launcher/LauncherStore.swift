@@ -160,9 +160,14 @@ actor LauncherStore {
                         is_pinned,
                         pinned_at,
                         copied_at,
+                        last_used_at,
                         updated_at
                     FROM clipboard_items
-                    ORDER BY is_pinned DESC, pinned_at ASC, copied_at DESC
+                    ORDER BY
+                        is_pinned DESC,
+                        CASE WHEN is_pinned = 1 THEN last_used_at END DESC,
+                        pinned_at ASC,
+                        MAX(copied_at, COALESCE(last_used_at, copied_at)) DESC
                     """
             ).map(Self.clipboardItem(from:))
         }
@@ -291,6 +296,7 @@ actor LauncherStore {
                         is_pinned,
                         pinned_at,
                         copied_at,
+                        last_used_at,
                         updated_at
                     FROM clipboard_items
                     WHERE id = ?
@@ -315,6 +321,22 @@ actor LauncherStore {
                     isPinned,
                     isPinned ? now.timeIntervalSince1970 : nil,
                     now.timeIntervalSince1970,
+                    id.uuidString,
+                ]
+            )
+        }
+    }
+
+    func recordClipboardUse(id: UUID, usedAt: Date = Date()) throws {
+        try databaseQueue.write { database in
+            try database.execute(
+                sql: """
+                    UPDATE clipboard_items
+                    SET last_used_at = ?
+                    WHERE id = ?
+                    """,
+                arguments: [
+                    usedAt.timeIntervalSince1970,
                     id.uuidString,
                 ]
             )
@@ -574,6 +596,13 @@ actor LauncherStore {
                         metadata_data BLOB NOT NULL,
                         fetched_at REAL NOT NULL
                     );
+                """
+            )
+        }
+        migrator.registerMigration("v5_clipboard_usage") { database in
+            try database.execute(
+                sql: """
+                    ALTER TABLE clipboard_items ADD COLUMN last_used_at REAL;
                     """
             )
         }
@@ -619,6 +648,7 @@ actor LauncherStore {
         let filePathsJSON: String? = row["file_paths_json"]
         let pinnedAt: Double? = row["pinned_at"]
         let copiedAt: Double = row["copied_at"]
+        let lastUsedAt: Double? = row["last_used_at"]
         let updatedAt: Double = row["updated_at"]
 
         return ClipboardItem(
@@ -637,6 +667,7 @@ actor LauncherStore {
             isPinned: row["is_pinned"],
             pinnedAt: pinnedAt.map(Date.init(timeIntervalSince1970:)),
             copiedAt: Date(timeIntervalSince1970: copiedAt),
+            lastUsedAt: lastUsedAt.map(Date.init(timeIntervalSince1970:)),
             updatedAt: Date(timeIntervalSince1970: updatedAt)
         )
     }

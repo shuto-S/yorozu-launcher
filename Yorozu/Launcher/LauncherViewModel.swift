@@ -747,6 +747,7 @@ final class LauncherViewModel {
         switch result.payload {
         case .clipboard:
             guard let item = selectedClipboardItem else { return }
+            recordClipboardUse(item.id)
             if item.kind == .image {
                 pasteImageItem(item)
             } else {
@@ -766,6 +767,7 @@ final class LauncherViewModel {
         switch result.payload {
         case .clipboard:
             guard let item = selectedClipboardItem else { return }
+            recordClipboardUse(item.id)
             if item.kind == .image {
                 copyImageItem(item)
             } else {
@@ -773,6 +775,7 @@ final class LauncherViewModel {
             }
         case .snippet:
             guard let snippet = selectedSnippet else { return }
+            recordSnippetUse(snippet.id)
             performCopy(.text(snippet.content))
         case .application, .feature:
             return
@@ -1356,9 +1359,30 @@ final class LauncherViewModel {
     }
 
     private func recordSnippetUse(_ id: UUID) {
+        let usedAt = Date()
         Task {
-            apply(snippetSnapshot: await snippetCatalog.recordUse(id: id))
-            if route == .snippets, query.isEmpty {
+            apply(
+                snippetSnapshot: await snippetCatalog.recordUse(
+                    id: id,
+                    usedAt: usedAt
+                )
+            )
+            if route == .snippets {
+                refreshSearch(preserveSelection: true)
+            }
+        }
+    }
+
+    private func recordClipboardUse(_ id: UUID) {
+        let usedAt = Date()
+        Task {
+            apply(
+                clipboardSnapshot: await clipboardCatalog.recordUse(
+                    id: id,
+                    usedAt: usedAt
+                )
+            )
+            if route == .clipboard {
                 refreshSearch(preserveSelection: true)
             }
         }

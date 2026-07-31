@@ -233,6 +233,57 @@ final class LauncherStoreTests: XCTestCase {
         XCTAssertEqual(items.first?.isPinned, true)
     }
 
+    func testClipboardUsageMovesItemFirstWithoutChangingCopyDate() async throws {
+        let fixture = try makeStore()
+        let olderCopyDate = Date(timeIntervalSince1970: 1_000)
+        let newerCopyDate = Date(timeIntervalSince1970: 2_000)
+        let usedAt = Date(timeIntervalSince1970: 3_000)
+
+        let older = try await fixture.store.recordClipboardCapture(
+            ClipboardCapture(
+                id: UUID(),
+                kind: .text,
+                contentHash: "older",
+                textContent: "Older",
+                filePaths: [],
+                imageData: nil,
+                imageWidth: nil,
+                imageHeight: nil,
+                normalizedSearchText: "older",
+                sourceBundleIdentifier: nil,
+                sourceApplicationName: nil,
+                copiedAt: olderCopyDate
+            ),
+            retentionDays: 30,
+            maximumItems: 2_000
+        )
+        _ = try await fixture.store.recordClipboardCapture(
+            ClipboardCapture(
+                id: UUID(),
+                kind: .text,
+                contentHash: "newer",
+                textContent: "Newer",
+                filePaths: [],
+                imageData: nil,
+                imageWidth: nil,
+                imageHeight: nil,
+                normalizedSearchText: "newer",
+                sourceBundleIdentifier: nil,
+                sourceApplicationName: nil,
+                copiedAt: newerCopyDate
+            ),
+            retentionDays: 30,
+            maximumItems: 2_000
+        )
+
+        try await fixture.store.recordClipboardUse(id: older.id, usedAt: usedAt)
+
+        let items = try await fixture.store.loadClipboardItems()
+        XCTAssertEqual(items.first?.id, older.id)
+        XCTAssertEqual(items.first?.copiedAt, olderCopyDate)
+        XCTAssertEqual(items.first?.lastUsedAt, usedAt)
+    }
+
     func testClipboardImageRoundTrip() async throws {
         let fixture = try makeStore()
         let imageData = Data([0x89, 0x50, 0x4E, 0x47])

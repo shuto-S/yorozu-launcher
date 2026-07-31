@@ -116,6 +116,34 @@ actor ClipboardCatalog {
         }
     }
 
+    func recordUse(
+        id: UUID,
+        usedAt: Date = Date()
+    ) async -> FeatureSnapshot<ClipboardItem> {
+        guard let index = items.firstIndex(where: { $0.id == id }) else {
+            return snapshot(message: nil)
+        }
+
+        guard let store, storageAvailable else {
+            updateUse(at: index, usedAt: usedAt)
+            return snapshot(message: nil)
+        }
+        do {
+            try await store.recordClipboardUse(id: id, usedAt: usedAt)
+            guard let refreshedIndex = items.firstIndex(where: { $0.id == id }) else {
+                return snapshot(message: nil)
+            }
+            updateUse(at: refreshedIndex, usedAt: usedAt)
+            return snapshot(message: nil)
+        } catch {
+            storageAvailable = false
+            if let currentIndex = items.firstIndex(where: { $0.id == id }) {
+                updateUse(at: currentIndex, usedAt: usedAt)
+            }
+            return snapshot(message: "Clipboard usage could not be saved.")
+        }
+    }
+
     func imageData(id: UUID) async -> Data? {
         if let data = items.first(where: { $0.id == id })?.imageData {
             return data
@@ -200,10 +228,19 @@ actor ClipboardCatalog {
         if lhs.isPinned != rhs.isPinned {
             return lhs.isPinned
         }
-        if lhs.isPinned, lhs.pinnedAt != rhs.pinnedAt {
-            return (lhs.pinnedAt ?? .distantFuture) < (rhs.pinnedAt ?? .distantFuture)
+        if lhs.isPinned {
+            if lhs.lastUsedAt != rhs.lastUsedAt {
+                return (lhs.lastUsedAt ?? .distantPast)
+                    > (rhs.lastUsedAt ?? .distantPast)
+            }
+            if lhs.pinnedAt != rhs.pinnedAt {
+                return (lhs.pinnedAt ?? .distantFuture)
+                    < (rhs.pinnedAt ?? .distantFuture)
+            }
         }
-        return lhs.copiedAt > rhs.copiedAt
+        let lhsActivity = max(lhs.copiedAt, lhs.lastUsedAt ?? .distantPast)
+        let rhsActivity = max(rhs.copiedAt, rhs.lastUsedAt ?? .distantPast)
+        return lhsActivity > rhsActivity
     }
 
     private func pruneInMemory(retentionDays: Int, maximumItems: Int, now: Date) {
@@ -285,6 +322,11 @@ actor ClipboardCatalog {
         items.insert(item, at: insertionIndex)
     }
 
+    private func updateUse(at index: Int, usedAt: Date) {
+        items[index].lastUsedAt = usedAt
+        moveUpdatedItemToSortedPosition(at: index)
+    }
+
     private func updateLatestItem() {
         let latest = Self.latestItem(in: items)
         latestItemID = latest?.id
@@ -314,6 +356,7 @@ actor ClipboardCatalog {
             isPinned: false,
             pinnedAt: nil,
             copiedAt: capture.copiedAt,
+            lastUsedAt: nil,
             updatedAt: capture.copiedAt
         )
     }

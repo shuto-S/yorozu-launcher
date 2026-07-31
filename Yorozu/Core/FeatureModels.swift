@@ -194,6 +194,7 @@ struct ClipboardItem: Identifiable, Hashable, Sendable {
     var isPinned: Bool
     var pinnedAt: Date?
     var copiedAt: Date
+    var lastUsedAt: Date? = nil
     var updatedAt: Date
 
     var pasteboardContent: PasteboardContent {
