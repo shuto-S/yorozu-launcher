@@ -1165,7 +1165,14 @@ final class LauncherViewModel {
             resultIndexByID = Self.makeResultIndex(initialResults)
             resultsRevision &+= 1
         }
-        let rememberedSelection = selectionByRoute[newRoute]
+        // Clipboard and Snippets are frequently reopened as fresh pickers.
+        // Their previous selection can be far below the visible viewport, so
+        // always start those routes at the newest/highest-ranked item. Other
+        // routes still restore their selection (for example, returning to the
+        // feature row in Root Search).
+        let rememberedSelection = shouldResetSelectionOnEntry(newRoute)
+            ? nil
+            : selectionByRoute[newRoute]
         let nextSelection: CommandResultID?
         if let rememberedSelection,
            initialResults.contains(where: { $0.id == rememberedSelection }) {
@@ -1191,6 +1198,10 @@ final class LauncherViewModel {
         } else if newRoute != .settings {
             refreshSearch(preserveSelection: true)
         }
+    }
+
+    private func shouldResetSelectionOnEntry(_ route: PaletteRoute) -> Bool {
+        route == .clipboard || route == .snippets
     }
 
     private func cachedDefaultResults(

@@ -368,19 +368,19 @@ final class LauncherViewModelTests: XCTestCase {
         XCTAssertEqual(viewModel.selectedClipboardItem?.id, second.id)
     }
 
-    func testFeatureRouteTransitionPublishesCachedTargetResultsImmediately() async throws {
+    func testFeatureRouteTransitionPublishesCachedResultsAndResetsPickerSelection() async throws {
         let now = Date()
-        let clipboardItem = ClipboardItem(
+        let firstClipboardItem = ClipboardItem(
             id: UUID(),
             kind: .text,
-            contentHash: "clipboard",
-            textContent: "Clipboard value",
+            contentHash: "new clipboard",
+            textContent: "New clipboard value",
             filePaths: [],
             imageData: nil,
             imageByteCount: nil,
             imageWidth: nil,
             imageHeight: nil,
-            normalizedSearchText: "clipboard value",
+            normalizedSearchText: "new clipboard value",
             sourceBundleIdentifier: nil,
             sourceApplicationName: nil,
             isPinned: false,
@@ -388,10 +388,34 @@ final class LauncherViewModelTests: XCTestCase {
             copiedAt: now,
             updatedAt: now
         )
-        let snippet = try Snippet.validated(
-            name: "Greeting",
+        let secondClipboardItem = ClipboardItem(
+            id: UUID(),
+            kind: .text,
+            contentHash: "old clipboard",
+            textContent: "Old clipboard value",
+            filePaths: [],
+            imageData: nil,
+            imageByteCount: nil,
+            imageWidth: nil,
+            imageHeight: nil,
+            normalizedSearchText: "old clipboard value",
+            sourceBundleIdentifier: nil,
+            sourceApplicationName: nil,
+            isPinned: false,
+            pinnedAt: nil,
+            copiedAt: now.addingTimeInterval(-1),
+            updatedAt: now.addingTimeInterval(-1)
+        )
+        let firstSnippet = try Snippet.validated(
+            name: "A Greeting",
             keyword: ";hello",
             content: "Hello",
+            now: now
+        )
+        let secondSnippet = try Snippet.validated(
+            name: "B Farewell",
+            keyword: ";bye",
+            content: "Goodbye",
             now: now
         )
         let defaults = UserDefaults(suiteName: UUID().uuidString)!
@@ -403,11 +427,11 @@ final class LauncherViewModelTests: XCTestCase {
             featureCatalog: FeatureCommandCatalog(store: nil),
             clipboardCatalog: ClipboardCatalog(
                 store: nil,
-                initialItems: [clipboardItem]
+                initialItems: [secondClipboardItem, firstClipboardItem]
             ),
             snippetCatalog: SnippetCatalog(
                 store: nil,
-                initialSnippets: [snippet]
+                initialSnippets: [secondSnippet, firstSnippet]
             ),
             clipboardPreferences: ClipboardPreferences(defaults: defaults),
             urlPreviewService: URLPreviewService(store: nil),
@@ -415,22 +439,60 @@ final class LauncherViewModelTests: XCTestCase {
         )
         viewModel.start()
         try await waitUntil {
-            viewModel.clipboardItems.count == 1
-                && viewModel.snippets.count == 1
+            viewModel.clipboardItems.count == 2
+                && viewModel.snippets.count == 2
         }
 
         viewModel.prepareForPresentation(route: .clipboard, origin: .direct)
         XCTAssertEqual(viewModel.route, .clipboard)
-        XCTAssertEqual(viewModel.results.map(\.kind), [.clipboard])
-        let clipboardSelection = viewModel.selectedID
+        XCTAssertEqual(viewModel.results.map(\.kind), [.clipboard, .clipboard])
+        XCTAssertEqual(
+            viewModel.selectedID,
+            CommandResultID(rawValue: "clipboard:\(firstClipboardItem.id.uuidString)")
+        )
+        viewModel.moveSelection(by: 1)
+        XCTAssertEqual(
+            viewModel.selectedID,
+            CommandResultID(rawValue: "clipboard:\(secondClipboardItem.id.uuidString)")
+        )
+        viewModel.paletteDidHide()
+        viewModel.prepareForPresentation(route: .clipboard, origin: .direct)
+        XCTAssertEqual(
+            viewModel.selectedID,
+            CommandResultID(rawValue: "clipboard:\(firstClipboardItem.id.uuidString)")
+        )
 
         viewModel.prepareForPresentation(route: .snippets, origin: .direct)
         XCTAssertEqual(viewModel.route, .snippets)
-        XCTAssertEqual(viewModel.results.map(\.kind), [.snippet])
+        XCTAssertEqual(viewModel.results.map(\.kind), [.snippet, .snippet])
+        XCTAssertEqual(
+            viewModel.selectedID,
+            CommandResultID(rawValue: "snippet:\(firstSnippet.id.uuidString)")
+        )
+        viewModel.moveSelection(by: 1)
+        XCTAssertEqual(
+            viewModel.selectedID,
+            CommandResultID(rawValue: "snippet:\(secondSnippet.id.uuidString)")
+        )
+        viewModel.paletteDidHide()
+        viewModel.prepareForPresentation(route: .snippets, origin: .direct)
+        XCTAssertEqual(
+            viewModel.selectedID,
+            CommandResultID(rawValue: "snippet:\(firstSnippet.id.uuidString)")
+        )
 
         viewModel.prepareForPresentation(route: .clipboard, origin: .direct)
-        XCTAssertEqual(viewModel.results.map(\.kind), [.clipboard])
-        XCTAssertEqual(viewModel.selectedID, clipboardSelection)
+        XCTAssertEqual(viewModel.results.map(\.kind), [.clipboard, .clipboard])
+        XCTAssertEqual(
+            viewModel.selectedID,
+            CommandResultID(rawValue: "clipboard:\(firstClipboardItem.id.uuidString)")
+        )
+
+        viewModel.prepareForPresentation(route: .snippets, origin: .direct)
+        XCTAssertEqual(
+            viewModel.selectedID,
+            CommandResultID(rawValue: "snippet:\(firstSnippet.id.uuidString)")
+        )
     }
 
     func testClipboardSnapshotDiffPreservesSelectionAndLatestQueryWins() async throws {
