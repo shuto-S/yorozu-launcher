@@ -37,7 +37,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private lazy var clipboardMonitor = ClipboardMonitor(
         reader: SystemPasteboardReader(),
-        preferences: clipboardPreferences,
+        settings: clipboardPreferences.recordingSettings,
         catalog: clipboardCatalog,
         onSnapshot: { [weak self] snapshot in
             self?.viewModel.handleClipboardSnapshot(snapshot)
@@ -84,6 +84,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         viewModel.start()
+        clipboardPreferences.recordingSettingsDidChange = { [weak self] settings in
+            guard let self else { return }
+            Task {
+                await self.clipboardMonitor.update(settings: settings)
+            }
+        }
         Task {
             await clipboardMonitor.start()
         }

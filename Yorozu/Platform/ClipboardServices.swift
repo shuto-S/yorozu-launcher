@@ -59,19 +59,31 @@ final class ClipboardPreferences: ObservableObject {
     ]
 
     @Published var isEnabled: Bool {
-        didSet { defaults.set(isEnabled, forKey: Key.isEnabled) }
+        didSet {
+            defaults.set(isEnabled, forKey: Key.isEnabled)
+            recordingSettingsDidChange?(recordingSettings)
+        }
     }
 
     @Published var isPaused: Bool {
-        didSet { defaults.set(isPaused, forKey: Key.isPaused) }
+        didSet {
+            defaults.set(isPaused, forKey: Key.isPaused)
+            recordingSettingsDidChange?(recordingSettings)
+        }
     }
 
     @Published var retentionDays: Int {
-        didSet { defaults.set(retentionDays, forKey: Key.retentionDays) }
+        didSet {
+            defaults.set(retentionDays, forKey: Key.retentionDays)
+            recordingSettingsDidChange?(recordingSettings)
+        }
     }
 
     @Published var maximumItems: Int {
-        didSet { defaults.set(maximumItems, forKey: Key.maximumItems) }
+        didSet {
+            defaults.set(maximumItems, forKey: Key.maximumItems)
+            recordingSettingsDidChange?(recordingSettings)
+        }
     }
 
     @Published var excludedBundleIdentifiers: Set<String> {
@@ -80,6 +92,7 @@ final class ClipboardPreferences: ObservableObject {
                 Array(excludedBundleIdentifiers).sorted(),
                 forKey: Key.excludedBundleIdentifiers
             )
+            recordingSettingsDidChange?(recordingSettings)
         }
     }
 
@@ -88,6 +101,7 @@ final class ClipboardPreferences: ObservableObject {
     }
 
     private let defaults: UserDefaults
+    var recordingSettingsDidChange: ((ClipboardRecordingSettings) -> Void)?
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
@@ -159,6 +173,7 @@ final class URLPreviewService: ObservableObject {
     @Published private(set) var state: URLPreviewState = .idle
 
     private static let cacheLifetime: TimeInterval = 7 * 86_400
+    private static let maximumFailedPreviewCount = 256
     private let store: LauncherStore?
     private let metadataProviderFactory: () -> any URLPreviewMetadataProviding
     private let fetchDelay: Duration
@@ -277,6 +292,10 @@ final class URLPreviewService: ObservableObject {
         metadataProvider = nil
         guard let metadataData else {
             failedPreviewURLs.insert(url.absoluteString)
+            if failedPreviewURLs.count > Self.maximumFailedPreviewCount,
+               let oldestArbitraryEntry = failedPreviewURLs.first {
+                failedPreviewURLs.remove(oldestArbitraryEntry)
+            }
             state = .unavailable(url, .failed)
             return
         }
@@ -513,9 +532,9 @@ private extension PasteboardContent {
 actor ClipboardMonitor {
     private let reader: SystemPasteboardReader
     private let processor: ClipboardCaptureProcessor
-    private let preferences: ClipboardPreferences
     private let catalog: ClipboardCatalog
     private let onSnapshot: @MainActor @Sendable (FeatureSnapshot<ClipboardItem>) -> Void
+    private var settings: ClipboardRecordingSettings
     private var task: Task<Void, Never>?
     private var captureTask: Task<Void, Never>?
     private var captureGeneration = 0
@@ -525,13 +544,13 @@ actor ClipboardMonitor {
     init(
         reader: SystemPasteboardReader,
         processor: ClipboardCaptureProcessor = ClipboardCaptureProcessor(),
-        preferences: ClipboardPreferences,
+        settings: ClipboardRecordingSettings,
         catalog: ClipboardCatalog,
         onSnapshot: @escaping @MainActor @Sendable (FeatureSnapshot<ClipboardItem>) -> Void
     ) {
         self.reader = reader
         self.processor = processor
-        self.preferences = preferences
+        self.settings = settings
         self.catalog = catalog
         self.onSnapshot = onSnapshot
     }
@@ -557,14 +576,19 @@ actor ClipboardMonitor {
         suppressionDeadline = Date().addingTimeInterval(interval)
     }
 
+    func update(settings: ClipboardRecordingSettings) {
+        self.settings = settings
+    }
+
     private func runLoop() async {
         var wasRecording = false
         while !Task.isCancelled {
-            let settings = await preferences.recordingSettings
-            let isRecording = settings.isEnabled && !settings.isPaused
+            let currentSettings = settings
+            let isRecording =
+                currentSettings.isEnabled && !currentSettings.isPaused
             if isRecording {
                 if wasRecording {
-                    await poll(settings: settings)
+                    await poll(settings: currentSettings)
                 } else {
                     // Establish a new baseline so content copied while recording
                     // was disabled or paused is never imported retroactively.

@@ -3,10 +3,7 @@ import AppKit
 import SwiftUI
 
 struct PaletteView: View {
-    @ObservedObject var viewModel: LauncherViewModel
-    @State private var visibleResults = ResultVisibilityTracker()
-    @State private var hoveredResultID: CommandResultID?
-    @FocusState private var focusedResultID: CommandResultID?
+    @Bindable var viewModel: LauncherViewModel
 
     var body: some View {
         ZStack(alignment: .bottomTrailing) {
@@ -164,24 +161,27 @@ struct PaletteView: View {
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-        } else if viewModel.route == .root {
-            resultList(compact: false)
         } else {
-            featureSplitView
+            commandResults
         }
     }
 
-    private var featureSplitView: some View {
+    private var commandResults: some View {
         HStack(spacing: 0) {
-            resultList(compact: true)
-                .frame(width: 320)
+            CommandResultsListView(
+                viewModel: viewModel,
+                compact: viewModel.route != .root
+            )
+            .frame(width: viewModel.route == .root ? nil : 320)
 
-            Divider()
-                .accessibilityHidden(true)
+            if viewModel.route != .root {
+                Divider()
+                    .accessibilityHidden(true)
 
-            DeferredFeatureDetailView(viewModel: viewModel)
-                .id(viewModel.route)
-                .frame(minWidth: 380, maxWidth: .infinity, maxHeight: .infinity)
+                DeferredFeatureDetailView(viewModel: viewModel)
+                    .id(viewModel.route)
+                    .frame(minWidth: 380, maxWidth: .infinity, maxHeight: .infinity)
+            }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color.clear)
@@ -225,92 +225,149 @@ struct PaletteView: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else {
-            resultList(compact: true)
+            CommandResultsListView(viewModel: viewModel, compact: true)
         }
     }
 
-    private func resultList(compact: Bool) -> some View {
+    private var footer: some View {
+        HStack {
+            if let errorMessage = viewModel.errorMessage {
+                Label(errorMessage, systemImage: "exclamationmark.triangle")
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            } else if viewModel.isIndexing, viewModel.route == .root {
+                ProgressView()
+                    .controlSize(.small)
+                Text("Indexing applications…")
+                    .foregroundStyle(.secondary)
+            } else {
+                Text(viewModel.footerText)
+                    .foregroundStyle(.secondary)
+            }
+
+            Spacer()
+
+            HStack(spacing: 10) {
+                ForEach(viewModel.footerActions) { action in
+                    Button {
+                        viewModel.performFooterAction(action.id)
+                    } label: {
+                        HStack(spacing: 5) {
+                            Text(action.shortcut)
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(.primary)
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 3)
+                                .background(
+                                    .quinary,
+                                    in: RoundedRectangle(cornerRadius: 6)
+                                )
+                                .overlay {
+                                    RoundedRectangle(cornerRadius: 6)
+                                        .stroke(.quaternary, lineWidth: 1)
+                                }
+                                .accessibilityHidden(true)
+
+                            Text(action.title)
+                                .foregroundStyle(.secondary)
+                        }
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(!viewModel.isFooterActionEnabled(action.id))
+                    .accessibilityIdentifier("launcher.footer.\(action.id.rawValue)")
+                    .accessibilityLabel("\(action.title), \(action.shortcut)")
+                    .help("\(action.title) (\(action.shortcut))")
+                }
+            }
+        }
+        .font(.footnote)
+        .padding(.horizontal, 14)
+        .frame(height: 42)
+    }
+
+}
+
+private struct CommandResultsListView: View {
+    @Bindable var viewModel: LauncherViewModel
+    let compact: Bool
+
+    @State private var visibleResults = ResultVisibilityTracker()
+    @State private var hoveredResultID: CommandResultID?
+    @FocusState private var focusedResultID: CommandResultID?
+
+    var body: some View {
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(spacing: 0) {
                     ForEach(viewModel.results) { result in
-                        Group {
-                            if compact {
-                                if viewModel.route == .aliases {
-                                    AliasCommandResultRow(result: result)
-                                } else {
-                                    CompactCommandResultRow(result: result)
-                                }
-                            } else {
-                                CommandResultRow(result: result)
-                            }
-                        }
-                        .padding(
-                            EdgeInsets(
-                                top: 6,
-                                leading: 8,
-                                bottom: 6,
-                                trailing: 10
+                        resultRow(result)
+                            .padding(
+                                EdgeInsets(
+                                    top: 6,
+                                    leading: 8,
+                                    bottom: 6,
+                                    trailing: 10
+                                )
                             )
-                        )
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .contentShape(Rectangle())
-                        .background {
-                            if viewModel.selectedID == result.id {
-                                RoundedRectangle(cornerRadius: 7, style: .continuous)
-                                    .fill(.quaternary)
-                            } else if hoveredResultID == result.id {
-                                RoundedRectangle(cornerRadius: 7, style: .continuous)
-                                    .fill(.quinary)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .contentShape(Rectangle())
+                            .background {
+                                if viewModel.selectedID == result.id {
+                                    RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                        .fill(.quaternary)
+                                } else if hoveredResultID == result.id {
+                                    RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                        .fill(.quinary)
+                                }
                             }
-                        }
-                        .overlay(alignment: .bottom) {
-                            Divider()
-                                .padding(.horizontal, 6)
-                        }
-                        .id(result.id)
-                        .focusable()
-                        .focused($focusedResultID, equals: result.id)
-                        .accessibilityElement(children: .combine)
-                        .accessibilityLabel(result.title)
-                        .accessibilityIdentifier(
-                            "launcher.row.\(result.id.rawValue)"
-                        )
-                        .accessibilityAddTraits(
-                            viewModel.selectedID == result.id
-                                ? [.isButton, .isSelected]
-                                : [.isButton]
-                        )
-                        .accessibilityAction {
-                            viewModel.selectedID = result.id
-                            viewModel.performPrimaryAction()
-                        }
-                        .onTapGesture(count: 2) {
-                            viewModel.selectedID = result.id
-                            viewModel.performPrimaryAction()
-                        }
-                        .simultaneousGesture(
-                            TapGesture().onEnded {
+                            .overlay(alignment: .bottom) {
+                                Divider()
+                                    .padding(.horizontal, 6)
+                            }
+                            .id(result.id)
+                            .focusable()
+                            .focused($focusedResultID, equals: result.id)
+                            .accessibilityElement(children: .combine)
+                            .accessibilityLabel(result.title)
+                            .accessibilityIdentifier(
+                                "launcher.row.\(result.id.rawValue)"
+                            )
+                            .accessibilityAddTraits(
+                                viewModel.selectedID == result.id
+                                    ? [.isButton, .isSelected]
+                                    : [.isButton]
+                            )
+                            .accessibilityAction {
                                 viewModel.selectedID = result.id
+                                viewModel.performPrimaryAction()
                             }
-                        )
-                        .onHover { isHovering in
-                            if isHovering {
-                                hoveredResultID = result.id
-                            } else if hoveredResultID == result.id {
-                                hoveredResultID = nil
+                            .onTapGesture(count: 2) {
+                                viewModel.selectedID = result.id
+                                viewModel.performPrimaryAction()
                             }
-                        }
-                        .onScrollVisibilityChange(threshold: 0.999) { isVisible in
-                            if isVisible {
-                                visibleResults.ids.insert(result.id)
-                            } else {
-                                visibleResults.ids.remove(result.id)
+                            .simultaneousGesture(
+                                TapGesture().onEnded {
+                                    viewModel.selectedID = result.id
+                                }
+                            )
+                            .onHover { isHovering in
+                                if isHovering {
+                                    hoveredResultID = result.id
+                                } else if hoveredResultID == result.id {
+                                    hoveredResultID = nil
+                                }
                             }
-                        }
-                        .contextMenu {
-                            contextMenu(for: result)
-                        }
+                            .onScrollVisibilityChange(threshold: 0.999) { isVisible in
+                                if isVisible {
+                                    visibleResults.ids.insert(result.id)
+                                } else {
+                                    visibleResults.ids.remove(result.id)
+                                }
+                            }
+                            .contextMenu {
+                                contextMenu(for: result)
+                            }
                     }
                 }
                 .padding(.horizontal, 4)
@@ -343,9 +400,7 @@ struct PaletteView: View {
             }
             .onChange(of: focusedResultID) { _, focusedResultID in
                 guard let focusedResultID,
-                      viewModel.results.contains(
-                          where: { $0.id == focusedResultID }
-                      ) else {
+                      viewModel.resultIndex(for: focusedResultID) != nil else {
                     return
                 }
                 viewModel.selectedID = focusedResultID
@@ -359,17 +414,26 @@ struct PaletteView: View {
         }
     }
 
+    @ViewBuilder
+    private func resultRow(_ result: CommandResult) -> some View {
+        if compact {
+            if viewModel.route == .aliases {
+                AliasCommandResultRow(result: result)
+            } else {
+                CompactCommandResultRow(result: result)
+            }
+        } else {
+            CommandResultRow(result: result)
+        }
+    }
+
     private func selectionScrollAnchor(
         from previousID: CommandResultID?,
         to selectedID: CommandResultID
     ) -> UnitPoint {
         guard let previousID,
-              let previousIndex = viewModel.results.firstIndex(
-                  where: { $0.id == previousID }
-              ),
-              let selectedIndex = viewModel.results.firstIndex(
-                  where: { $0.id == selectedID }
-              ) else {
+              let previousIndex = viewModel.resultIndex(for: previousID),
+              let selectedIndex = viewModel.resultIndex(for: selectedID) else {
             return .center
         }
 
@@ -477,63 +541,6 @@ struct PaletteView: View {
         }
     }
 
-    private var footer: some View {
-        HStack {
-            if let errorMessage = viewModel.errorMessage {
-                Label(errorMessage, systemImage: "exclamationmark.triangle")
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-            } else if viewModel.isIndexing, viewModel.route == .root {
-                ProgressView()
-                    .controlSize(.small)
-                Text("Indexing applications…")
-                    .foregroundStyle(.secondary)
-            } else {
-                Text(viewModel.footerText)
-                    .foregroundStyle(.secondary)
-            }
-
-            Spacer()
-
-            HStack(spacing: 10) {
-                ForEach(viewModel.footerActions) { action in
-                    Button {
-                        viewModel.performFooterAction(action.id)
-                    } label: {
-                        HStack(spacing: 5) {
-                            Text(action.shortcut)
-                                .font(.caption.weight(.semibold))
-                                .foregroundStyle(.primary)
-                                .padding(.horizontal, 6)
-                                .padding(.vertical, 3)
-                                .background(
-                                    .quinary,
-                                    in: RoundedRectangle(cornerRadius: 6)
-                                )
-                                .overlay {
-                                    RoundedRectangle(cornerRadius: 6)
-                                        .stroke(.quaternary, lineWidth: 1)
-                                }
-                                .accessibilityHidden(true)
-
-                            Text(action.title)
-                                .foregroundStyle(.secondary)
-                        }
-                        .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                    .disabled(!viewModel.isFooterActionEnabled(action.id))
-                    .accessibilityIdentifier("launcher.footer.\(action.id.rawValue)")
-                    .accessibilityLabel("\(action.title), \(action.shortcut)")
-                    .help("\(action.title) (\(action.shortcut))")
-                }
-            }
-        }
-        .font(.footnote)
-        .padding(.horizontal, 14)
-        .frame(height: 42)
-    }
-
     private func select(_ result: CommandResult, action: () -> Void) {
         viewModel.selectedID = result.id
         action()
@@ -546,7 +553,7 @@ private final class ResultVisibilityTracker {
 }
 
 private struct ActionPanelView: View {
-    @ObservedObject var viewModel: LauncherViewModel
+    @Bindable var viewModel: LauncherViewModel
     @FocusState private var isSearchFocused: Bool
 
     var body: some View {
@@ -724,14 +731,7 @@ private struct CommandResultRow: View {
     }
 
     private var isPinned: Bool {
-        switch result.payload {
-        case let .application(application):
-            application.preference.isPinned
-        case let .clipboard(item):
-            item.isPinned
-        case .feature, .snippet:
-            false
-        }
+        result.isPinned
     }
 }
 
@@ -749,7 +749,7 @@ private struct CompactCommandResultRow: View {
 
             Spacer(minLength: 6)
 
-            if case let .clipboard(item) = result.payload, item.isPinned {
+            if result.kind == .clipboard, result.isPinned {
                 Image(systemName: "pin.fill")
                     .foregroundStyle(.secondary)
                     .accessibilityLabel("Pinned")
@@ -827,7 +827,7 @@ private struct CommandIconView: View {
 }
 
 private struct AliasDetailView: View {
-    @ObservedObject var viewModel: LauncherViewModel
+    @Bindable var viewModel: LauncherViewModel
     @FocusState private var focusedField: Field?
 
     private enum Field {
@@ -1104,7 +1104,7 @@ private struct AliasDetailView: View {
 }
 
 private struct FeatureDetailView: View {
-    let result: CommandResult?
+    let content: FeatureDetailContent?
     @ObservedObject var clipboardPreferences: ClipboardPreferences
     @ObservedObject var urlPreviewService: URLPreviewService
     let selectedClipboardImage: CGImage?
@@ -1112,7 +1112,7 @@ private struct FeatureDetailView: View {
 
     var body: some View {
         Group {
-            switch result?.payload {
+            switch content {
             case let .clipboard(item):
                 ClipboardDetailView(
                     item: item,
@@ -1138,16 +1138,30 @@ private struct FeatureDetailView: View {
 }
 
 private struct DeferredFeatureDetailView: View {
-    @ObservedObject var viewModel: LauncherViewModel
-    @State private var displayedResult: CommandResult?
+    var viewModel: LauncherViewModel
+    @State private var displayedContent: FeatureDetailContent?
 
     private var selectionKey: FeatureDetailSelectionKey {
-        FeatureDetailSelectionKey(result: viewModel.selectedResult)
+        FeatureDetailSelectionKey(
+            result: viewModel.selectedResult,
+            clipboardItem: viewModel.selectedClipboardItem,
+            snippet: viewModel.selectedSnippet
+        )
+    }
+
+    private var selectedContent: FeatureDetailContent? {
+        if let item = viewModel.selectedClipboardItem {
+            return .clipboard(item)
+        }
+        if let snippet = viewModel.selectedSnippet {
+            return .snippet(snippet)
+        }
+        return nil
     }
 
     var body: some View {
         FeatureDetailView(
-            result: displayedResult,
+            content: displayedContent,
             clipboardPreferences: viewModel.clipboardPreferences,
             urlPreviewService: viewModel.urlPreviewService,
             selectedClipboardImage: viewModel.selectedClipboardImage,
@@ -1162,16 +1176,25 @@ private struct DeferredFeatureDetailView: View {
                 return
             }
             guard !Task.isCancelled else { return }
-            displayedResult = viewModel.selectedResult
+            displayedContent = selectedContent
         }
     }
+}
+
+private enum FeatureDetailContent {
+    case clipboard(ClipboardItem)
+    case snippet(Snippet)
 }
 
 private struct FeatureDetailSelectionKey: Hashable {
     let id: CommandResultID?
     let revision: Revision
 
-    init(result: CommandResult?) {
+    init(
+        result: CommandResult?,
+        clipboardItem: ClipboardItem?,
+        snippet: Snippet?
+    ) {
         id = result?.id
         switch result?.payload {
         case let .application(application):
@@ -1181,10 +1204,10 @@ private struct FeatureDetailSelectionKey: Hashable {
                 launchCount: application.preference.launchCount,
                 lastLaunchedAt: application.preference.lastLaunchedAt
             )
-        case let .clipboard(item):
-            revision = .dated(item.updatedAt)
-        case let .snippet(snippet):
-            revision = .dated(snippet.updatedAt)
+        case .clipboard:
+            revision = clipboardItem.map { .dated($0.updatedAt) } ?? .none
+        case .snippet:
+            revision = snippet.map { .dated($0.updatedAt) } ?? .none
         case let .feature(feature):
             revision = .feature(feature)
         case nil:

@@ -13,6 +13,7 @@ struct ApplicationProvider: CommandProvider {
                 subtitle: $0.subtitle,
                 icon: .application($0.canonicalURL),
                 score: 0,
+                isPinned: $0.preference.isPinned,
                 payload: .application($0)
             )
         }

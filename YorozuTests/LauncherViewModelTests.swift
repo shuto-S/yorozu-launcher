@@ -705,6 +705,18 @@ final class LauncherViewModelTests: XCTestCase {
             fixture.viewModel.results.map(\.title),
             ["Snippets", "Fixture", "Aliases", "Clipboard History", "Settings"]
         )
+
+        fixture.viewModel.query = "Fixture"
+        try await waitUntil {
+            fixture.viewModel.results.map(\.title) == ["Fixture"]
+        }
+
+        fixture.viewModel.prepareForPresentation(route: .root, origin: .direct)
+
+        XCTAssertEqual(
+            fixture.viewModel.results.map(\.title),
+            ["Snippets", "Fixture", "Aliases", "Clipboard History", "Settings"]
+        )
     }
 
     func testRootActionPanelOpensAliasesEditorForSelectedApplication() async throws {

@@ -4,11 +4,17 @@ actor ClipboardCatalog {
     private let store: LauncherStore?
     private var items: [ClipboardItem] = []
     private var storageAvailable: Bool
+    private var latestItemID: UUID?
+    private var latestContentHash: String?
+    private var writesSinceMaintenance = 0
 
     init(store: LauncherStore?, initialItems: [ClipboardItem] = []) {
         self.store = store
         items = initialItems.sorted(by: Self.sort)
         storageAvailable = store != nil
+        let latest = Self.latestItem(in: items)
+        latestItemID = latest?.id
+        latestContentHash = latest?.contentHash
     }
 
     func load() async -> FeatureSnapshot<ClipboardItem> {
@@ -17,6 +23,7 @@ actor ClipboardCatalog {
         }
         do {
             items = try await store.loadClipboardItems().sorted(by: Self.sort)
+            updateLatestItem()
             return snapshot(message: nil)
         } catch {
             storageAvailable = false
@@ -51,10 +58,14 @@ actor ClipboardCatalog {
             return snapshot(message: "Clipboard history is available only for this session.")
         }
         do {
+            writesSinceMaintenance += 1
+            let performsFullMaintenance =
+                capture.kind == .image || writesSinceMaintenance >= 32
             let persistedItem = try await store.recordClipboardCapture(
                 capture,
                 retentionDays: retentionDays,
-                maximumItems: maximumItems
+                maximumItems: maximumItems,
+                performsFullMaintenance: performsFullMaintenance
             )
             upsert(persistedItem)
             pruneInMemory(
@@ -62,6 +73,9 @@ actor ClipboardCatalog {
                 maximumItems: maximumItems,
                 now: capture.copiedAt
             )
+            if performsFullMaintenance {
+                writesSinceMaintenance = 0
+            }
             return snapshot(message: nil)
         } catch {
             storageAvailable = false
@@ -118,11 +132,17 @@ actor ClipboardCatalog {
     func delete(id: UUID) async -> FeatureSnapshot<ClipboardItem> {
         guard let store, storageAvailable else {
             items.removeAll(where: { $0.id == id })
+            if latestItemID == id {
+                updateLatestItem()
+            }
             return snapshot(message: "The item was removed only for this session.")
         }
         do {
             try await store.deleteClipboardItem(id: id)
             items.removeAll(where: { $0.id == id })
+            if latestItemID == id {
+                updateLatestItem()
+            }
             return snapshot(message: nil)
         } catch {
             storageAvailable = false
@@ -190,46 +210,62 @@ actor ClipboardCatalog {
         let cutoff = now.addingTimeInterval(
             -Double(max(1, retentionDays)) * 86_400
         )
-        let pinned = items.filter(\.isPinned)
-        let unpinnedCandidates = items
-            .filter { !$0.isPinned && $0.copiedAt >= cutoff }
-            .sorted { $0.copiedAt > $1.copiedAt }
-            .prefix(max(1, maximumItems))
-
+        var retained: [ClipboardItem] = []
+        retained.reserveCapacity(min(items.count, max(1, maximumItems) + 16))
+        var unpinnedCount = 0
         var retainedImageBytes = 0
-        let unpinned = unpinnedCandidates.filter { item in
-            guard item.kind == .image else { return true }
-            let byteCount = item.imageByteCount ?? item.imageData?.count ?? 0
-            guard retainedImageBytes + byteCount
-                    <= ClipboardStoragePolicy.maximumUnpinnedImageBytes else {
-                return false
+        for item in items {
+            if item.isPinned {
+                retained.append(item)
+                continue
             }
-            retainedImageBytes += byteCount
-            return true
+            guard item.copiedAt >= cutoff,
+                  unpinnedCount < max(1, maximumItems) else {
+                continue
+            }
+            if item.kind == .image {
+                let byteCount = item.imageByteCount ?? item.imageData?.count ?? 0
+                guard retainedImageBytes + byteCount
+                        <= ClipboardStoragePolicy.maximumUnpinnedImageBytes else {
+                    continue
+                }
+                retainedImageBytes += byteCount
+            }
+            retained.append(item)
+            unpinnedCount += 1
         }
-        items = pinned + unpinned
+        items = retained
+        if let latestItemID,
+           !items.contains(where: { $0.id == latestItemID }) {
+            updateLatestItem()
+        }
     }
 
     private func merge(capture: ClipboardCapture) {
-        if let latest = items.max(by: { $0.copiedAt < $1.copiedAt }),
-           latest.contentHash == capture.contentHash,
-           let index = items.firstIndex(where: { $0.id == latest.id }) {
+        if latestContentHash == capture.contentHash,
+           let latestItemID,
+           let index = items.firstIndex(where: { $0.id == latestItemID }) {
             items[index].copiedAt = capture.copiedAt
             items[index].updatedAt = capture.copiedAt
+            moveUpdatedItemToSortedPosition(at: index)
+            latestContentHash = capture.contentHash
         } else {
             upsert(Self.item(from: capture))
-            return
         }
-        items.sort(by: Self.sort)
     }
 
     private func upsert(_ item: ClipboardItem) {
         if let index = items.firstIndex(where: { $0.id == item.id }) {
             items[index] = item
+            moveUpdatedItemToSortedPosition(at: index)
         } else {
-            items.append(item)
+            let insertionIndex = items.firstIndex(where: {
+                Self.sort(item, $0)
+            }) ?? items.endIndex
+            items.insert(item, at: insertionIndex)
         }
-        items.sort(by: Self.sort)
+        latestItemID = item.id
+        latestContentHash = item.contentHash
     }
 
     private func removeClearedItems(includePinned: Bool) {
@@ -238,6 +274,27 @@ actor ClipboardCatalog {
         } else {
             items.removeAll(where: { !$0.isPinned })
         }
+        updateLatestItem()
+    }
+
+    private func moveUpdatedItemToSortedPosition(at index: Int) {
+        let item = items.remove(at: index)
+        let insertionIndex = items.firstIndex(where: {
+            Self.sort(item, $0)
+        }) ?? items.endIndex
+        items.insert(item, at: insertionIndex)
+    }
+
+    private func updateLatestItem() {
+        let latest = Self.latestItem(in: items)
+        latestItemID = latest?.id
+        latestContentHash = latest?.contentHash
+    }
+
+    private nonisolated static func latestItem(
+        in items: [ClipboardItem]
+    ) -> ClipboardItem? {
+        items.max(by: { $0.copiedAt < $1.copiedAt })
     }
 
     private nonisolated static func item(from capture: ClipboardCapture) -> ClipboardItem {

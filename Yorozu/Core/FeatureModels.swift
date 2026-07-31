@@ -379,8 +379,8 @@ struct Snippet: Identifiable, Hashable, Sendable {
 enum CommandPayload: Hashable, Sendable {
     case application(LaunchableApplication)
     case feature(FeatureCommand)
-    case clipboard(ClipboardItem)
-    case snippet(Snippet)
+    case clipboard(UUID)
+    case snippet(UUID)
 }
 
 struct CommandResult: Identifiable, Hashable, Sendable {
@@ -390,6 +390,7 @@ struct CommandResult: Identifiable, Hashable, Sendable {
     let subtitle: String
     let icon: CommandIcon
     let score: Int
+    let isPinned: Bool
     let payload: CommandPayload
 }
 

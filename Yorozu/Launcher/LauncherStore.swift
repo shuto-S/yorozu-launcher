@@ -185,7 +185,8 @@ actor LauncherStore {
     func recordClipboardCapture(
         _ capture: ClipboardCapture,
         retentionDays: Int,
-        maximumItems: Int
+        maximumItems: Int,
+        performsFullMaintenance: Bool = true
     ) throws -> ClipboardItem {
         try databaseQueue.write { database in
             let latest = try Row.fetchOne(
@@ -262,12 +263,14 @@ actor LauncherStore {
                 )
             }
 
-            try Self.pruneClipboard(
-                database: database,
-                retentionDays: retentionDays,
-                maximumItems: maximumItems,
-                now: capture.copiedAt
-            )
+            if performsFullMaintenance {
+                try Self.pruneClipboard(
+                    database: database,
+                    retentionDays: retentionDays,
+                    maximumItems: maximumItems,
+                    now: capture.copiedAt
+                )
+            }
 
             guard let row = try Row.fetchOne(
                 database,

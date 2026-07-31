@@ -1,3 +1,4 @@
+import AppKit
 import XCTest
 @testable import Yorozu
 
@@ -265,6 +266,91 @@ final class LauncherStoreTests: XCTestCase {
         XCTAssertEqual(item.imageHeight, 592)
         let loadedImageData = try await fixture.store.loadClipboardImageData(id: item.id)
         XCTAssertEqual(loadedImageData, imageData)
+    }
+
+    func testClipboardImageDecoderDownsamplesLargeImages() async throws {
+        let width = 2_400
+        let height = 1_600
+        let colorSpace = CGColorSpaceCreateDeviceRGB()
+        let context = try XCTUnwrap(
+            CGContext(
+                data: nil,
+                width: width,
+                height: height,
+                bitsPerComponent: 8,
+                bytesPerRow: 0,
+                space: colorSpace,
+                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+            )
+        )
+        context.setFillColor(NSColor.systemBlue.cgColor)
+        context.fill(CGRect(x: 0, y: 0, width: width, height: height))
+        let sourceImage = try XCTUnwrap(context.makeImage())
+        let imageData = try XCTUnwrap(
+            NSBitmapImageRep(cgImage: sourceImage).representation(
+                using: .png,
+                properties: [:]
+            )
+        )
+
+        let preview = await ClipboardImageDecoder().decode(imageData)
+
+        XCTAssertEqual(preview?.width, 1_200)
+        XCTAssertEqual(preview?.height, 800)
+    }
+
+    func testClipboardDatabaseMaintenanceCanBeAmortizedThenApplied() async throws {
+        let fixture = try makeStore()
+        let now = Date()
+
+        for offset in 0..<2 {
+            _ = try await fixture.store.recordClipboardCapture(
+                ClipboardCapture(
+                    id: UUID(),
+                    kind: .text,
+                    contentHash: "hash-\(offset)",
+                    textContent: "Text \(offset)",
+                    filePaths: [],
+                    imageData: nil,
+                    imageWidth: nil,
+                    imageHeight: nil,
+                    normalizedSearchText: "text \(offset)",
+                    sourceBundleIdentifier: nil,
+                    sourceApplicationName: nil,
+                    copiedAt: now.addingTimeInterval(TimeInterval(offset))
+                ),
+                retentionDays: 30,
+                maximumItems: 1,
+                performsFullMaintenance: false
+            )
+        }
+
+        let unprunedItems = try await fixture.store.loadClipboardItems()
+        XCTAssertEqual(unprunedItems.count, 2)
+
+        _ = try await fixture.store.recordClipboardCapture(
+            ClipboardCapture(
+                id: UUID(),
+                kind: .text,
+                contentHash: "hash-maintenance",
+                textContent: "Text maintenance",
+                filePaths: [],
+                imageData: nil,
+                imageWidth: nil,
+                imageHeight: nil,
+                normalizedSearchText: "text maintenance",
+                sourceBundleIdentifier: nil,
+                sourceApplicationName: nil,
+                copiedAt: now.addingTimeInterval(2)
+            ),
+            retentionDays: 30,
+            maximumItems: 1,
+            performsFullMaintenance: true
+        )
+
+        let retainedItems = try await fixture.store.loadClipboardItems()
+        XCTAssertEqual(retainedItems.count, 1)
+        XCTAssertEqual(retainedItems.first?.contentHash, "hash-maintenance")
     }
 
     func testURLPreviewPolicyAcceptsPublicWebURLs() throws {

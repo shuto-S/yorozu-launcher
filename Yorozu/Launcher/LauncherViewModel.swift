@@ -1,6 +1,6 @@
-import Combine
 import Foundation
 import ImageIO
+import Observation
 import os
 import SwiftUI
 
@@ -49,19 +49,20 @@ enum AliasEditorMode: Equatable {
 }
 
 @MainActor
-final class LauncherViewModel: ObservableObject {
-    @Published var query = "" {
+@Observable
+final class LauncherViewModel {
+    var query = "" {
         didSet {
             guard query != oldValue, !isApplyingRouteState else { return }
             refreshSearch(preserveSelection: false)
         }
     }
 
-    @Published private(set) var route: PaletteRoute = .root
-    @Published private(set) var presentationOrigin: PalettePresentationOrigin = .direct
-    @Published private(set) var results: [CommandResult] = []
-    @Published private(set) var resultsRevision = 0
-    @Published var selectedID: CommandResultID? {
+    private(set) var route: PaletteRoute = .root
+    private(set) var presentationOrigin: PalettePresentationOrigin = .direct
+    private(set) var results: [CommandResult] = []
+    private(set) var resultsRevision = 0
+    var selectedID: CommandResultID? {
         didSet {
             guard selectedID != oldValue, !isApplyingRouteState else { return }
             let startedAt = ProcessInfo.processInfo.systemUptime
@@ -83,36 +84,38 @@ final class LauncherViewModel: ObservableObject {
             }
         }
     }
-    @Published private(set) var isIndexing = false
-    @Published private(set) var indexCount = 0
-    @Published private(set) var lastIndexedAt: Date?
-    @Published private(set) var storageAvailable = true
-    @Published private(set) var installedApplications: [LaunchableApplication] = []
-    @Published private(set) var featureCommands: [FeatureCommandState] = []
-    @Published private(set) var clipboardItems: [ClipboardItem] = []
-    @Published private(set) var snippets: [Snippet] = []
-    @Published private(set) var selectedClipboardImage: CGImage?
-    @Published private(set) var isClipboardImageLoading = false
-    @Published var errorMessage: String?
-    @Published private(set) var statusMessage: String?
-    @Published private(set) var focusRequest = 0
-    @Published private(set) var isActionPanelPresented = false
-    @Published var actionQuery = "" {
+    private(set) var isIndexing = false
+    private(set) var indexCount = 0
+    private(set) var lastIndexedAt: Date?
+    private(set) var storageAvailable = true
+    private(set) var installedApplications: [LaunchableApplication] = []
+    private(set) var featureCommands: [FeatureCommandState] = []
+    @ObservationIgnored private(set) var clipboardItems: [ClipboardItem] = []
+    @ObservationIgnored private(set) var snippets: [Snippet] = []
+    private(set) var clipboardItemCount = 0
+    private(set) var snippetCount = 0
+    private(set) var selectedClipboardImage: CGImage?
+    private(set) var isClipboardImageLoading = false
+    var errorMessage: String?
+    private(set) var statusMessage: String?
+    private(set) var focusRequest = 0
+    private(set) var isActionPanelPresented = false
+    var actionQuery = "" {
         didSet {
             guard actionQuery != oldValue else { return }
             reconcileActionSelection()
         }
     }
-    @Published var selectedActionID: LauncherActionID?
-    @Published private(set) var aliasEditorMode: AliasEditorMode?
-    @Published var aliasDraft = "" {
+    var selectedActionID: LauncherActionID?
+    private(set) var aliasEditorMode: AliasEditorMode?
+    var aliasDraft = "" {
         didSet {
             if aliasValidationMessage != nil {
                 aliasValidationMessage = nil
             }
         }
     }
-    @Published var aliasApplicationQuery = "" {
+    var aliasApplicationQuery = "" {
         didSet {
             guard aliasApplicationQuery != oldValue,
                   aliasEditorMode == .selectingApplication else {
@@ -121,11 +124,11 @@ final class LauncherViewModel: ObservableObject {
             reconcileAliasApplicationSelection()
         }
     }
-    @Published var selectedAliasApplicationID: ApplicationIdentity?
-    @Published private(set) var aliasValidationMessage: String?
-    @Published private(set) var isSavingAlias = false
-    @Published private(set) var aliasFocusRequest = 0
-    @Published private(set) var aliasDeletionCandidate: LaunchableApplication?
+    var selectedAliasApplicationID: ApplicationIdentity?
+    private(set) var aliasValidationMessage: String?
+    private(set) var isSavingAlias = false
+    private(set) var aliasFocusRequest = 0
+    private(set) var aliasDeletionCandidate: LaunchableApplication?
 
     var dismissForLaunch: (() -> Void)?
     var reopenAfterLaunchFailure: (() -> Void)?
@@ -151,9 +154,14 @@ final class LauncherViewModel: ObservableObject {
     private var clipboardImageLoadTask: Task<Void, Never>?
     private var clipboardImageGeneration = 0
     private let clipboardImageDecoder: any ClipboardImageDecoding
+    @ObservationIgnored private let clipboardImageCache = NSCache<NSUUID, CGImage>()
     private var detailSelectionStartedAt: TimeInterval?
+    private var rootDefaultResults: [CommandResult] = []
     private var clipboardDefaultResults: [CommandResult] = []
     private var snippetDefaultResults: [CommandResult] = []
+    @ObservationIgnored private var resultIndexByID: [CommandResultID: Int] = [:]
+    @ObservationIgnored private var clipboardItemByID: [UUID: ClipboardItem] = [:]
+    @ObservationIgnored private var snippetByID: [UUID: Snippet] = [:]
     private var selectionByRoute: [PaletteRoute: CommandResultID] = [:]
     private var isApplyingRouteState = false
     private var hasStarted = false
@@ -177,11 +185,17 @@ final class LauncherViewModel: ObservableObject {
         self.urlPreviewService = urlPreviewService
         self.launcher = launcher
         self.clipboardImageDecoder = clipboardImageDecoder
+        clipboardImageCache.countLimit = 8
+        clipboardImageCache.totalCostLimit = 32 * 1_024 * 1_024
     }
 
     var selectedResult: CommandResult? {
-        guard let selectedID else { return nil }
-        return results.first(where: { $0.id == selectedID })
+        guard let selectedID,
+              let index = resultIndexByID[selectedID],
+              results.indices.contains(index) else {
+            return nil
+        }
+        return results[index]
     }
 
     var selectedApplication: LaunchableApplication? {
@@ -190,13 +204,17 @@ final class LauncherViewModel: ObservableObject {
     }
 
     var selectedClipboardItem: ClipboardItem? {
-        guard case let .clipboard(item) = selectedResult?.payload else { return nil }
-        return item
+        guard case let .clipboard(id) = selectedResult?.payload else { return nil }
+        return clipboardItemByID[id]
     }
 
     var selectedSnippet: Snippet? {
-        guard case let .snippet(snippet) = selectedResult?.payload else { return nil }
-        return snippet
+        guard case let .snippet(id) = selectedResult?.payload else { return nil }
+        return snippetByID[id]
+    }
+
+    func resultIndex(for id: CommandResultID) -> Int? {
+        resultIndexByID[id]
     }
 
     var aliasEditingApplication: LaunchableApplication? {
@@ -273,9 +291,9 @@ final class LauncherViewModel: ObservableObject {
         case .root:
             return "\(indexCount) apps"
         case .clipboard:
-            return "\(clipboardItems.count) items"
+            return "\(clipboardItemCount) items"
         case .snippets:
-            return "\(snippets.count) snippets"
+            return "\(snippetCount) snippets"
         case .aliases:
             let count = installedApplications.lazy.filter {
                 $0.preference.alias?.isEmpty == false
@@ -383,14 +401,15 @@ final class LauncherViewModel: ObservableObject {
             return [
                 action(.open, "Open", "arrow.right", ["↩"]),
             ]
-        case let .clipboard(item):
+        case .clipboard:
+            let isPinned = selectedClipboardItem?.isPinned == true
             return [
                 action(.paste, "Paste", "doc.on.clipboard", ["↩"]),
                 action(.copy, "Copy", "doc.on.doc", ["⌘", "↩"]),
                 action(
                     .togglePin,
-                    item.isPinned ? "Unpin" : "Pin",
-                    item.isPinned ? "pin.slash" : "pin",
+                    isPinned ? "Unpin" : "Pin",
+                    isPinned ? "pin.slash" : "pin",
                     ["⌘", "P"]
                 ),
                 action(.delete, "Delete", "trash", ["⌘", "⌫"], role: .destructive),
@@ -489,9 +508,7 @@ final class LauncherViewModel: ObservableObject {
             return
         }
         guard !results.isEmpty else { return }
-        let currentIndex = selectedID.flatMap { id in
-            results.firstIndex(where: { $0.id == id })
-        } ?? 0
+        let currentIndex = selectedID.flatMap { resultIndexByID[$0] } ?? 0
         let nextIndex = min(max(currentIndex + delta, 0), results.count - 1)
         selectedID = results[nextIndex].id
     }
@@ -559,9 +576,9 @@ final class LauncherViewModel: ObservableObject {
                 apply(snapshot: await catalog.togglePin(identity: application.id))
                 refreshSearch()
             }
-        case let .clipboard(item):
+        case let .clipboard(id):
             Task {
-                apply(clipboardSnapshot: await clipboardCatalog.togglePin(id: item.id))
+                apply(clipboardSnapshot: await clipboardCatalog.togglePin(id: id))
                 refreshSearch()
             }
         case .feature, .snippet:
@@ -728,13 +745,15 @@ final class LauncherViewModel: ObservableObject {
     func pasteSelected() {
         guard let result = selectedResult else { return }
         switch result.payload {
-        case let .clipboard(item):
+        case .clipboard:
+            guard let item = selectedClipboardItem else { return }
             if item.kind == .image {
                 pasteImageItem(item)
             } else {
                 performPaste(item.pasteboardContent)
             }
-        case let .snippet(snippet):
+        case .snippet:
+            guard let snippet = selectedSnippet else { return }
             recordSnippetUse(snippet.id)
             performPaste(.text(snippet.content))
         case .application, .feature:
@@ -745,13 +764,15 @@ final class LauncherViewModel: ObservableObject {
     func copySelected() {
         guard let result = selectedResult else { return }
         switch result.payload {
-        case let .clipboard(item):
+        case .clipboard:
+            guard let item = selectedClipboardItem else { return }
             if item.kind == .image {
                 copyImageItem(item)
             } else {
                 performCopy(item.pasteboardContent)
             }
-        case let .snippet(snippet):
+        case .snippet:
+            guard let snippet = selectedSnippet else { return }
             performCopy(.text(snippet.content))
         case .application, .feature:
             return
@@ -873,10 +894,10 @@ final class LauncherViewModel: ObservableObject {
     func deleteConfirmed(_ result: CommandResult) {
         Task {
             switch result.payload {
-            case let .clipboard(item):
-                apply(clipboardSnapshot: await clipboardCatalog.delete(id: item.id))
-            case let .snippet(snippet):
-                apply(snippetSnapshot: await snippetCatalog.delete(id: snippet.id))
+            case let .clipboard(id):
+                apply(clipboardSnapshot: await clipboardCatalog.delete(id: id))
+            case let .snippet(id):
+                apply(snippetSnapshot: await snippetCatalog.delete(id: id))
             case .application, .feature:
                 return
             }
@@ -1132,17 +1153,28 @@ final class LauncherViewModel: ObservableObject {
         if !query.isEmpty {
             query = ""
         }
-        route = newRoute
-        presentationOrigin = origin
+        if route != newRoute {
+            route = newRoute
+        }
+        if presentationOrigin != origin {
+            presentationOrigin = origin
+        }
         let initialResults = cachedDefaultResults(for: newRoute) ?? []
-        results = initialResults
-        resultsRevision &+= 1
+        if results != initialResults {
+            results = initialResults
+            resultIndexByID = Self.makeResultIndex(initialResults)
+            resultsRevision &+= 1
+        }
         let rememberedSelection = selectionByRoute[newRoute]
+        let nextSelection: CommandResultID?
         if let rememberedSelection,
            initialResults.contains(where: { $0.id == rememberedSelection }) {
-            selectedID = rememberedSelection
+            nextSelection = rememberedSelection
         } else {
-            selectedID = initialResults.first?.id
+            nextSelection = initialResults.first?.id
+        }
+        if selectedID != nextSelection {
+            selectedID = nextSelection
         }
         isApplyingRouteState = false
         loadSelectedClipboardImage()
@@ -1165,13 +1197,15 @@ final class LauncherViewModel: ObservableObject {
         for route: PaletteRoute
     ) -> [CommandResult]? {
         switch route {
+        case .root:
+            rootDefaultResults
         case .clipboard:
             clipboardDefaultResults
         case .snippets:
             snippetDefaultResults
         case .settings:
             []
-        case .root, .aliases:
+        case .aliases:
             nil
         }
     }
@@ -1195,6 +1229,7 @@ final class LauncherViewModel: ObservableObject {
 
         if results != matches {
             results = matches
+            resultIndexByID = Self.makeResultIndex(matches)
             resultsRevision &+= 1
         }
         if selectedID != nextSelection {
@@ -1226,6 +1261,7 @@ final class LauncherViewModel: ObservableObject {
                 subtitle: feature.subtitle,
                 icon: .system(feature.symbolName),
                 score: score,
+                isPinned: state.preference.isPinned,
                 payload: .feature(feature)
             )
         }
@@ -1301,6 +1337,7 @@ final class LauncherViewModel: ObservableObject {
         featureSnapshot snapshot: FeatureSnapshot<FeatureCommandState>
     ) {
         featureCommands = snapshot.values
+        rebuildRootDefaultResults()
         storageAvailable = storageAvailable && snapshot.storageAvailable
         if let message = snapshot.message {
             errorMessage = message
@@ -1318,6 +1355,7 @@ final class LauncherViewModel: ObservableObject {
 
     private func apply(snapshot: CatalogSnapshot) {
         installedApplications = snapshot.applications
+        rebuildRootDefaultResults()
         indexCount = snapshot.applications.count
         lastIndexedAt = snapshot.lastIndexedAt ?? lastIndexedAt
         storageAvailable = snapshot.storageAvailable
@@ -1326,10 +1364,19 @@ final class LauncherViewModel: ObservableObject {
         }
     }
 
+    private func rebuildRootDefaultResults() {
+        rootDefaultResults = rootResults(
+            query: "",
+            applications: installedApplications
+        )
+    }
+
     private func apply(clipboardSnapshot snapshot: FeatureSnapshot<ClipboardItem>) {
-        if clipboardItems != snapshot.values {
-            clipboardItems = snapshot.values
-        }
+        clipboardItems = snapshot.values
+        clipboardItemByID = Dictionary(
+            uniqueKeysWithValues: snapshot.values.map { ($0.id, $0) }
+        )
+        clipboardItemCount = snapshot.values.count
         clipboardDefaultResults = snapshot.values.prefix(50).map(Self.clipboardResult)
         storageAvailable = storageAvailable && snapshot.storageAvailable
         if let message = snapshot.message {
@@ -1338,9 +1385,11 @@ final class LauncherViewModel: ObservableObject {
     }
 
     private func apply(snippetSnapshot snapshot: FeatureSnapshot<Snippet>) {
-        if snippets != snapshot.values {
-            snippets = snapshot.values
-        }
+        snippets = snapshot.values
+        snippetByID = Dictionary(
+            uniqueKeysWithValues: snapshot.values.map { ($0.id, $0) }
+        )
+        snippetCount = snapshot.values.count
         snippetDefaultResults = snapshot.values.prefix(50).map(Self.snippetResult)
         storageAvailable = storageAvailable && snapshot.storageAvailable
         if let message = snapshot.message {
@@ -1363,6 +1412,16 @@ final class LauncherViewModel: ObservableObject {
         guard route == .clipboard,
               let item = selectedClipboardItem,
               item.kind == .image else {
+            return
+        }
+        if let cachedImage = clipboardImageCache.object(
+            forKey: item.id as NSUUID
+        ) {
+            selectedClipboardImage = cachedImage
+            LauncherPerformanceTrace.duration(
+                "detail_content_ready",
+                startedAt: detailSelectionStartedAt ?? ProcessInfo.processInfo.systemUptime
+            )
             return
         }
         if let data = item.imageData, !data.isEmpty {
@@ -1391,10 +1450,13 @@ final class LauncherViewModel: ObservableObject {
             guard !Task.isCancelled,
                   generation == clipboardImageGeneration,
                   route == .clipboard,
-                  selectedClipboardItem?.id == itemID else {
+                  selectedClipboardItem?.id == itemID,
+                  let image else {
+                isClipboardImageLoading = false
                 return
             }
             selectedClipboardImage = image
+            cacheClipboardImage(image, id: itemID)
             isClipboardImageLoading = false
             if let detailSelectionStartedAt {
                 LauncherPerformanceTrace.duration(
@@ -1425,10 +1487,13 @@ final class LauncherViewModel: ObservableObject {
             guard !Task.isCancelled,
                   generation == clipboardImageGeneration,
                   route == .clipboard,
-                  selectedClipboardItem?.id == itemID else {
+                  selectedClipboardItem?.id == itemID,
+                  let image else {
+                isClipboardImageLoading = false
                 return
             }
             selectedClipboardImage = image
+            cacheClipboardImage(image, id: itemID)
             isClipboardImageLoading = false
             if let detailSelectionStartedAt {
                 LauncherPerformanceTrace.duration(
@@ -1437,6 +1502,16 @@ final class LauncherViewModel: ObservableObject {
                 )
             }
         }
+    }
+
+    private func cacheClipboardImage(_ image: CGImage, id: UUID) {
+        let bytesPerRow = max(1, image.bytesPerRow)
+        let cost = bytesPerRow.multipliedReportingOverflow(by: max(1, image.height))
+        clipboardImageCache.setObject(
+            image,
+            forKey: id as NSUUID,
+            cost: cost.overflow ? Int.max : cost.partialValue
+        )
     }
 
     private func reconcileActionSelection() {
@@ -1465,6 +1540,14 @@ final class LauncherViewModel: ObservableObject {
         )
     }
 
+    private nonisolated static func makeResultIndex(
+        _ results: [CommandResult]
+    ) -> [CommandResultID: Int] {
+        Dictionary(
+            uniqueKeysWithValues: results.enumerated().map { ($1.id, $0) }
+        )
+    }
+
     private nonisolated static func applicationResult(
         _ application: LaunchableApplication,
         query: String
@@ -1476,6 +1559,7 @@ final class LauncherViewModel: ObservableObject {
             subtitle: application.subtitle,
             icon: .application(application.canonicalURL),
             score: SearchScorer.totalScore(for: application, query: query) ?? 0,
+            isPinned: application.preference.isPinned,
             payload: .application(application)
         )
     }
@@ -1495,7 +1579,8 @@ final class LauncherViewModel: ObservableObject {
             subtitle: "\(source) · \(item.copiedAt.formatted(.relative(presentation: .named)))",
             icon: .system(Self.clipboardSymbol(for: item.kind)),
             score: 0,
-            payload: .clipboard(item)
+            isPinned: item.isPinned,
+            payload: .clipboard(item.id)
         )
     }
 
@@ -1509,7 +1594,8 @@ final class LauncherViewModel: ObservableObject {
             subtitle: subtitle,
             icon: .system("text.quote"),
             score: 0,
-            payload: .snippet(snippet)
+            isPinned: false,
+            payload: .snippet(snippet.id)
         )
     }
 
@@ -1538,11 +1624,23 @@ protocol ClipboardImageDecoding: Sendable {
 }
 
 actor ClipboardImageDecoder: ClipboardImageDecoding {
+    private static let maximumPreviewPixelSize = 1_200
+
     func decode(_ data: Data) -> CGImage? {
         guard !Task.isCancelled,
               let source = CGImageSourceCreateWithData(data as CFData, nil) else {
             return nil
         }
-        return CGImageSourceCreateImageAtIndex(source, 0, nil)
+        let options: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceThumbnailMaxPixelSize: Self.maximumPreviewPixelSize,
+            kCGImageSourceShouldCacheImmediately: true,
+        ]
+        return CGImageSourceCreateThumbnailAtIndex(
+            source,
+            0,
+            options as CFDictionary
+        )
     }
 }

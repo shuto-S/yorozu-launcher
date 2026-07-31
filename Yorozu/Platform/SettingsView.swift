@@ -34,7 +34,7 @@ private enum SettingsDestination: String, CaseIterable, Identifiable {
 }
 
 struct SettingsView: View {
-    @ObservedObject var viewModel: LauncherViewModel
+    var viewModel: LauncherViewModel
     @State private var selection: SettingsDestination? = .general
     @FocusState private var isSidebarFocused: Bool
 
@@ -100,7 +100,7 @@ struct SettingsView: View {
 }
 
 private struct GeneralSettingsView: View {
-    @ObservedObject var viewModel: LauncherViewModel
+    var viewModel: LauncherViewModel
 
     var body: some View {
         Form {
@@ -193,7 +193,7 @@ private struct ShortcutsSettingsView: View {
 }
 
 private struct ClipboardSettingsView: View {
-    @ObservedObject var viewModel: LauncherViewModel
+    var viewModel: LauncherViewModel
     @ObservedObject private var preferences: ClipboardPreferences
     @State private var isAccessibilityGranted = AXIsProcessTrusted()
     @State private var clearAction: ClearAction?
@@ -332,7 +332,7 @@ private struct ClipboardSettingsView: View {
                         }
                     }
                 } label: {
-                    Text("\(viewModel.clipboardItems.count) Items")
+                    Text("\(viewModel.clipboardItemCount) Items")
                 }
             }
         }

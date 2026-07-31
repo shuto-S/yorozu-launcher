@@ -102,7 +102,7 @@ extension EnvironmentValues {
 }
 
 private struct PaletteAccessibilityHost: View {
-    @ObservedObject var viewModel: LauncherViewModel
+    var viewModel: LauncherViewModel
     let overrides: AccessibilityDisplayOverrides
 
     var body: some View {
