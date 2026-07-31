@@ -2,11 +2,11 @@ import AppKit
 import ApplicationServices
 import Combine
 import CryptoKit
+import Darwin
 import Foundation
 import ImageIO
 import os
 import UniformTypeIdentifiers
-@preconcurrency import LinkPresentation
 
 enum LauncherPerformanceTrace {
     private static let log = OSLog(
@@ -116,7 +116,12 @@ final class ClipboardPreferences: ObservableObject {
         isEnabled = defaults.bool(forKey: Key.isEnabled)
         isPaused = defaults.bool(forKey: Key.isPaused)
         retentionDays = max(1, defaults.integer(forKey: Key.retentionDays))
-        maximumItems = max(1, defaults.integer(forKey: Key.maximumItems))
+        let storedMaximumItems = defaults.integer(forKey: Key.maximumItems)
+        let clampedMaximumItems = min(2_000, max(1, storedMaximumItems))
+        maximumItems = clampedMaximumItems
+        if clampedMaximumItems != storedMaximumItems {
+            defaults.set(clampedMaximumItems, forKey: Key.maximumItems)
+        }
         let stored = defaults.stringArray(forKey: Key.excludedBundleIdentifiers)
             ?? Array(Self.defaultExcludedBundleIdentifiers)
         excludedBundleIdentifiers = Set(stored)
@@ -128,7 +133,7 @@ final class ClipboardPreferences: ObservableObject {
             isEnabled: isEnabled,
             isPaused: isPaused,
             retentionDays: max(1, retentionDays),
-            maximumItems: max(1, maximumItems),
+            maximumItems: min(2_000, max(1, maximumItems)),
             excludedBundleIdentifiers: excludedBundleIdentifiers
         )
     }
@@ -145,7 +150,7 @@ final class ClipboardPreferences: ObservableObject {
 enum URLPreviewState: Equatable {
     case idle
     case loading(URL)
-    case ready(URL, Data)
+    case ready(URL, URLPreviewDocument)
     case unavailable(URL, URLPreviewUnavailableReason)
 }
 
@@ -154,19 +159,491 @@ enum URLPreviewUnavailableReason: Equatable {
     case failed
 }
 
-@MainActor
-protocol URLPreviewMetadataProviding: AnyObject {
-    var shouldFetchSubresources: Bool { get set }
-    var timeout: TimeInterval { get set }
-
-    func startFetchingMetadata(
-        for url: URL,
-        completionHandler: @escaping @Sendable (LPLinkMetadata?, Error?) -> Void
-    )
-    func cancel()
+struct URLPreviewDocument: Codable, Equatable, Sendable {
+    let title: String
+    let siteName: String?
+    let imageData: Data?
 }
 
-extension LPMetadataProvider: URLPreviewMetadataProviding {}
+protocol URLPreviewFetching: Sendable {
+    func fetch(_ url: URL) async throws -> URLPreviewDocument
+}
+
+enum SafeURLPreviewError: Error, Equatable {
+    case restrictedAddress
+    case invalidResponse
+    case redirectLimitExceeded
+    case contentTooLarge
+    case invalidContentType
+    case invalidImage
+}
+
+actor SafeURLPreviewFetcher: URLPreviewFetching {
+    typealias AddressResolver = @Sendable (String) async throws -> [String]
+    typealias ResponseLoader = @Sendable (
+        URL,
+        Int,
+        [String]
+    ) async throws -> SafeURLHTTPResponse
+
+    private static let maximumHTMLBytes = 1 * 1_024 * 1_024
+    private static let maximumImageBytes = 5 * 1_024 * 1_024
+    private static let maximumRedirects = 5
+    private let resolveAddresses: AddressResolver
+    private let loadResponse: ResponseLoader
+
+    init(
+        resolveAddresses: @escaping AddressResolver = SafeURLPreviewFetcher
+            .resolveAddresses,
+        loadResponse: @escaping ResponseLoader = { url, maximumBytes, mimeTypes in
+            try await BoundedURLRequest(
+                url: url,
+                maximumBytes: maximumBytes,
+                acceptedMIMETypes: mimeTypes
+            ).start()
+        }
+    ) {
+        self.resolveAddresses = resolveAddresses
+        self.loadResponse = loadResponse
+    }
+
+    func fetch(_ url: URL) async throws -> URLPreviewDocument {
+        let htmlResponse = try await load(
+            url,
+            maximumBytes: Self.maximumHTMLBytes,
+            acceptedMIMETypes: ["text/html"]
+        )
+        guard let html = String(data: htmlResponse.data, encoding: .utf8)
+                ?? String(data: htmlResponse.data, encoding: .isoLatin1) else {
+            throw SafeURLPreviewError.invalidResponse
+        }
+        let metadata = BoundedHTMLMetadataParser.parse(html)
+        let title = metadata.title?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let fallbackTitle = htmlResponse.finalURL.host() ?? htmlResponse.finalURL.absoluteString
+        var imageData: Data?
+        if let imageValue = metadata.image,
+           let imageURL = URL(
+               string: imageValue,
+               relativeTo: htmlResponse.finalURL
+           )?.absoluteURL {
+            imageData = try? await loadPreviewImage(imageURL)
+        }
+        let displayTitle = title.flatMap { $0.isEmpty ? nil : $0 } ?? fallbackTitle
+        return URLPreviewDocument(
+            title: displayTitle,
+            siteName: metadata.siteName,
+            imageData: imageData
+        )
+    }
+
+    private func loadPreviewImage(_ url: URL) async throws -> Data {
+        let response = try await load(
+            url,
+            maximumBytes: Self.maximumImageBytes,
+            acceptedMIMETypes: ["image/"]
+        )
+        return try await Task.detached(priority: .utility) {
+            try Self.downsampleImage(response.data)
+        }.value
+    }
+
+    private func load(
+        _ initialURL: URL,
+        maximumBytes: Int,
+        acceptedMIMETypes: [String]
+    ) async throws -> SafeURLHTTPResponse {
+        var url = initialURL
+        for redirectCount in 0...Self.maximumRedirects {
+            try await validate(url)
+            let response = try await loadResponse(
+                url,
+                maximumBytes,
+                acceptedMIMETypes
+            )
+            if (300..<400).contains(response.statusCode) {
+                guard redirectCount < Self.maximumRedirects else {
+                    throw SafeURLPreviewError.redirectLimitExceeded
+                }
+                guard let location = response.headers["location"],
+                      let redirectedURL = URL(
+                          string: location,
+                          relativeTo: url
+                      )?.absoluteURL else {
+                    throw SafeURLPreviewError.invalidResponse
+                }
+                url = redirectedURL
+                continue
+            }
+            guard (200..<300).contains(response.statusCode) else {
+                throw SafeURLPreviewError.invalidResponse
+            }
+            return response
+        }
+        throw SafeURLPreviewError.redirectLimitExceeded
+    }
+
+    private func validate(_ url: URL) async throws {
+        guard let validatedURL = URLPreviewPolicy.previewableURL(
+            from: url.absoluteString
+        ),
+        validatedURL == url,
+        let host = url.host() else {
+            throw SafeURLPreviewError.restrictedAddress
+        }
+        let addresses = try await resolveAddresses(host)
+        guard !addresses.isEmpty,
+              addresses.allSatisfy(URLPreviewPolicy.isPublicIPAddress) else {
+            throw SafeURLPreviewError.restrictedAddress
+        }
+    }
+
+    private nonisolated static func resolveAddresses(
+        _ host: String
+    ) async throws -> [String] {
+        try await Task.detached(priority: .utility) {
+            var hints = addrinfo(
+                ai_flags: AI_ADDRCONFIG,
+                ai_family: AF_UNSPEC,
+                ai_socktype: SOCK_STREAM,
+                ai_protocol: IPPROTO_TCP,
+                ai_addrlen: 0,
+                ai_canonname: nil,
+                ai_addr: nil,
+                ai_next: nil
+            )
+            var result: UnsafeMutablePointer<addrinfo>?
+            guard getaddrinfo(host, nil, &hints, &result) == 0 else {
+                throw SafeURLPreviewError.invalidResponse
+            }
+            defer { freeaddrinfo(result) }
+            var addresses: [String] = []
+            var cursor = result
+            while let current = cursor {
+                var buffer = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+                if getnameinfo(
+                    current.pointee.ai_addr,
+                    current.pointee.ai_addrlen,
+                    &buffer,
+                    socklen_t(buffer.count),
+                    nil,
+                    0,
+                    NI_NUMERICHOST
+                ) == 0 {
+                    let bytes = buffer.prefix { $0 != 0 }.map {
+                        UInt8(bitPattern: $0)
+                    }
+                    addresses.append(String(decoding: bytes, as: UTF8.self))
+                }
+                cursor = current.pointee.ai_next
+            }
+            return Array(Set(addresses))
+        }.value
+    }
+
+    nonisolated static func downsampleImage(_ data: Data) throws -> Data {
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil),
+              let properties = CGImageSourceCopyPropertiesAtIndex(
+                  source,
+                  0,
+                  nil
+              ) as? [CFString: Any],
+              let width = properties[kCGImagePropertyPixelWidth] as? Int,
+              let height = properties[kCGImagePropertyPixelHeight] as? Int,
+              width > 0,
+              height > 0,
+              width <= 16_000_000 / height else {
+            throw SafeURLPreviewError.invalidImage
+        }
+        let options: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceThumbnailMaxPixelSize: 1_024,
+        ]
+        guard let image = CGImageSourceCreateThumbnailAtIndex(
+            source,
+            0,
+            options as CFDictionary
+        ) else {
+            throw SafeURLPreviewError.invalidImage
+        }
+
+        for quality in [0.82, 0.68, 0.52] {
+            let output = NSMutableData()
+            guard let destination = CGImageDestinationCreateWithData(
+                output,
+                UTType.jpeg.identifier as CFString,
+                1,
+                nil
+            ) else {
+                throw SafeURLPreviewError.invalidImage
+            }
+            CGImageDestinationAddImage(
+                destination,
+                image,
+                [kCGImageDestinationLossyCompressionQuality: quality] as CFDictionary
+            )
+            guard CGImageDestinationFinalize(destination) else {
+                throw SafeURLPreviewError.invalidImage
+            }
+            if output.length <= 2 * 1_024 * 1_024 {
+                return output as Data
+            }
+        }
+        throw SafeURLPreviewError.contentTooLarge
+    }
+}
+
+struct SafeURLHTTPResponse: Sendable {
+    let data: Data
+    let finalURL: URL
+    let statusCode: Int
+    let headers: [String: String]
+}
+
+private final class BoundedURLRequest:
+    NSObject,
+    URLSessionDataDelegate,
+    @unchecked Sendable
+{
+    private let url: URL
+    private let maximumBytes: Int
+    private let acceptedMIMETypes: [String]
+    private let lock = NSLock()
+    private var data = Data()
+    private var response: HTTPURLResponse?
+    private var continuation: CheckedContinuation<SafeURLHTTPResponse, Error>?
+    private var session: URLSession?
+    private var task: URLSessionDataTask?
+    private var terminalError: Error?
+    private var completed = false
+
+    init(url: URL, maximumBytes: Int, acceptedMIMETypes: [String]) {
+        self.url = url
+        self.maximumBytes = maximumBytes
+        self.acceptedMIMETypes = acceptedMIMETypes
+    }
+
+    func start() async throws -> SafeURLHTTPResponse {
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                lock.withLock {
+                    self.continuation = continuation
+                    let configuration = URLSessionConfiguration.ephemeral
+                    configuration.timeoutIntervalForRequest = 8
+                    configuration.timeoutIntervalForResource = 8
+                    configuration.httpShouldSetCookies = false
+                    configuration.urlCache = nil
+                    configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
+                    let session = URLSession(
+                        configuration: configuration,
+                        delegate: self,
+                        delegateQueue: nil
+                    )
+                    self.session = session
+                    let task = session.dataTask(with: url)
+                    self.task = task
+                    task.resume()
+                }
+            }
+        } onCancel: {
+            self.cancel()
+        }
+    }
+
+    func cancel() {
+        lock.withLock {
+            task?.cancel()
+        }
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        willPerformHTTPRedirection response: HTTPURLResponse,
+        newRequest request: URLRequest,
+        completionHandler: @escaping (URLRequest?) -> Void
+    ) {
+        completionHandler(nil)
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        dataTask: URLSessionDataTask,
+        didReceive response: URLResponse,
+        completionHandler: @escaping (URLSession.ResponseDisposition) -> Void
+    ) {
+        guard let response = response as? HTTPURLResponse else {
+            lock.withLock {
+                terminalError = SafeURLPreviewError.invalidResponse
+            }
+            completionHandler(.cancel)
+            return
+        }
+
+        let isRedirect = (300..<400).contains(response.statusCode)
+        let mimeType = response.mimeType?.lowercased() ?? ""
+        let acceptsMIME = isRedirect || acceptedMIMETypes.contains {
+            $0.hasSuffix("/") ? mimeType.hasPrefix($0) : mimeType == $0
+        }
+        guard acceptsMIME else {
+            lock.withLock {
+                terminalError = SafeURLPreviewError.invalidContentType
+            }
+            completionHandler(.cancel)
+            return
+        }
+        guard response.expectedContentLength < 0
+                || response.expectedContentLength <= maximumBytes else {
+            lock.withLock {
+                terminalError = SafeURLPreviewError.contentTooLarge
+            }
+            completionHandler(.cancel)
+            return
+        }
+        lock.withLock {
+            self.response = response
+        }
+        completionHandler(.allow)
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        dataTask: URLSessionDataTask,
+        didReceive data: Data
+    ) {
+        let shouldCancel = lock.withLock {
+            let (newCount, overflow) = self.data.count.addingReportingOverflow(data.count)
+            guard !overflow, newCount <= maximumBytes else {
+                terminalError = SafeURLPreviewError.contentTooLarge
+                return true
+            }
+            self.data.append(data)
+            return false
+        }
+        if shouldCancel {
+            dataTask.cancel()
+        }
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        didCompleteWithError error: Error?
+    ) {
+        let completion: (
+            CheckedContinuation<SafeURLHTTPResponse, Error>?,
+            Result<SafeURLHTTPResponse, Error>
+        ) = lock.withLock {
+            guard !completed else {
+                return (nil, .failure(CancellationError()))
+            }
+            completed = true
+            let continuation = self.continuation
+            self.continuation = nil
+            if let terminalError {
+                return (continuation, .failure(terminalError))
+            }
+            if let error {
+                return (continuation, .failure(error))
+            }
+            guard let response else {
+                return (continuation, .failure(SafeURLPreviewError.invalidResponse))
+            }
+            let headers = response.allHeaderFields.reduce(into: [String: String]()) {
+                guard let key = $1.key as? String,
+                      let value = $1.value as? String else {
+                    return
+                }
+                $0[key.lowercased()] = value
+            }
+            return (
+                continuation,
+                .success(
+                    SafeURLHTTPResponse(
+                        data: data,
+                        finalURL: response.url ?? url,
+                        statusCode: response.statusCode,
+                        headers: headers
+                    )
+                )
+            )
+        }
+        self.session?.finishTasksAndInvalidate()
+        completion.0?.resume(with: completion.1)
+    }
+}
+
+enum BoundedHTMLMetadataParser {
+    struct Metadata {
+        let title: String?
+        let siteName: String?
+        let image: String?
+    }
+
+    static func parse(_ html: String) -> Metadata {
+        Metadata(
+            title: metaContent(property: "og:title", in: html)
+                ?? elementContent(named: "title", in: html),
+            siteName: metaContent(property: "og:site_name", in: html),
+            image: metaContent(property: "og:image", in: html)
+        )
+    }
+
+    private static func metaContent(property: String, in html: String) -> String? {
+        let escaped = NSRegularExpression.escapedPattern(for: property)
+        let patterns = [
+            #"<meta\b[^>]*(?:property|name)\s*=\s*["']\#(escaped)["'][^>]*content\s*=\s*["']([^"']*)["'][^>]*>"#,
+            #"<meta\b[^>]*content\s*=\s*["']([^"']*)["'][^>]*(?:property|name)\s*=\s*["']\#(escaped)["'][^>]*>"#,
+        ]
+        return patterns.lazy.compactMap { firstCapture(pattern: $0, in: html) }.first
+            .map(decodeEntities)
+    }
+
+    private static func elementContent(named name: String, in html: String) -> String? {
+        guard let captured = firstCapture(
+            pattern: #"<\#(name)\b[^>]*>(.*?)</\#(name)\s*>"#,
+            in: html,
+            options: [.caseInsensitive, .dotMatchesLineSeparators]
+        ) else {
+            return nil
+        }
+        let stripped = captured.replacingOccurrences(
+            of: #"<[^>]+>"#,
+            with: "",
+            options: .regularExpression
+        )
+        return decodeEntities(stripped)
+    }
+
+    private static func firstCapture(
+        pattern: String,
+        in value: String,
+        options: NSRegularExpression.Options = [.caseInsensitive]
+    ) -> String? {
+        guard let expression = try? NSRegularExpression(
+            pattern: pattern,
+            options: options
+        ) else {
+            return nil
+        }
+        let range = NSRange(value.startIndex..., in: value)
+        guard let match = expression.firstMatch(in: value, range: range),
+              match.numberOfRanges > 1,
+              let captureRange = Range(match.range(at: 1), in: value) else {
+            return nil
+        }
+        return String(value[captureRange])
+    }
+
+    private static func decodeEntities(_ value: String) -> String {
+        value
+            .replacingOccurrences(of: "&amp;", with: "&")
+            .replacingOccurrences(of: "&lt;", with: "<")
+            .replacingOccurrences(of: "&gt;", with: ">")
+            .replacingOccurrences(of: "&quot;", with: "\"")
+            .replacingOccurrences(of: "&#39;", with: "'")
+    }
+}
 
 @MainActor
 final class URLPreviewService: ObservableObject {
@@ -175,10 +652,10 @@ final class URLPreviewService: ObservableObject {
     private static let cacheLifetime: TimeInterval = 7 * 86_400
     private static let maximumFailedPreviewCount = 256
     private let store: LauncherStore?
-    private let metadataProviderFactory: () -> any URLPreviewMetadataProviding
+    private let fetcher: any URLPreviewFetching
     private let fetchDelay: Duration
+    private let networkEnabled: Bool
     private var delayedTask: Task<Void, Never>?
-    private var metadataProvider: (any URLPreviewMetadataProviding)?
     private var requestID = UUID()
     private var requestedRawURL: String?
     private var requestedEnabled = false
@@ -186,14 +663,14 @@ final class URLPreviewService: ObservableObject {
 
     init(
         store: LauncherStore?,
-        metadataProviderFactory: @escaping () -> any URLPreviewMetadataProviding = {
-            LPMetadataProvider()
-        },
-        fetchDelay: Duration = .milliseconds(350)
+        fetcher: any URLPreviewFetching = SafeURLPreviewFetcher(),
+        fetchDelay: Duration = .milliseconds(350),
+        networkEnabled: Bool = true
     ) {
         self.store = store
-        self.metadataProviderFactory = metadataProviderFactory
+        self.fetcher = fetcher
         self.fetchDelay = fetchDelay
+        self.networkEnabled = networkEnabled
     }
 
     func load(rawURL: String, isEnabled: Bool) {
@@ -203,7 +680,7 @@ final class URLPreviewService: ObservableObject {
         cancel(resetState: true)
         requestedRawURL = rawURL
         requestedEnabled = isEnabled
-        guard isEnabled else { return }
+        guard isEnabled, networkEnabled else { return }
         guard let url = URLPreviewPolicy.previewableURL(from: rawURL) else {
             if let fallbackURL = URL(string: rawURL) {
                 state = .unavailable(fallbackURL, .restrictedAddress)
@@ -225,7 +702,7 @@ final class URLPreviewService: ObservableObject {
             }
             try? await Task.sleep(for: self.fetchDelay)
             guard !Task.isCancelled else { return }
-            self.fetchMetadata(for: url, requestID: currentRequestID)
+            await self.fetchMetadata(for: url, requestID: currentRequestID)
         }
     }
 
@@ -235,8 +712,6 @@ final class URLPreviewService: ObservableObject {
         requestID = UUID()
         delayedTask?.cancel()
         delayedTask = nil
-        metadataProvider?.cancel()
-        metadataProvider = nil
         if resetState {
             state = .idle
         }
@@ -250,47 +725,30 @@ final class URLPreviewService: ObservableObject {
             newerThan: Date().addingTimeInterval(-Self.cacheLifetime)
         ) {
             guard self.requestID == requestID, !Task.isCancelled else { return false }
-            state = .ready(url, cachedEntry.metadataData)
-            return true
+            if let document = try? JSONDecoder().decode(
+                URLPreviewDocument.self,
+                from: cachedEntry.metadataData
+            ) {
+                state = .ready(url, document)
+                return true
+            }
         }
         return false
     }
 
-    private func fetchMetadata(for url: URL, requestID: UUID) {
+    private func fetchMetadata(for url: URL, requestID: UUID) async {
         guard self.requestID == requestID else { return }
-
-        let provider = metadataProviderFactory()
-        provider.shouldFetchSubresources = true
-        provider.timeout = 8
-        metadataProvider = provider
-        provider.startFetchingMetadata(for: url) { [weak self] metadata, error in
-            let metadataData: Data?
-            if error == nil, let metadata {
-                metadataData = try? NSKeyedArchiver.archivedData(
-                    withRootObject: metadata,
-                    requiringSecureCoding: true
-                )
-            } else {
-                metadataData = nil
-            }
-            Task { @MainActor [weak self] in
-                await self?.finish(
-                    url: url,
-                    requestID: requestID,
-                    metadataData: metadataData
-                )
-            }
-        }
+        let document = try? await fetcher.fetch(url)
+        await finish(url: url, requestID: requestID, document: document)
     }
 
     private func finish(
         url: URL,
         requestID: UUID,
-        metadataData: Data?
+        document: URLPreviewDocument?
     ) async {
         guard self.requestID == requestID else { return }
-        metadataProvider = nil
-        guard let metadataData else {
+        guard let document else {
             failedPreviewURLs.insert(url.absoluteString)
             if failedPreviewURLs.count > Self.maximumFailedPreviewCount,
                let oldestArbitraryEntry = failedPreviewURLs.first {
@@ -300,14 +758,16 @@ final class URLPreviewService: ObservableObject {
             return
         }
 
-        state = .ready(url, metadataData)
-        try? await store?.saveURLPreview(
+        state = .ready(url, document)
+        if let data = try? JSONEncoder().encode(document) {
+            try? await store?.saveURLPreview(
             URLPreviewCacheEntry(
                 url: url.absoluteString,
-                metadataData: metadataData,
+                    metadataData: data,
                 fetchedAt: Date()
             )
-        )
+            )
+        }
     }
 }
 
@@ -663,78 +1123,179 @@ struct PasteboardItemSnapshot: Equatable, Sendable {
     let values: [PasteboardTypeData]
 }
 
+struct PasteboardSnapshot: Equatable, Sendable {
+    let items: [PasteboardItemSnapshot]
+}
+
+enum PasteboardSnapshotResult: Equatable, Sendable {
+    case captured(PasteboardSnapshot)
+    case preservationLimitExceeded
+}
+
+enum PasteboardReplacementResult: Equatable, Sendable {
+    case written(changeCount: Int)
+    case invalidContent
+    case preservationLimitExceeded
+    case writeFailedAndRestored
+    case writeFailedAndRestoreFailed
+
+    var wasWritten: Bool {
+        if case .written = self {
+            return true
+        }
+        return false
+    }
+}
+
 enum PasteResult: Equatable, Sendable {
     case pasted
     case copiedBecausePermissionDenied
     case copiedBecauseTargetUnavailable
     case copiedBecauseActivationFailed
+    case failedBecauseClipboardCouldNotBePreserved
     case failed
 }
 
 @MainActor
 protocol PasteboardAccessing: AnyObject {
     var changeCount: Int { get }
-    func snapshot() -> [PasteboardItemSnapshot]
-    func write(_ content: PasteboardContent) -> Bool
-    func restore(_ snapshots: [PasteboardItemSnapshot])
+    func snapshot() -> PasteboardSnapshotResult
+    func replace(
+        with content: PasteboardContent,
+        preserving snapshot: PasteboardSnapshot
+    ) -> PasteboardReplacementResult
+    @discardableResult
+    func restore(_ snapshot: PasteboardSnapshot) -> Bool
 }
 
 @MainActor
 final class SystemPasteboardAccessor: PasteboardAccessing {
-    private let pasteboard: NSPasteboard
+    private enum PreparedContent {
+        case items([any NSPasteboardWriting])
+    }
 
-    init(pasteboard: NSPasteboard = .general) {
+    private static let maximumSnapshotItems = 16
+    private static let maximumSnapshotTypesPerItem = 32
+    private static let maximumSnapshotBytes = 32 * 1_024 * 1_024
+    private let pasteboard: NSPasteboard
+    private let writeObjects: ([any NSPasteboardWriting]) -> Bool
+
+    init(
+        pasteboard: NSPasteboard = .general,
+        writeObjects: (([any NSPasteboardWriting]) -> Bool)? = nil
+    ) {
         self.pasteboard = pasteboard
+        self.writeObjects = writeObjects ?? { pasteboard.writeObjects($0) }
     }
 
     var changeCount: Int {
         pasteboard.changeCount
     }
 
-    func snapshot() -> [PasteboardItemSnapshot] {
-        (pasteboard.pasteboardItems ?? []).map { item in
-            PasteboardItemSnapshot(
-                values: item.types.compactMap { type in
-                    guard let data = item.data(forType: type) else { return nil }
-                    return PasteboardTypeData(type: type.rawValue, data: data)
-                }
-            )
+    func snapshot() -> PasteboardSnapshotResult {
+        let pasteboardItems = pasteboard.pasteboardItems ?? []
+        guard pasteboardItems.count <= Self.maximumSnapshotItems else {
+            return .preservationLimitExceeded
         }
+
+        var totalBytes = 0
+        var snapshots: [PasteboardItemSnapshot] = []
+        snapshots.reserveCapacity(pasteboardItems.count)
+        for item in pasteboardItems {
+            guard item.types.count <= Self.maximumSnapshotTypesPerItem else {
+                return .preservationLimitExceeded
+            }
+            var values: [PasteboardTypeData] = []
+            values.reserveCapacity(item.types.count)
+            for type in item.types {
+                guard let data = item.data(forType: type) else { continue }
+                let (nextTotal, overflow) = totalBytes.addingReportingOverflow(data.count)
+                guard !overflow, nextTotal <= Self.maximumSnapshotBytes else {
+                    return .preservationLimitExceeded
+                }
+                totalBytes = nextTotal
+                values.append(PasteboardTypeData(type: type.rawValue, data: data))
+            }
+            snapshots.append(PasteboardItemSnapshot(values: values))
+        }
+        return .captured(PasteboardSnapshot(items: snapshots))
     }
 
-    func write(_ content: PasteboardContent) -> Bool {
+    func replace(
+        with content: PasteboardContent,
+        preserving snapshot: PasteboardSnapshot
+    ) -> PasteboardReplacementResult {
+        guard let prepared = prepare(content) else {
+            return .invalidContent
+        }
         pasteboard.clearContents()
+        let didWrite: Bool
+        switch prepared {
+        case let .items(items):
+            didWrite = writeObjects(items)
+        }
+        guard didWrite else {
+            return restore(snapshot)
+                ? .writeFailedAndRestored
+                : .writeFailedAndRestoreFailed
+        }
+        return .written(changeCount: pasteboard.changeCount)
+    }
+
+    @discardableResult
+    func restore(_ snapshot: PasteboardSnapshot) -> Bool {
+        let items: [NSPasteboardItem] = snapshot.items.compactMap { itemSnapshot in
+            let item = NSPasteboardItem()
+            for value in itemSnapshot.values {
+                guard item.setData(
+                    value.data,
+                    forType: NSPasteboard.PasteboardType(value.type)
+                ) else {
+                    return nil
+                }
+            }
+            return item
+        }
+        guard items.count == snapshot.items.count else {
+            return false
+        }
+
+        pasteboard.clearContents()
+        guard !items.isEmpty else {
+            return true
+        }
+        return writeObjects(items)
+    }
+
+    private func prepare(_ content: PasteboardContent) -> PreparedContent? {
         switch content {
         case let .text(value):
-            return pasteboard.setString(value, forType: .string)
+            let item = NSPasteboardItem()
+            guard item.setString(value, forType: .string) else { return nil }
+            return .items([item])
         case let .url(value):
             let item = NSPasteboardItem()
-            item.setString(value, forType: .string)
-            item.setString(value, forType: .URL)
-            return pasteboard.writeObjects([item])
+            guard item.setString(value, forType: .string),
+                  item.setString(value, forType: .URL) else {
+                return nil
+            }
+            return .items([item])
         case let .files(paths):
             let urls = paths
                 .map { URL(fileURLWithPath: $0) }
                 .filter { FileManager.default.fileExists(atPath: $0.path) }
-            guard !urls.isEmpty else { return false }
-            return pasteboard.writeObjects(urls as [NSURL])
+            guard !urls.isEmpty, urls.count == paths.count else { return nil }
+            return .items(urls.map { $0 as NSURL })
         case let .image(data):
-            guard !data.isEmpty else { return false }
-            return pasteboard.setData(data, forType: .png)
-        }
-    }
-
-    func restore(_ snapshots: [PasteboardItemSnapshot]) {
-        pasteboard.clearContents()
-        let items = snapshots.map { snapshot in
-            let item = NSPasteboardItem()
-            for value in snapshot.values {
-                item.setData(value.data, forType: NSPasteboard.PasteboardType(value.type))
+            guard !data.isEmpty,
+                  let source = CGImageSourceCreateWithData(data as CFData, nil),
+                  CGImageSourceGetCount(source) > 0,
+                  CGImageSourceCopyPropertiesAtIndex(source, 0, nil) != nil else {
+                return nil
             }
-            return item
-        }
-        if !items.isEmpty {
-            pasteboard.writeObjects(items)
+            let item = NSPasteboardItem()
+            guard item.setData(data, forType: .png) else { return nil }
+            return .items([item])
         }
     }
 }
@@ -847,9 +1408,12 @@ final class PasteCoordinator {
         dependencies.isAccessibilityTrusted()
     }
 
-    func copy(_ content: PasteboardContent) async -> Bool {
+    func copy(_ content: PasteboardContent) async -> PasteboardReplacementResult {
+        guard case let .captured(original) = pasteboard.snapshot() else {
+            return .preservationLimitExceeded
+        }
         await suppressClipboardMonitor(.seconds(2))
-        return pasteboard.write(content)
+        return pasteboard.replace(with: content, preserving: original)
     }
 
     func paste(
@@ -873,13 +1437,18 @@ final class PasteCoordinator {
         _ content: PasteboardContent,
         into targetApplication: (any PasteTargetApplication)?
     ) async -> PasteResult {
-        let original = pasteboard.snapshot()
+        guard case let .captured(original) = pasteboard.snapshot() else {
+            return .failedBecauseClipboardCouldNotBePreserved
+        }
         await suppressClipboardMonitor(.seconds(2))
-        guard pasteboard.write(content) else {
+        let replacement = pasteboard.replace(with: content, preserving: original)
+        guard case let .written(injectedChangeCount) = replacement else {
+            if replacement == .preservationLimitExceeded {
+                return .failedBecauseClipboardCouldNotBePreserved
+            }
             return .failed
         }
 
-        let injectedChangeCount = pasteboard.changeCount
         guard let targetApplication else {
             return .copiedBecauseTargetUnavailable
         }

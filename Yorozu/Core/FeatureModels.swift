@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 
 enum PaletteRoute: String, Hashable, Sendable {
@@ -250,6 +251,8 @@ enum ClipboardStoragePolicy {
     // item. This cap prevents ordinary, unpinned history from growing without
     // bound when screenshots are copied frequently.
     static let maximumUnpinnedImageBytes = 256 * 1_024 * 1_024
+    static let maximumPinnedItems = 500
+    static let maximumPinnedImageBytes = 256 * 1_024 * 1_024
 }
 
 struct ClipboardCapture: Hashable, Sendable {
@@ -284,7 +287,7 @@ enum URLPreviewPolicy {
               let host = components.host?.lowercased(),
               !host.isEmpty,
               !isLocalHost(host),
-              !isPrivateIPAddress(host),
+              isAllowedHostLiteral(host),
               let url = components.url else {
             return nil
         }
@@ -297,40 +300,77 @@ enum URLPreviewPolicy {
             || host.hasSuffix(".local")
     }
 
-    private nonisolated static func isPrivateIPAddress(_ host: String) -> Bool {
-        let unwrappedHost = host
+    nonisolated static func isPublicIPAddress(_ address: String) -> Bool {
+        let unwrappedHost = address
             .trimmingCharacters(in: CharacterSet(charactersIn: "[]"))
             .lowercased()
-
-        if unwrappedHost.contains(":") {
-            return unwrappedHost == "::"
-                || unwrappedHost == "::1"
-                || unwrappedHost.hasPrefix("fc")
-                || unwrappedHost.hasPrefix("fd")
-                || unwrappedHost.hasPrefix("fe8")
-                || unwrappedHost.hasPrefix("fe9")
-                || unwrappedHost.hasPrefix("fea")
-                || unwrappedHost.hasPrefix("feb")
+        var ipv4 = in_addr()
+        if inet_pton(AF_INET, unwrappedHost, &ipv4) == 1 {
+            return withUnsafeBytes(of: &ipv4) { bytes in
+                let octets = Array(bytes)
+                let first = Int(octets[0])
+                let second = Int(octets[1])
+                return first != 0
+                    && first != 10
+                    && first != 127
+                    && !(first == 100 && (64...127).contains(second))
+                    && !(first == 169 && second == 254)
+                    && !(first == 172 && (16...31).contains(second))
+                    && !(first == 192 && second == 0)
+                    && !(first == 192 && second == 168)
+                    && !(first == 198 && (18...19).contains(second))
+                    && !(first == 192 && second == 0 && octets[2] == 2)
+                    && !(first == 198 && second == 51 && octets[2] == 100)
+                    && !(first == 203 && second == 0 && octets[2] == 113)
+                    && first < 224
+            }
         }
 
-        let octets = unwrappedHost.split(separator: ".", omittingEmptySubsequences: false)
-        guard octets.count == 4,
-              let first = Int(octets[0]),
-              let second = Int(octets[1]),
-              octets.allSatisfy({ value in
-                  guard let number = Int(value) else { return false }
-                  return (0...255).contains(number)
-              }) else {
+        var ipv6 = in6_addr()
+        if inet_pton(AF_INET6, unwrappedHost, &ipv6) == 1 {
+            return withUnsafeBytes(of: &ipv6) { rawBytes in
+                let bytes = Array(rawBytes)
+                let isUnspecified = bytes.allSatisfy { $0 == 0 }
+                let isLoopback = bytes.dropLast().allSatisfy { $0 == 0 }
+                    && bytes.last == 1
+                let isUniqueLocal = bytes[0] & 0xFE == 0xFC
+                let isLinkLocal = bytes[0] == 0xFE && bytes[1] & 0xC0 == 0x80
+                let isMulticast = bytes[0] == 0xFF
+                let isDocumentation = bytes[0...3] == [0x20, 0x01, 0x0D, 0xB8]
+                if isUnspecified || isLoopback || isUniqueLocal || isLinkLocal
+                    || isMulticast || isDocumentation {
+                    return false
+                }
+                let isIPv4Mapped = bytes[0..<10].allSatisfy { $0 == 0 }
+                    && bytes[10] == 0xFF
+                    && bytes[11] == 0xFF
+                if isIPv4Mapped {
+                    return isPublicIPAddress(
+                        "\(bytes[12]).\(bytes[13]).\(bytes[14]).\(bytes[15])"
+                    )
+                }
+                return true
+            }
+        }
+        return false
+    }
+
+    private nonisolated static func isAllowedHostLiteral(_ host: String) -> Bool {
+        var ipv4 = in_addr()
+        if inet_pton(AF_INET, host, &ipv4) == 1 {
+            return isPublicIPAddress(host)
+        }
+        var ipv6 = in6_addr()
+        if inet_pton(AF_INET6, host, &ipv6) == 1 {
+            return isPublicIPAddress(host)
+        }
+        if host.contains(":")
+            || host.unicodeScalars.allSatisfy({
+                CharacterSet.decimalDigits.contains($0) || $0 == "."
+            }) {
             return false
         }
-
-        return first == 0
-            || first == 10
-            || first == 127
-            || (first == 169 && second == 254)
-            || (first == 172 && (16...31).contains(second))
-            || (first == 192 && second == 168)
-            || first >= 224
+        return true
     }
 }
 
@@ -435,8 +475,8 @@ extension Snippet {
             throw SnippetValidationError.invalidName
         }
 
-        let content = rawContent.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard (1...10_000).contains(content.count) else {
+        guard !rawContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              rawContent.count <= 10_000 else {
             throw SnippetValidationError.invalidContent
         }
 
@@ -457,7 +497,7 @@ extension Snippet {
             id: existing?.id ?? id,
             name: name,
             keyword: keyword,
-            content: content,
+            content: rawContent,
             useCount: existing?.useCount ?? 0,
             lastUsedAt: existing?.lastUsedAt,
             createdAt: existing?.createdAt ?? now,

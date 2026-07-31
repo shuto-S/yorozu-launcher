@@ -1,8 +1,24 @@
 import Foundation
 import GRDB
 
+struct StorageRecoveryNotice: Sendable, Equatable {
+    let backupDirectory: URL
+    let recoveredAt: Date
+}
+
+struct LauncherStoreOpenResult: Sendable {
+    let store: LauncherStore?
+    let recoveryNotice: StorageRecoveryNotice?
+}
+
+enum LauncherStoreError: Error, Sendable, Equatable {
+    case invalidPersistedValue(table: String, column: String)
+    case storeClosed
+}
+
 actor LauncherStore {
     private let databaseQueue: DatabaseQueue
+    private var isClosed = false
 
     init(databaseURL: URL) throws {
         try FileManager.default.createDirectory(
@@ -11,6 +27,63 @@ actor LauncherStore {
         )
         databaseQueue = try DatabaseQueue(path: databaseURL.path)
         try Self.makeMigrator().migrate(databaseQueue)
+        try Self.validatePersistedValues(in: databaseQueue)
+    }
+
+    static nonisolated func openRecovering(
+        databaseURL: URL,
+        fileManager: FileManager = .default
+    ) -> LauncherStoreOpenResult {
+        do {
+            return LauncherStoreOpenResult(
+                store: try LauncherStore(databaseURL: databaseURL),
+                recoveryNotice: nil
+            )
+        } catch {
+            guard shouldAttemptRecovery(after: error) else {
+                return LauncherStoreOpenResult(store: nil, recoveryNotice: nil)
+            }
+        }
+
+        guard migrationsAreValid() else {
+            return LauncherStoreOpenResult(store: nil, recoveryNotice: nil)
+        }
+
+        let recoveredAt = Date()
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [
+            .withInternetDateTime,
+            .withDashSeparatorInDate,
+            .withColonSeparatorInTime,
+            .withFractionalSeconds,
+        ]
+        let directoryName = formatter.string(from: recoveredAt)
+            .replacingOccurrences(of: ":", with: "-")
+        let recoveryDirectory = databaseURL.deletingLastPathComponent()
+            .appendingPathComponent("Recovery", isDirectory: true)
+            .appendingPathComponent(directoryName, isDirectory: true)
+
+        do {
+            try fileManager.createDirectory(
+                at: recoveryDirectory,
+                withIntermediateDirectories: true
+            )
+            try moveDatabaseFiles(
+                databaseURL: databaseURL,
+                to: recoveryDirectory,
+                fileManager: fileManager
+            )
+            let store = try LauncherStore(databaseURL: databaseURL)
+            return LauncherStoreOpenResult(
+                store: store,
+                recoveryNotice: StorageRecoveryNotice(
+                    backupDirectory: recoveryDirectory,
+                    recoveredAt: recoveredAt
+                )
+            )
+        } catch {
+            return LauncherStoreOpenResult(store: nil, recoveryNotice: nil)
+        }
     }
 
     static nonisolated func defaultDatabaseURL() throws -> URL {
@@ -25,8 +98,17 @@ actor LauncherStore {
             .appendingPathComponent("Yorozu.sqlite", isDirectory: false)
     }
 
+    func close() throws {
+        guard !isClosed else {
+            return
+        }
+        isClosed = true
+        try databaseQueue.close()
+    }
+
     func loadApplications() throws -> [LaunchableApplication] {
-        try databaseQueue.read { database in
+        try ensureOpen()
+        return try databaseQueue.read { database in
             let rows = try Row.fetchAll(
                 database,
                 sql: """
@@ -52,6 +134,7 @@ actor LauncherStore {
     }
 
     func replaceApplications(_ applications: [DiscoveredApplication], indexedAt: Date) throws {
+        try ensureOpen()
         try databaseQueue.write { database in
             try database.execute(sql: "DELETE FROM launcher_app_cache")
             for application in applications {
@@ -84,6 +167,7 @@ actor LauncherStore {
     }
 
     func savePreference(identity: ApplicationIdentity, preference: LauncherPreference) throws {
+        try ensureOpen()
         try databaseQueue.write { database in
             try database.execute(
                 sql: """
@@ -118,7 +202,8 @@ actor LauncherStore {
     }
 
     func loadPreference(identity: ApplicationIdentity) throws -> LauncherPreference {
-        try databaseQueue.read { database in
+        try ensureOpen()
+        return try databaseQueue.read { database in
             guard let row = try Row.fetchOne(
                 database,
                 sql: """
@@ -140,7 +225,8 @@ actor LauncherStore {
     }
 
     func loadClipboardItems() throws -> [ClipboardItem] {
-        try databaseQueue.read { database in
+        try ensureOpen()
+        return try databaseQueue.read { database in
             try Row.fetchAll(
                 database,
                 sql: """
@@ -169,12 +255,13 @@ actor LauncherStore {
                         pinned_at ASC,
                         MAX(copied_at, COALESCE(last_used_at, copied_at)) DESC
                     """
-            ).map(Self.clipboardItem(from:))
+            ).map { try Self.clipboardItem(from: $0) }
         }
     }
 
     func loadClipboardImageData(id: UUID) throws -> Data? {
-        try databaseQueue.read { database in
+        try ensureOpen()
+        return try databaseQueue.read { database in
             try Data.fetchOne(
                 database,
                 sql: """
@@ -193,7 +280,8 @@ actor LauncherStore {
         maximumItems: Int,
         performsFullMaintenance: Bool = true
     ) throws -> ClipboardItem {
-        try databaseQueue.write { database in
+        try ensureOpen()
+        return try databaseQueue.write { database in
             let latest = try Row.fetchOne(
                 database,
                 sql: """
@@ -305,11 +393,12 @@ actor LauncherStore {
             ) else {
                 throw LauncherError.commandNotSupported
             }
-            return Self.clipboardItem(from: row)
+            return try Self.clipboardItem(from: row)
         }
     }
 
     func setClipboardPinned(id: UUID, isPinned: Bool, now: Date = Date()) throws {
+        try ensureOpen()
         try databaseQueue.write { database in
             try database.execute(
                 sql: """
@@ -328,6 +417,7 @@ actor LauncherStore {
     }
 
     func recordClipboardUse(id: UUID, usedAt: Date = Date()) throws {
+        try ensureOpen()
         try databaseQueue.write { database in
             try database.execute(
                 sql: """
@@ -344,6 +434,7 @@ actor LauncherStore {
     }
 
     func deleteClipboardItem(id: UUID) throws {
+        try ensureOpen()
         try databaseQueue.write { database in
             try database.execute(
                 sql: "DELETE FROM clipboard_items WHERE id = ?",
@@ -353,6 +444,7 @@ actor LauncherStore {
     }
 
     func clearClipboardHistory(includePinned: Bool) throws {
+        try ensureOpen()
         try databaseQueue.write { database in
             if includePinned {
                 try database.execute(sql: "DELETE FROM clipboard_items")
@@ -367,6 +459,7 @@ actor LauncherStore {
         maximumItems: Int,
         now: Date = Date()
     ) throws {
+        try ensureOpen()
         try databaseQueue.write { database in
             try Self.pruneClipboard(
                 database: database,
@@ -378,7 +471,8 @@ actor LauncherStore {
     }
 
     func loadSnippets() throws -> [Snippet] {
-        try databaseQueue.read { database in
+        try ensureOpen()
+        return try databaseQueue.read { database in
             try Row.fetchAll(
                 database,
                 sql: """
@@ -386,11 +480,12 @@ actor LauncherStore {
                     FROM snippets
                     ORDER BY last_used_at DESC, use_count DESC, name COLLATE NOCASE ASC
                     """
-            ).map(Self.snippet(from:))
+            ).map { try Self.snippet(from: $0) }
         }
     }
 
     func saveSnippet(_ snippet: Snippet) throws {
+        try ensureOpen()
         try databaseQueue.write { database in
             try database.execute(
                 sql: """
@@ -433,6 +528,7 @@ actor LauncherStore {
     }
 
     func deleteSnippet(id: UUID) throws {
+        try ensureOpen()
         try databaseQueue.write { database in
             try database.execute(
                 sql: "DELETE FROM snippets WHERE id = ?",
@@ -442,17 +538,16 @@ actor LauncherStore {
     }
 
     func recordSnippetUse(id: UUID, usedAt: Date = Date()) throws {
+        try ensureOpen()
         try databaseQueue.write { database in
             try database.execute(
                 sql: """
                     UPDATE snippets
                     SET use_count = use_count + 1,
-                        last_used_at = ?,
-                        updated_at = ?
+                        last_used_at = ?
                     WHERE id = ?
                     """,
                 arguments: [
-                    usedAt.timeIntervalSince1970,
                     usedAt.timeIntervalSince1970,
                     id.uuidString,
                 ]
@@ -461,7 +556,8 @@ actor LauncherStore {
     }
 
     func loadURLPreview(url: String, newerThan cutoff: Date) throws -> URLPreviewCacheEntry? {
-        try databaseQueue.read { database in
+        try ensureOpen()
+        return try databaseQueue.read { database in
             guard let row = try Row.fetchOne(
                 database,
                 sql: """
@@ -483,6 +579,7 @@ actor LauncherStore {
     }
 
     func saveURLPreview(_ entry: URLPreviewCacheEntry) throws {
+        try ensureOpen()
         try databaseQueue.write { database in
             try database.execute(
                 sql: """
@@ -505,6 +602,12 @@ actor LauncherStore {
                 sql: "DELETE FROM url_preview_cache WHERE fetched_at < ?",
                 arguments: [entry.fetchedAt.addingTimeInterval(-30 * 86_400).timeIntervalSince1970]
             )
+        }
+    }
+
+    private func ensureOpen() throws {
+        guard !isClosed else {
+            throw LauncherStoreError.storeClosed
         }
     }
 
@@ -606,7 +709,120 @@ actor LauncherStore {
                     """
             )
         }
+        migrator.registerMigration("v6_safe_url_preview_cache") { database in
+            // v4 stored NSKeyedArchiver payloads from LinkPresentation. The
+            // safe preview pipeline uses bounded Codable documents instead.
+            try database.execute(sql: "DELETE FROM url_preview_cache")
+        }
         return migrator
+    }
+
+    private nonisolated static func validatePersistedValues(
+        in databaseQueue: DatabaseQueue
+    ) throws {
+        try databaseQueue.read { database in
+            let clipboardRows = try Row.fetchAll(
+                database,
+                sql: "SELECT id, kind, file_paths_json FROM clipboard_items"
+            )
+            for row in clipboardRows {
+                let rawID: String = row["id"]
+                guard UUID(uuidString: rawID) != nil else {
+                    throw LauncherStoreError.invalidPersistedValue(
+                        table: "clipboard_items",
+                        column: "id"
+                    )
+                }
+                let rawKind: String = row["kind"]
+                guard ClipboardItemKind(rawValue: rawKind) != nil else {
+                    throw LauncherStoreError.invalidPersistedValue(
+                        table: "clipboard_items",
+                        column: "kind"
+                    )
+                }
+                let filePathsJSON: String? = row["file_paths_json"]
+                _ = try decodedFilePaths(filePathsJSON)
+            }
+
+            let snippetIDs = try String.fetchAll(
+                database,
+                sql: "SELECT id FROM snippets"
+            )
+            guard snippetIDs.allSatisfy({ UUID(uuidString: $0) != nil }) else {
+                throw LauncherStoreError.invalidPersistedValue(
+                    table: "snippets",
+                    column: "id"
+                )
+            }
+        }
+    }
+
+    private nonisolated static func migrationsAreValid() -> Bool {
+        let fileManager = FileManager.default
+        let directory = fileManager.temporaryDirectory
+            .appendingPathComponent("yorozu-migration-\(UUID().uuidString)", isDirectory: true)
+        let databaseURL = directory.appendingPathComponent("Yorozu.sqlite")
+        do {
+            try fileManager.createDirectory(
+                at: directory,
+                withIntermediateDirectories: true
+            )
+            defer {
+                try? fileManager.removeItem(at: directory)
+            }
+            let databaseQueue = try DatabaseQueue(path: databaseURL.path)
+            try makeMigrator().migrate(databaseQueue)
+            try validatePersistedValues(in: databaseQueue)
+            try databaseQueue.close()
+            return true
+        } catch {
+            return false
+        }
+    }
+
+    private nonisolated static func shouldAttemptRecovery(after error: Error) -> Bool {
+        if error is LauncherStoreError {
+            return true
+        }
+        guard let databaseError = error as? DatabaseError else {
+            return false
+        }
+        switch databaseError.resultCode.primaryResultCode {
+        case .SQLITE_CORRUPT, .SQLITE_NOTADB, .SQLITE_SCHEMA, .SQLITE_ERROR:
+            return true
+        default:
+            return false
+        }
+    }
+
+    private nonisolated static func moveDatabaseFiles(
+        databaseURL: URL,
+        to recoveryDirectory: URL,
+        fileManager: FileManager
+    ) throws {
+        let sourceURLs = [
+            databaseURL,
+            URL(fileURLWithPath: databaseURL.path + "-wal"),
+            URL(fileURLWithPath: databaseURL.path + "-shm"),
+        ]
+        guard fileManager.fileExists(atPath: databaseURL.path) else {
+            throw CocoaError(.fileNoSuchFile)
+        }
+
+        var moves: [(source: URL, destination: URL)] = []
+        do {
+            for sourceURL in sourceURLs where fileManager.fileExists(atPath: sourceURL.path) {
+                let destinationURL = recoveryDirectory
+                    .appendingPathComponent(sourceURL.lastPathComponent)
+                try fileManager.moveItem(at: sourceURL, to: destinationURL)
+                moves.append((sourceURL, destinationURL))
+            }
+        } catch {
+            for move in moves.reversed() where fileManager.fileExists(atPath: move.destination.path) {
+                try? fileManager.moveItem(at: move.destination, to: move.source)
+            }
+            throw error
+        }
     }
 
     private nonisolated static func application(from row: Row) -> LaunchableApplication {
@@ -642,9 +858,21 @@ actor LauncherStore {
         )
     }
 
-    private nonisolated static func clipboardItem(from row: Row) -> ClipboardItem {
+    private nonisolated static func clipboardItem(from row: Row) throws -> ClipboardItem {
         let rawID: String = row["id"]
         let rawKind: String = row["kind"]
+        guard let id = UUID(uuidString: rawID) else {
+            throw LauncherStoreError.invalidPersistedValue(
+                table: "clipboard_items",
+                column: "id"
+            )
+        }
+        guard let kind = ClipboardItemKind(rawValue: rawKind) else {
+            throw LauncherStoreError.invalidPersistedValue(
+                table: "clipboard_items",
+                column: "kind"
+            )
+        }
         let filePathsJSON: String? = row["file_paths_json"]
         let pinnedAt: Double? = row["pinned_at"]
         let copiedAt: Double = row["copied_at"]
@@ -652,11 +880,11 @@ actor LauncherStore {
         let updatedAt: Double = row["updated_at"]
 
         return ClipboardItem(
-            id: UUID(uuidString: rawID) ?? UUID(),
-            kind: ClipboardItemKind(rawValue: rawKind) ?? .text,
+            id: id,
+            kind: kind,
             contentHash: row["content_hash"],
             textContent: row["text_content"],
-            filePaths: decodedFilePaths(filePathsJSON),
+            filePaths: try decodedFilePaths(filePathsJSON),
             imageData: row["image_data"],
             imageByteCount: row["image_byte_count"],
             imageWidth: row["image_width"],
@@ -672,13 +900,19 @@ actor LauncherStore {
         )
     }
 
-    private nonisolated static func snippet(from row: Row) -> Snippet {
+    private nonisolated static func snippet(from row: Row) throws -> Snippet {
         let rawID: String = row["id"]
+        guard let id = UUID(uuidString: rawID) else {
+            throw LauncherStoreError.invalidPersistedValue(
+                table: "snippets",
+                column: "id"
+            )
+        }
         let lastUsedAt: Double? = row["last_used_at"]
         let createdAt: Double = row["created_at"]
         let updatedAt: Double = row["updated_at"]
         return Snippet(
-            id: UUID(uuidString: rawID) ?? UUID(),
+            id: id,
             name: row["name"],
             keyword: row["keyword"],
             content: row["content"],
@@ -696,9 +930,16 @@ actor LauncherStore {
         return String(data: data, encoding: .utf8)
     }
 
-    private nonisolated static func decodedFilePaths(_ value: String?) -> [String] {
-        guard let value, let data = value.data(using: .utf8) else { return [] }
-        return (try? JSONDecoder().decode([String].self, from: data)) ?? []
+    private nonisolated static func decodedFilePaths(_ value: String?) throws -> [String] {
+        guard let value else { return [] }
+        guard let data = value.data(using: .utf8),
+              let paths = try? JSONDecoder().decode([String].self, from: data) else {
+            throw LauncherStoreError.invalidPersistedValue(
+                table: "clipboard_items",
+                column: "file_paths_json"
+            )
+        }
+        return paths
     }
 
     private nonisolated static func pruneClipboard(

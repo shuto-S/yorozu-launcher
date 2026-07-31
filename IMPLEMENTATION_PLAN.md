@@ -75,6 +75,33 @@ The current target is:
 - bounded image and URL-preview caches
 - built-in presentation and Clipboard-interaction performance modes
 
+## v0.1 private-dogfood milestones
+
+The v0.1 implementation includes both prerequisite hardening milestones.
+
+### v0.0.1 — Safety
+
+- Clipboard replacement validates content and preserves the existing pasteboard before clearing it
+- preservation is bounded to 16 items, 32 types per item, and 32 MiB total
+- failed writes attempt restoration and report whether restoration succeeded
+- stale files and empty or invalid images are rejected without changing the pasteboard
+- Copy/Paste usage is recorded only after a successful write or safe Copy fallback
+- storage corruption is backed up once and replaced only after migrations have passed validation in a temporary database
+- transient SQLite failures remain retryable and do not trigger destructive recovery
+- URL previews use an opt-in bounded fetcher with redirect, address, MIME, and payload validation
+
+### v0.0.2 — Test isolation
+
+- `AppEnvironment` separates production dependencies from UI-test dependencies
+- UI tests use a temporary SQLite database and a dedicated `UserDefaults` suite
+- application discovery, launching, pasteboard access, Accessibility checks, event posting, and URL preview networking are replaced with deterministic fakes
+- global hotkey registration is disabled and shortcut recorders use isolated in-memory bindings
+- Clipboard monitoring and network access remain disabled in UI-test mode
+- test shutdown closes SQLite before removing the temporary directory
+- CI builds and runs Unit/Integration tests on an Apple Silicon macOS 26 runner; UI automation remains a local permission-dependent check
+
+These milestones are prerequisites for the three-business-day private dogfood gate. They are not separate distributable releases.
+
 ## Current architecture
 
 ```text
@@ -129,13 +156,11 @@ Privacy and reliability requirements:
 
 ## Near-term roadmap
 
-### v0.1 hardening
+### v0.1 dogfood acceptance
 
 - continue measuring cold start, warm presentation, route changes, selection movement, and long-session memory
-- expand regression coverage for database failures and large histories
 - complete repeatable Light/Dark/accessibility appearance QA
-- improve diagnostics without recording user content
-- document migration and recovery behavior for corrupted local storage
+- complete three business days of normal use with no P0/P1 issue, Clipboard loss, crash, recovery loop, or unusable interaction
 
 ### Text expansion
 

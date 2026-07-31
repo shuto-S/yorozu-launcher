@@ -3,27 +3,174 @@ import KeyboardShortcuts
 import os
 
 @MainActor
+struct AppEnvironment {
+    let storeOpenResult: LauncherStoreOpenResult
+    let defaults: UserDefaults
+    let discoverer: any ApplicationDiscovering
+    let launcher: any ApplicationLaunching
+    let startsClipboardMonitor: Bool
+    let temporaryDirectory: URL?
+    let usesLivePasteIntegration: Bool
+    let allowsURLPreviewNetwork: Bool
+    let registersGlobalShortcuts: Bool
+    let isolatesShortcutSettings: Bool
+
+    static func production() -> AppEnvironment {
+        let result: LauncherStoreOpenResult
+        do {
+            result = LauncherStore.openRecovering(
+                databaseURL: try LauncherStore.defaultDatabaseURL()
+            )
+        } catch {
+            result = LauncherStoreOpenResult(store: nil, recoveryNotice: nil)
+        }
+        return AppEnvironment(
+            storeOpenResult: result,
+            defaults: .standard,
+            discoverer: FileSystemApplicationDiscoverer(),
+            launcher: WorkspaceApplicationLauncher(),
+            startsClipboardMonitor: true,
+            temporaryDirectory: nil,
+            usesLivePasteIntegration: true,
+            allowsURLPreviewNetwork: true,
+            registersGlobalShortcuts: true,
+            isolatesShortcutSettings: false
+        )
+    }
+
+    static func uiTesting(runID: String) throws -> AppEnvironment {
+        let safeRunID = runID.replacingOccurrences(
+            of: "[^A-Za-z0-9._-]",
+            with: "-",
+            options: .regularExpression
+        )
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(
+                "com.yorozu.app-ui-tests-\(safeRunID)",
+                isDirectory: true
+            )
+        try FileManager.default.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true
+        )
+        let suiteName = "com.yorozu.app.ui-tests.\(safeRunID)"
+        guard let defaults = UserDefaults(suiteName: suiteName) else {
+            throw CocoaError(.fileWriteUnknown)
+        }
+        defaults.removePersistentDomain(forName: suiteName)
+
+        return AppEnvironment(
+            storeOpenResult: LauncherStore.openRecovering(
+                databaseURL: directory.appendingPathComponent("Yorozu.sqlite")
+            ),
+            defaults: defaults,
+            discoverer: UITestApplicationDiscoverer(),
+            launcher: UITestApplicationLauncher(),
+            startsClipboardMonitor: false,
+            temporaryDirectory: directory,
+            usesLivePasteIntegration: false,
+            allowsURLPreviewNetwork: false,
+            registersGlobalShortcuts: false,
+            isolatesShortcutSettings: true
+        )
+    }
+}
+
+private actor UITestApplicationDiscoverer: ApplicationDiscovering {
+    func discoverApplications() async throws -> [DiscoveredApplication] {
+        [
+            DiscoveredApplication(
+                id: ApplicationIdentity(rawValue: "bundle:com.microsoft.vscode"),
+                bundleIdentifier: "com.microsoft.vscode",
+                canonicalURL: URL(fileURLWithPath: "/Applications/Visual Studio Code.app"),
+                displayName: "Visual Studio Code",
+                localizedName: nil,
+                version: "1.0",
+                normalizedSearchText: "visual studio code com.microsoft.vscode",
+                rootPriority: 0
+            ),
+            DiscoveredApplication(
+                id: ApplicationIdentity(rawValue: "bundle:com.apple.Safari"),
+                bundleIdentifier: "com.apple.Safari",
+                canonicalURL: URL(fileURLWithPath: "/Applications/Safari.app"),
+                displayName: "Safari",
+                localizedName: nil,
+                version: "1.0",
+                normalizedSearchText: "safari com.apple.safari",
+                rootPriority: 0
+            ),
+        ]
+    }
+}
+
+@MainActor
+private final class UITestApplicationLauncher: ApplicationLaunching {
+    func launch(_ application: LaunchableApplication) async throws {}
+    func revealInFinder(_ application: LaunchableApplication) {}
+}
+
+@MainActor
+private final class UITestPasteboard: PasteboardAccessing {
+    private var storedSnapshot = PasteboardSnapshot(items: [])
+    private(set) var changeCount = 0
+
+    func snapshot() -> PasteboardSnapshotResult {
+        .captured(storedSnapshot)
+    }
+
+    func replace(
+        with content: PasteboardContent,
+        preserving snapshot: PasteboardSnapshot
+    ) -> PasteboardReplacementResult {
+        changeCount += 1
+        return .written(changeCount: changeCount)
+    }
+
+    func restore(_ snapshot: PasteboardSnapshot) -> Bool {
+        storedSnapshot = snapshot
+        changeCount += 1
+        return true
+    }
+}
+
+@MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private let logger = Logger(subsystem: "com.yorozu.app", category: "lifecycle")
 
-    private lazy var store: LauncherStore? = {
-        do {
-            return try LauncherStore(databaseURL: LauncherStore.defaultDatabaseURL())
-        } catch {
-            logger.error("Database initialization failed: \(error.localizedDescription, privacy: .public)")
-            return nil
+    private lazy var environment: AppEnvironment = {
+        let arguments = ProcessInfo.processInfo.arguments
+        if arguments.contains("--ui-testing")
+            || arguments.contains("--ui-testing-settings") {
+            let runID = value(after: "--ui-testing-run-id", in: arguments)
+                ?? UUID().uuidString
+            do {
+                return try AppEnvironment.uiTesting(runID: runID)
+            } catch {
+                logger.error("UI test environment initialization failed")
+                preconditionFailure(
+                    "Yorozu will not fall back to production dependencies during UI tests"
+                )
+            }
         }
+        return AppEnvironment.production()
     }()
+    private lazy var storeOpenResult = environment.storeOpenResult
+    private lazy var store: LauncherStore? = storeOpenResult.store
 
     private lazy var catalog = ApplicationCatalog(
         store: store,
-        discoverer: FileSystemApplicationDiscoverer()
+        discoverer: environment.discoverer
     )
     private lazy var featureCatalog = FeatureCommandCatalog(store: store)
     private lazy var clipboardCatalog = ClipboardCatalog(store: store)
     private lazy var snippetCatalog = SnippetCatalog(store: store)
-    private let clipboardPreferences = ClipboardPreferences()
-    private lazy var urlPreviewService = URLPreviewService(store: store)
+    private lazy var clipboardPreferences = ClipboardPreferences(
+        defaults: environment.defaults
+    )
+    private lazy var urlPreviewService = URLPreviewService(
+        store: store,
+        networkEnabled: environment.allowsURLPreviewNetwork
+    )
 
     lazy var viewModel = LauncherViewModel(
         catalog: catalog,
@@ -32,7 +179,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         snippetCatalog: snippetCatalog,
         clipboardPreferences: clipboardPreferences,
         urlPreviewService: urlPreviewService,
-        launcher: WorkspaceApplicationLauncher()
+        shortcutSettings: AppShortcutSettings(
+            usesIsolatedStorage: environment.isolatesShortcutSettings
+        ),
+        launcher: environment.launcher,
+        storageRecoveryNotice: storeOpenResult.recoveryNotice
     )
 
     private lazy var clipboardMonitor = ClipboardMonitor(
@@ -43,12 +194,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.viewModel.handleClipboardSnapshot(snapshot)
         }
     )
-    private lazy var pasteCoordinator = PasteCoordinator(monitor: clipboardMonitor)
+    private lazy var pasteCoordinator: PasteCoordinator = {
+        guard !environment.usesLivePasteIntegration else {
+            return PasteCoordinator(monitor: clipboardMonitor)
+        }
+        return PasteCoordinator(
+            pasteboard: UITestPasteboard(),
+            suppressClipboardMonitor: { _ in },
+            dependencies: PasteCoordinatorDependencies(
+                isAccessibilityTrusted: { false },
+                postPasteShortcut: { false },
+                sleep: { _ in },
+                activationPollInterval: .zero,
+                activationPollAttempts: 0,
+                activationGracePeriod: .zero,
+                restorationDelay: .zero
+            )
+        )
+    }()
     private lazy var paletteController = PaletteWindowController(
         viewModel: viewModel,
         pasteCoordinator: pasteCoordinator
     )
     private var menuBarController: MenuBarController?
+    private var terminationCleanupStarted = false
+    private var terminationCleanupCompleted = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         let arguments = ProcessInfo.processInfo.arguments
@@ -70,17 +240,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         )
 
-        KeyboardShortcuts.onKeyUp(for: .toggleLauncher) { [weak self] in
-            self?.paletteController.toggle(route: .root)
-        }
-        KeyboardShortcuts.onKeyUp(for: .openClipboardHistory) { [weak self] in
-            self?.paletteController.toggle(route: .clipboard)
-        }
-        KeyboardShortcuts.onKeyUp(for: .openSnippets) { [weak self] in
-            self?.paletteController.toggle(route: .snippets)
-        }
-        KeyboardShortcuts.onKeyUp(for: .openAliases) { [weak self] in
-            self?.paletteController.toggle(route: .aliases)
+        if environment.registersGlobalShortcuts {
+            KeyboardShortcuts.onKeyUp(for: .toggleLauncher) { [weak self] in
+                self?.paletteController.toggle(route: .root)
+            }
+            KeyboardShortcuts.onKeyUp(for: .openClipboardHistory) { [weak self] in
+                self?.paletteController.toggle(route: .clipboard)
+            }
+            KeyboardShortcuts.onKeyUp(for: .openSnippets) { [weak self] in
+                self?.paletteController.toggle(route: .snippets)
+            }
+            KeyboardShortcuts.onKeyUp(for: .openAliases) { [weak self] in
+                self?.paletteController.toggle(route: .aliases)
+            }
         }
 
         viewModel.start()
@@ -90,8 +262,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 await self.clipboardMonitor.update(settings: settings)
             }
         }
-        Task {
-            await clipboardMonitor.start()
+        if environment.startsClipboardMonitor {
+            Task {
+                await clipboardMonitor.start()
+            }
         }
 
         #if DEBUG
@@ -182,17 +356,51 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         false
     }
 
-    func applicationWillTerminate(_ notification: Notification) {
-        KeyboardShortcuts.disable(
-            .toggleLauncher,
-            .openClipboardHistory,
-            .openSnippets,
-            .openAliases
-        )
-        Task {
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        if terminationCleanupCompleted {
+            return .terminateNow
+        }
+        guard !terminationCleanupStarted else {
+            return .terminateCancel
+        }
+        terminationCleanupStarted = true
+        viewModel.shutdown()
+        let clipboardMonitor = self.clipboardMonitor
+        let store = store
+        let temporaryDirectory = environment.temporaryDirectory
+        Task.detached(priority: .utility) {
             await clipboardMonitor.stop()
+            try? await store?.close()
+            if let temporaryDirectory {
+                try? FileManager.default.removeItem(at: temporaryDirectory)
+            }
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.terminationCleanupCompleted = true
+                NSApplication.shared.terminate(nil)
+            }
+        }
+        return .terminateCancel
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        if environment.registersGlobalShortcuts {
+            KeyboardShortcuts.disable(
+                .toggleLauncher,
+                .openClipboardHistory,
+                .openSnippets,
+                .openAliases
+            )
         }
         paletteController.invalidate()
+    }
+
+    private func value(after option: String, in arguments: [String]) -> String? {
+        guard let index = arguments.firstIndex(of: option),
+              arguments.indices.contains(index + 1) else {
+            return nil
+        }
+        return arguments[index + 1]
     }
 
     #if DEBUG

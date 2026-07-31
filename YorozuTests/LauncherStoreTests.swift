@@ -10,13 +10,13 @@ final class LauncherStoreTests: XCTestCase {
             at: temporaryDirectory,
             withIntermediateDirectories: true
         )
-        addTeardownBlock {
-            try? FileManager.default.removeItem(at: temporaryDirectory)
-        }
-
         let store = try LauncherStore(
             databaseURL: temporaryDirectory.appendingPathComponent("Yorozu.sqlite")
         )
+        addTeardownBlock {
+            try? await store.close()
+            try? FileManager.default.removeItem(at: temporaryDirectory)
+        }
         let application = DiscoveredApplication(
             id: ApplicationIdentity(rawValue: "bundle:test.example"),
             bundleIdentifier: "test.example",
@@ -436,6 +436,158 @@ final class LauncherStoreTests: XCTestCase {
         }
     }
 
+    func testURLPreviewAddressPolicyRejectsPrivateReservedAndMixedAnswers() async {
+        let rejectedAddresses = [
+            "0.0.0.0",
+            "10.0.0.1",
+            "100.64.0.1",
+            "127.0.0.1",
+            "169.254.1.1",
+            "172.16.0.1",
+            "192.168.0.1",
+            "192.0.2.1",
+            "198.51.100.1",
+            "203.0.113.1",
+            "224.0.0.1",
+            "::",
+            "::1",
+            "fc00::1",
+            "fe80::1",
+            "ff02::1",
+            "2001:db8::1",
+            "::ffff:127.0.0.1",
+        ]
+        for address in rejectedAddresses {
+            XCTAssertFalse(
+                URLPreviewPolicy.isPublicIPAddress(address),
+                "Expected \(address) to be rejected"
+            )
+        }
+        XCTAssertTrue(URLPreviewPolicy.isPublicIPAddress("93.184.216.34"))
+        XCTAssertTrue(URLPreviewPolicy.isPublicIPAddress("2606:4700:4700::1111"))
+
+        let privateFetcher = SafeURLPreviewFetcher { _ in ["127.0.0.1"] }
+        let mixedFetcher = SafeURLPreviewFetcher { _ in [
+            "93.184.216.34",
+            "10.0.0.1",
+        ] }
+        let url = URL(string: "https://example.com/")!
+
+        do {
+            _ = try await privateFetcher.fetch(url)
+            XCTFail("Expected a private address to be rejected")
+        } catch {
+            XCTAssertEqual(error as? SafeURLPreviewError, .restrictedAddress)
+        }
+        do {
+            _ = try await mixedFetcher.fetch(url)
+            XCTFail("Expected a mixed DNS answer to be rejected")
+        } catch {
+            XCTAssertEqual(error as? SafeURLPreviewError, .restrictedAddress)
+        }
+    }
+
+    func testSafeURLPreviewParsesOnlyBoundedHTMLMetadata() async throws {
+        let loader = URLPreviewLoaderStub { url, maximumBytes, mimeTypes in
+            return SafeURLHTTPResponse(
+                data: Data(
+                    """
+                    <html><head>
+                    <title>Fallback Title</title>
+                    <meta property="og:title" content="Bounded &amp; Safe">
+                    <meta property="og:site_name" content="Example">
+                    </head></html>
+                    """.utf8
+                ),
+                finalURL: url,
+                statusCode: 200,
+                headers: [:]
+            )
+        }
+        let fetcher = SafeURLPreviewFetcher(
+            resolveAddresses: { _ in ["93.184.216.34"] },
+            loadResponse: { url, maximumBytes, mimeTypes in
+                try await loader.load(
+                    url,
+                    maximumBytes: maximumBytes,
+                    mimeTypes: mimeTypes
+                )
+            }
+        )
+
+        let document = try await fetcher.fetch(
+            URL(string: "https://example.com/")!
+        )
+
+        XCTAssertEqual(document.title, "Bounded & Safe")
+        XCTAssertEqual(document.siteName, "Example")
+        XCTAssertNil(document.imageData)
+        let request = await loader.lastRequest
+        XCTAssertEqual(request?.maximumBytes, 1_048_576)
+        XCTAssertEqual(request?.mimeTypes, ["text/html"])
+    }
+
+    func testSafeURLPreviewRevalidatesPrivateRedirectAndLimitsLoops() async {
+        let privateRedirectLoader = URLPreviewLoaderStub { url, _, _ in
+            SafeURLHTTPResponse(
+                data: Data(),
+                finalURL: url,
+                statusCode: 302,
+                headers: ["location": "http://127.0.0.1/private"]
+            )
+        }
+        let privateRedirectFetcher = SafeURLPreviewFetcher(
+            resolveAddresses: { _ in ["93.184.216.34"] },
+            loadResponse: { url, maximumBytes, mimeTypes in
+                try await privateRedirectLoader.load(
+                    url,
+                    maximumBytes: maximumBytes,
+                    mimeTypes: mimeTypes
+                )
+            }
+        )
+
+        do {
+            _ = try await privateRedirectFetcher.fetch(
+                URL(string: "https://example.com/")!
+            )
+            XCTFail("Expected the private redirect to be rejected")
+        } catch {
+            XCTAssertEqual(error as? SafeURLPreviewError, .restrictedAddress)
+        }
+
+        let loopLoader = URLPreviewLoaderStub { url, _, _ in
+            SafeURLHTTPResponse(
+                data: Data(),
+                finalURL: url,
+                statusCode: 302,
+                headers: ["location": "/loop"]
+            )
+        }
+        let loopFetcher = SafeURLPreviewFetcher(
+            resolveAddresses: { _ in ["93.184.216.34"] },
+            loadResponse: { url, maximumBytes, mimeTypes in
+                try await loopLoader.load(
+                    url,
+                    maximumBytes: maximumBytes,
+                    mimeTypes: mimeTypes
+                )
+            }
+        )
+
+        do {
+            _ = try await loopFetcher.fetch(URL(string: "https://example.com/loop")!)
+            XCTFail("Expected the redirect loop to stop")
+        } catch {
+            XCTAssertEqual(
+                error as? SafeURLPreviewError,
+                .redirectLimitExceeded
+            )
+        }
+        let loopLoadCount = await loopLoader.loadCount
+        XCTAssertEqual(loopLoadCount, 6)
+    }
+
     func testURLPreviewCacheRoundTripAndExpiry() async throws {
         let fixture = try makeStore()
         let fetchedAt = Date(timeIntervalSince1970: 10_000)
@@ -638,6 +790,109 @@ final class LauncherStoreTests: XCTestCase {
         XCTAssertEqual(session.values.first?.imageData, capture.imageData)
     }
 
+    func testOpenRecoveringPreservesCorruptDatabaseAndCreatesFreshStore() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true
+        )
+        let databaseURL = directory.appendingPathComponent("Yorozu.sqlite")
+        let corruptData = Data("not a sqlite database".utf8)
+        try corruptData.write(to: databaseURL)
+
+        let result = LauncherStore.openRecovering(databaseURL: databaseURL)
+        let store = try XCTUnwrap(result.store)
+        let notice = try XCTUnwrap(result.recoveryNotice)
+        addTeardownBlock {
+            try? await store.close()
+            try? FileManager.default.removeItem(at: directory)
+        }
+
+        XCTAssertEqual(
+            try Data(
+                contentsOf: notice.backupDirectory
+                    .appendingPathComponent("Yorozu.sqlite")
+            ),
+            corruptData
+        )
+        let clipboardItems = try await store.loadClipboardItems()
+        let snippets = try await store.loadSnippets()
+        XCTAssertTrue(clipboardItems.isEmpty)
+        XCTAssertTrue(snippets.isEmpty)
+    }
+
+    func testSnippetPreservesWhitespaceAndUsageDoesNotChangeUpdatedAt() async throws {
+        let fixture = try makeStore()
+        let updatedAt = Date(timeIntervalSince1970: 1_000)
+        let content = "\n  Preserve this spacing.  \n"
+        let snippet = Snippet(
+            id: UUID(),
+            name: "Spacing",
+            keyword: nil,
+            content: content,
+            useCount: 0,
+            lastUsedAt: nil,
+            createdAt: updatedAt,
+            updatedAt: updatedAt
+        )
+        try await fixture.store.saveSnippet(snippet)
+
+        try await fixture.store.recordSnippetUse(
+            id: snippet.id,
+            usedAt: Date(timeIntervalSince1970: 2_000)
+        )
+        let loadedSnippets = try await fixture.store.loadSnippets()
+        let loaded = try XCTUnwrap(loadedSnippets.first)
+
+        XCTAssertEqual(loaded.content, content)
+        XCTAssertEqual(loaded.useCount, 1)
+        XCTAssertEqual(loaded.lastUsedAt, Date(timeIntervalSince1970: 2_000))
+        XCTAssertEqual(loaded.updatedAt, updatedAt)
+    }
+
+    func testClipboardRejectsNewPinAfterPinnedItemLimit() async {
+        let pinnedItems = (0..<ClipboardStoragePolicy.maximumPinnedItems).map { index in
+            clipboardItem(
+                text: "Pinned \(index)",
+                isPinned: true,
+                imageByteCount: nil
+            )
+        }
+        let candidate = clipboardItem(
+            text: "Candidate",
+            isPinned: false,
+            imageByteCount: nil
+        )
+        let catalog = ClipboardCatalog(
+            store: nil,
+            initialItems: pinnedItems + [candidate]
+        )
+
+        let snapshot = await catalog.togglePin(id: candidate.id)
+
+        XCTAssertEqual(snapshot.message, "Pinned item limit reached. Unpin an item before pinning another.")
+        XCTAssertFalse(
+            snapshot.values.first(where: { $0.id == candidate.id })?.isPinned ?? true
+        )
+    }
+
+    func testClipboardKeepsExistingPinsAboveLimit() async {
+        let items = (0...ClipboardStoragePolicy.maximumPinnedItems).map { index in
+            clipboardItem(
+                text: "Pinned \(index)",
+                isPinned: true,
+                imageByteCount: nil
+            )
+        }
+        let catalog = ClipboardCatalog(store: nil, initialItems: items)
+
+        let snapshot = await catalog.load()
+
+        XCTAssertEqual(snapshot.values.count, items.count)
+        XCTAssertTrue(snapshot.values.allSatisfy(\.isPinned))
+    }
+
     private func makeStore() throws -> (store: LauncherStore, directory: URL) {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
@@ -645,15 +900,14 @@ final class LauncherStoreTests: XCTestCase {
             at: directory,
             withIntermediateDirectories: true
         )
+        let store = try LauncherStore(
+            databaseURL: directory.appendingPathComponent("Yorozu.sqlite")
+        )
         addTeardownBlock {
+            try? await store.close()
             try? FileManager.default.removeItem(at: directory)
         }
-        return (
-            try LauncherStore(
-                databaseURL: directory.appendingPathComponent("Yorozu.sqlite")
-            ),
-            directory
-        )
+        return (store, directory)
     }
 
     private func application(
@@ -672,6 +926,32 @@ final class LauncherStoreTests: XCTestCase {
             rootPriority: 1
         )
     }
+
+    private func clipboardItem(
+        text: String,
+        isPinned: Bool,
+        imageByteCount: Int?
+    ) -> ClipboardItem {
+        let now = Date()
+        return ClipboardItem(
+            id: UUID(),
+            kind: imageByteCount == nil ? .text : .image,
+            contentHash: UUID().uuidString,
+            textContent: imageByteCount == nil ? text : nil,
+            filePaths: [],
+            imageData: nil,
+            imageByteCount: imageByteCount,
+            imageWidth: nil,
+            imageHeight: nil,
+            normalizedSearchText: text.launcherNormalized,
+            sourceBundleIdentifier: nil,
+            sourceApplicationName: nil,
+            isPinned: isPinned,
+            pinnedAt: isPinned ? now : nil,
+            copiedAt: now,
+            updatedAt: now
+        )
+    }
 }
 
 private struct StoreTestDiscoverer: ApplicationDiscovering {
@@ -679,5 +959,41 @@ private struct StoreTestDiscoverer: ApplicationDiscovering {
 
     func discoverApplications() async throws -> [DiscoveredApplication] {
         applications
+    }
+}
+
+private actor URLPreviewLoaderStub {
+    struct Request: Sendable {
+        let url: URL
+        let maximumBytes: Int
+        let mimeTypes: [String]
+    }
+
+    typealias Handler = @Sendable (
+        URL,
+        Int,
+        [String]
+    ) throws -> SafeURLHTTPResponse
+
+    private let handler: Handler
+    private(set) var loadCount = 0
+    private(set) var lastRequest: Request?
+
+    init(handler: @escaping Handler) {
+        self.handler = handler
+    }
+
+    func load(
+        _ url: URL,
+        maximumBytes: Int,
+        mimeTypes: [String]
+    ) throws -> SafeURLHTTPResponse {
+        loadCount += 1
+        lastRequest = Request(
+            url: url,
+            maximumBytes: maximumBytes,
+            mimeTypes: mimeTypes
+        )
+        return try handler(url, maximumBytes, mimeTypes)
     }
 }

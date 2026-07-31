@@ -30,7 +30,10 @@ actor FileSystemApplicationDiscoverer: ApplicationDiscovering {
     func discoverApplications() async throws -> [DiscoveredApplication] {
         var candidates: [Candidate] = []
         for root in roots where FileManager.default.fileExists(atPath: root.url.path) {
-            candidates.append(contentsOf: scan(root: root.url, priority: root.priority))
+            try Task.checkCancellation()
+            candidates.append(
+                contentsOf: try scan(root: root.url, priority: root.priority)
+            )
         }
 
         let grouped = Dictionary(grouping: candidates, by: \.application.id)
@@ -38,6 +41,7 @@ actor FileSystemApplicationDiscoverer: ApplicationDiscovering {
         selected.reserveCapacity(grouped.count)
 
         for (_, group) in grouped {
+            try Task.checkCancellation()
             if group.count == 1, let application = group.first?.application {
                 selected.append(application)
                 continue
@@ -87,7 +91,7 @@ actor FileSystemApplicationDiscoverer: ApplicationDiscovering {
         }
     }
 
-    private func scan(root: URL, priority: Int) -> [Candidate] {
+    private func scan(root: URL, priority: Int) throws -> [Candidate] {
         let resourceKeys: [URLResourceKey] = [.isDirectoryKey, .isPackageKey, .isHiddenKey]
         guard let enumerator = FileManager.default.enumerator(
             at: root,
@@ -99,6 +103,7 @@ actor FileSystemApplicationDiscoverer: ApplicationDiscovering {
 
         var candidates: [Candidate] = []
         for case let url as URL in enumerator {
+            try Task.checkCancellation()
             guard url.pathExtension.lowercased() == "app",
                   let application = makeApplication(url: url, rootPriority: priority) else {
                 continue

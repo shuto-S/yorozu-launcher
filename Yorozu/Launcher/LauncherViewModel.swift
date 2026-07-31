@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import ImageIO
 import Observation
@@ -98,6 +99,7 @@ final class LauncherViewModel {
     private(set) var isClipboardImageLoading = false
     var errorMessage: String?
     private(set) var statusMessage: String?
+    private(set) var storageRecoveryNotice: StorageRecoveryNotice?
     private(set) var focusRequest = 0
     private(set) var isActionPanelPresented = false
     var actionQuery = "" {
@@ -139,10 +141,11 @@ final class LauncherViewModel {
         PasteboardContent,
         @escaping @MainActor (PasteResult) -> Void
     ) -> Void)?
-    var copyContent: ((PasteboardContent) async -> Bool)?
+    var copyContent: ((PasteboardContent) async -> PasteboardReplacementResult)?
 
     let clipboardPreferences: ClipboardPreferences
     let urlPreviewService: URLPreviewService
+    let shortcutSettings: AppShortcutSettings
 
     private let catalog: ApplicationCatalog
     private let featureCatalog: FeatureCommandCatalog
@@ -152,6 +155,7 @@ final class LauncherViewModel {
     private var searchRevision = 0
     private var searchTask: Task<Void, Never>?
     private var clipboardImageLoadTask: Task<Void, Never>?
+    private var startupTasks: [Task<Void, Never>] = []
     private var clipboardImageGeneration = 0
     private let clipboardImageDecoder: any ClipboardImageDecoding
     @ObservationIgnored private let clipboardImageCache = NSCache<NSUUID, CGImage>()
@@ -174,8 +178,10 @@ final class LauncherViewModel {
         snippetCatalog: SnippetCatalog,
         clipboardPreferences: ClipboardPreferences,
         urlPreviewService: URLPreviewService,
+        shortcutSettings: AppShortcutSettings = AppShortcutSettings(),
         launcher: any ApplicationLaunching,
-        clipboardImageDecoder: any ClipboardImageDecoding = ClipboardImageDecoder()
+        clipboardImageDecoder: any ClipboardImageDecoding = ClipboardImageDecoder(),
+        storageRecoveryNotice: StorageRecoveryNotice? = nil
     ) {
         self.catalog = catalog
         self.featureCatalog = featureCatalog
@@ -183,8 +189,10 @@ final class LauncherViewModel {
         self.snippetCatalog = snippetCatalog
         self.clipboardPreferences = clipboardPreferences
         self.urlPreviewService = urlPreviewService
+        self.shortcutSettings = shortcutSettings
         self.launcher = launcher
         self.clipboardImageDecoder = clipboardImageDecoder
+        self.storageRecoveryNotice = storageRecoveryNotice
         clipboardImageCache.countLimit = 8
         clipboardImageCache.totalCostLimit = 32 * 1_024 * 1_024
     }
@@ -435,34 +443,58 @@ final class LauncherViewModel {
         guard !hasStarted else { return }
         hasStarted = true
 
-        Task {
-            let snapshot = await clipboardCatalog.load()
-            apply(clipboardSnapshot: snapshot)
-            if route == .clipboard {
-                refreshSearch(preserveSelection: true)
-            }
-        }
-        Task {
-            let snapshot = await snippetCatalog.load()
-            apply(snippetSnapshot: snapshot)
-            if route == .snippets {
-                refreshSearch(preserveSelection: true)
-            }
-        }
-        Task {
-            let snapshot = await featureCatalog.load()
-            apply(featureSnapshot: snapshot)
-            if route == .root {
-                refreshSearch(preserveSelection: true)
-            }
-        }
-        Task {
-            apply(snapshot: await catalog.loadCachedApplications())
-            if route == .root || route == .aliases {
-                refreshSearch(preserveSelection: true)
-            }
-            await reindex()
-        }
+        startupTasks = [
+            Task {
+                let snapshot = await clipboardCatalog.load()
+                guard !Task.isCancelled else { return }
+                apply(clipboardSnapshot: snapshot)
+                let settings = clipboardPreferences.recordingSettings
+                let prunedSnapshot = await clipboardCatalog.prune(
+                    retentionDays: settings.retentionDays,
+                    maximumItems: settings.maximumItems
+                )
+                guard !Task.isCancelled else { return }
+                apply(clipboardSnapshot: prunedSnapshot)
+                if route == .clipboard {
+                    refreshSearch(preserveSelection: true)
+                }
+            },
+            Task {
+                let snapshot = await snippetCatalog.load()
+                guard !Task.isCancelled else { return }
+                apply(snippetSnapshot: snapshot)
+                if route == .snippets {
+                    refreshSearch(preserveSelection: true)
+                }
+            },
+            Task {
+                let snapshot = await featureCatalog.load()
+                guard !Task.isCancelled else { return }
+                apply(featureSnapshot: snapshot)
+                if route == .root {
+                    refreshSearch(preserveSelection: true)
+                }
+            },
+            Task {
+                let cachedSnapshot = await catalog.loadCachedApplications()
+                guard !Task.isCancelled else { return }
+                apply(snapshot: cachedSnapshot)
+                if route == .root || route == .aliases {
+                    refreshSearch(preserveSelection: true)
+                }
+                await reindex()
+            },
+        ]
+    }
+
+    func shutdown() {
+        searchTask?.cancel()
+        searchTask = nil
+        clipboardImageLoadTask?.cancel()
+        clipboardImageLoadTask = nil
+        urlPreviewService.cancel(resetState: true)
+        startupTasks.forEach { $0.cancel() }
+        startupTasks.removeAll(keepingCapacity: false)
     }
 
     func prepareForPresentation(
@@ -549,7 +581,7 @@ final class LauncherViewModel {
                 try await launcher.launch(application)
                 apply(snapshot: await catalog.recordSuccessfulLaunch(identity: application.id))
             } catch {
-                logger.error("Application launch failed: \(error.localizedDescription, privacy: .public)")
+                logger.error("Application launch failed")
                 apply(snapshot: await catalog.remove(identity: application.id))
                 errorMessage = LauncherError.applicationUnavailable(application.primaryName)
                     .localizedDescription
@@ -747,16 +779,18 @@ final class LauncherViewModel {
         switch result.payload {
         case .clipboard:
             guard let item = selectedClipboardItem else { return }
-            recordClipboardUse(item.id)
             if item.kind == .image {
                 pasteImageItem(item)
             } else {
-                performPaste(item.pasteboardContent)
+                performPaste(item.pasteboardContent) { [weak self] in
+                    self?.recordClipboardUse(item.id)
+                }
             }
         case .snippet:
             guard let snippet = selectedSnippet else { return }
-            recordSnippetUse(snippet.id)
-            performPaste(.text(snippet.content))
+            performPaste(.text(snippet.content)) { [weak self] in
+                self?.recordSnippetUse(snippet.id)
+            }
         case .application, .feature:
             return
         }
@@ -767,45 +801,72 @@ final class LauncherViewModel {
         switch result.payload {
         case .clipboard:
             guard let item = selectedClipboardItem else { return }
-            recordClipboardUse(item.id)
             if item.kind == .image {
                 copyImageItem(item)
             } else {
-                performCopy(item.pasteboardContent)
+                performCopy(item.pasteboardContent) { [weak self] in
+                    self?.recordClipboardUse(item.id)
+                }
             }
         case .snippet:
             guard let snippet = selectedSnippet else { return }
-            recordSnippetUse(snippet.id)
-            performCopy(.text(snippet.content))
+            performCopy(.text(snippet.content)) { [weak self] in
+                self?.recordSnippetUse(snippet.id)
+            }
         case .application, .feature:
             return
         }
     }
 
-    private func performPaste(_ content: PasteboardContent) {
+    private func performPaste(
+        _ content: PasteboardContent,
+        onSuccess: @escaping @MainActor () -> Void
+    ) {
         dismissActionPanel(restoreSearchFocus: false)
         pasteContent?(content) { [weak self] result in
             switch result {
             case .pasted:
-                break
+                onSuccess()
             case .copiedBecausePermissionDenied:
+                onSuccess()
                 self?.statusMessage = "Copied. Allow Accessibility to paste automatically."
             case .copiedBecauseTargetUnavailable:
+                onSuccess()
                 self?.statusMessage = "Copied. The target application is no longer available."
             case .copiedBecauseActivationFailed:
+                onSuccess()
                 self?.statusMessage = "Copied. Yorozu couldn’t activate the target application."
+            case .failedBecauseClipboardCouldNotBePreserved:
+                self?.errorMessage =
+                    "The current clipboard is too large to preserve safely."
             case .failed:
                 self?.errorMessage = "The selected content couldn’t be pasted."
             }
         }
     }
 
-    private func performCopy(_ content: PasteboardContent) {
+    private func performCopy(
+        _ content: PasteboardContent,
+        onSuccess: @escaping @MainActor () -> Void
+    ) {
         Task {
-            if await copyContent?(content) == true {
-                statusMessage = "Copied to Clipboard"
-            } else {
+            guard let result = await copyContent?(content) else {
                 errorMessage = "The selected content could not be copied."
+                return
+            }
+            switch result {
+            case .written:
+                onSuccess()
+                statusMessage = "Copied to Clipboard"
+            case .preservationLimitExceeded:
+                errorMessage = "The current clipboard is too large to preserve safely."
+            case .invalidContent:
+                errorMessage = "The selected content is no longer available."
+            case .writeFailedAndRestored:
+                errorMessage = "The selected content could not be copied."
+            case .writeFailedAndRestoreFailed:
+                errorMessage =
+                    "Copy failed, and the previous clipboard could not be restored."
             }
         }
     }
@@ -816,7 +877,9 @@ final class LauncherViewModel {
                 errorMessage = "The selected image could not be loaded."
                 return
             }
-            performPaste(.image(data))
+            performPaste(.image(data)) { [weak self] in
+                self?.recordClipboardUse(item.id)
+            }
         }
     }
 
@@ -826,8 +889,15 @@ final class LauncherViewModel {
                 errorMessage = "The selected image could not be loaded."
                 return
             }
-            performCopy(.image(data))
+            performCopy(.image(data)) { [weak self] in
+                self?.recordClipboardUse(item.id)
+            }
         }
+    }
+
+    func restoreSelectionAfterOperation(_ selection: CommandResultID?) {
+        guard let selection, resultIndexByID[selection] != nil else { return }
+        selectedID = selection
     }
 
     func newSnippet() {
@@ -928,6 +998,17 @@ final class LauncherViewModel {
             )
             refreshSearch()
         }
+    }
+
+    func revealStorageRecoveryBackup() {
+        guard let storageRecoveryNotice else { return }
+        NSWorkspace.shared.activateFileViewerSelecting([
+            storageRecoveryNotice.backupDirectory,
+        ])
+    }
+
+    func dismissStorageRecoveryNotice() {
+        storageRecoveryNotice = nil
     }
 
     func showActionMenu() {

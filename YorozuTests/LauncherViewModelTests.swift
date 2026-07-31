@@ -1,10 +1,64 @@
 import AppKit
-@preconcurrency import LinkPresentation
+import KeyboardShortcuts
 import XCTest
 @testable import Yorozu
 
 @MainActor
 final class LauncherViewModelTests: XCTestCase {
+    func testUITestEnvironmentUsesOnlyIsolatedDependencies() async throws {
+        let runID = "unit-\(UUID().uuidString)"
+        let suiteName = "com.yorozu.app.ui-tests.\(runID)"
+        let environment = try AppEnvironment.uiTesting(runID: runID)
+        let store = try XCTUnwrap(environment.storeOpenResult.store)
+        let temporaryDirectory = try XCTUnwrap(environment.temporaryDirectory)
+        addTeardownBlock {
+            try? await store.close()
+            await MainActor.run {
+                UserDefaults(suiteName: suiteName)?
+                    .removePersistentDomain(forName: suiteName)
+            }
+            try? FileManager.default.removeItem(at: temporaryDirectory)
+        }
+
+        XCTAssertFalse(environment.startsClipboardMonitor)
+        XCTAssertFalse(environment.usesLivePasteIntegration)
+        XCTAssertFalse(environment.allowsURLPreviewNetwork)
+        XCTAssertFalse(environment.registersGlobalShortcuts)
+        XCTAssertTrue(environment.isolatesShortcutSettings)
+        XCTAssertTrue(
+            temporaryDirectory.path.contains("com.yorozu.app-ui-tests-\(runID)")
+        )
+        XCTAssertFalse(
+            temporaryDirectory.path.contains("Library/Application Support/com.yorozu.app")
+        )
+
+        let applications = try await environment.discoverer.discoverApplications()
+        XCTAssertEqual(
+            applications.map(\.bundleIdentifier),
+            ["com.microsoft.vscode", "com.apple.Safari"]
+        )
+
+        let isolationKey = "isolation-\(UUID().uuidString)"
+        environment.defaults.set(true, forKey: isolationKey)
+        XCTAssertNil(UserDefaults.standard.object(forKey: isolationKey))
+
+        let launcherDefinition = try XCTUnwrap(
+            AppShortcutCatalog.settings.first(where: { $0.id == "open-launcher" })
+        )
+        let productionShortcut = KeyboardShortcuts.getShortcut(
+            for: launcherDefinition.name
+        )
+        let isolatedShortcuts = AppShortcutSettings(usesIsolatedStorage: true)
+        isolatedShortcuts.binding(for: launcherDefinition).wrappedValue = .init(
+            .a,
+            modifiers: [.command, .shift]
+        )
+        XCTAssertEqual(
+            KeyboardShortcuts.getShortcut(for: launcherDefinition.name),
+            productionShortcut
+        )
+    }
+
     func testMarkedTextCompositionKeysPassThroughToTheInputMethod() {
         let keyCodes: [UInt16] = [
             36,  // Return
@@ -165,19 +219,18 @@ final class LauncherViewModelTests: XCTestCase {
     }
 
     func testFailedURLPreviewIsNotFetchedAgainAfterRefocus() async {
-        let providerFactory = FailingURLPreviewMetadataProviderFactory()
+        let fetcher = FailingURLPreviewFetcher()
         let service = URLPreviewService(
             store: nil,
-            metadataProviderFactory: {
-                providerFactory.makeProvider()
-            },
+            fetcher: fetcher,
             fetchDelay: .zero
         )
         let failedURL = "https://example.com/preview-failure"
 
         service.load(rawURL: failedURL, isEnabled: true)
         await waitForFailedPreview(failedURL, in: service)
-        XCTAssertEqual(providerFactory.fetchCount, 1)
+        var fetchCount = await fetcher.fetchCount
+        XCTAssertEqual(fetchCount, 1)
 
         service.cancel(resetState: true)
         service.load(rawURL: failedURL, isEnabled: true)
@@ -189,15 +242,34 @@ final class LauncherViewModelTests: XCTestCase {
                 .failed
             )
         )
-        XCTAssertEqual(providerFactory.fetchCount, 1)
+        fetchCount = await fetcher.fetchCount
+        XCTAssertEqual(fetchCount, 1)
 
         service.cancel(resetState: true)
         service.load(
             rawURL: "https://example.com/different-preview",
             isEnabled: true
         )
-        await waitForFetchCount(2, in: providerFactory)
-        XCTAssertEqual(providerFactory.fetchCount, 2)
+        await waitForFetchCount(2, in: fetcher)
+        fetchCount = await fetcher.fetchCount
+        XCTAssertEqual(fetchCount, 2)
+    }
+
+    func testURLPreviewNetworkDisabledDoesNotCreateFetchTask() async {
+        let fetcher = FailingURLPreviewFetcher()
+        let service = URLPreviewService(
+            store: nil,
+            fetcher: fetcher,
+            fetchDelay: .zero,
+            networkEnabled: false
+        )
+
+        service.load(rawURL: "https://example.com/", isEnabled: true)
+        try? await Task.sleep(for: .milliseconds(20))
+
+        let fetchCount = await fetcher.fetchCount
+        XCTAssertEqual(fetchCount, 0)
+        XCTAssertEqual(service.state, .idle)
     }
 
     func testFeatureRouteFirstUsableListPerformanceWithTwoThousandItems() async throws {
@@ -564,7 +636,7 @@ final class LauncherViewModelTests: XCTestCase {
             urlPreviewService: URLPreviewService(store: nil),
             launcher: StubApplicationLauncher(shouldFail: false)
         )
-        viewModel.copyContent = { _ in true }
+        viewModel.copyContent = { _ in .written(changeCount: 2) }
         viewModel.pasteContent = { _, completion in
             completion(.pasted)
         }
@@ -1005,9 +1077,6 @@ final class LauncherViewModelTests: XCTestCase {
             at: directory,
             withIntermediateDirectories: true
         )
-        addTeardownBlock {
-            try? FileManager.default.removeItem(at: directory)
-        }
         let application = DiscoveredApplication(
             id: ApplicationIdentity(rawValue: "bundle:com.example.fixture"),
             bundleIdentifier: "com.example.fixture",
@@ -1021,6 +1090,10 @@ final class LauncherViewModelTests: XCTestCase {
         let store = try LauncherStore(
             databaseURL: directory.appendingPathComponent("Yorozu.sqlite")
         )
+        addTeardownBlock {
+            try? await store.close()
+            try? FileManager.default.removeItem(at: directory)
+        }
         let catalog = ApplicationCatalog(
             store: store,
             discoverer: StubApplicationDiscoverer(applications: [application]),
@@ -1229,10 +1302,10 @@ final class LauncherViewModelTests: XCTestCase {
 
     private func waitForFetchCount(
         _ expectedCount: Int,
-        in factory: FailingURLPreviewMetadataProviderFactory
+        in fetcher: FailingURLPreviewFetcher
     ) async {
         for _ in 0..<100 {
-            if factory.fetchCount == expectedCount {
+            if await fetcher.fetchCount == expectedCount {
                 return
             }
             try? await Task.sleep(for: .milliseconds(1))
@@ -1255,10 +1328,6 @@ final class LauncherViewModelTests: XCTestCase {
             at: directory,
             withIntermediateDirectories: true
         )
-        addTeardownBlock {
-            try? FileManager.default.removeItem(at: directory)
-        }
-
         let application = DiscoveredApplication(
             id: ApplicationIdentity(rawValue: "bundle:com.example.fixture"),
             bundleIdentifier: "com.example.fixture",
@@ -1272,6 +1341,10 @@ final class LauncherViewModelTests: XCTestCase {
         let store = try LauncherStore(
             databaseURL: directory.appendingPathComponent("Yorozu.sqlite")
         )
+        addTeardownBlock {
+            try? await store.close()
+            try? FileManager.default.removeItem(at: directory)
+        }
         let catalog = ApplicationCatalog(
             store: store,
             discoverer: StubApplicationDiscoverer(
@@ -1347,45 +1420,13 @@ private actor DelayedClipboardImageDecoder: ClipboardImageDecoding {
     }
 }
 
-@MainActor
-private final class FailingURLPreviewMetadataProviderFactory {
+private actor FailingURLPreviewFetcher: URLPreviewFetching {
     private(set) var fetchCount = 0
 
-    func makeProvider() -> any URLPreviewMetadataProviding {
-        FailingURLPreviewMetadataProvider { [weak self] in
-            self?.fetchCount += 1
-        }
+    func fetch(_ url: URL) async throws -> URLPreviewDocument {
+        fetchCount += 1
+        throw SafeURLPreviewError.invalidResponse
     }
-}
-
-@MainActor
-private final class FailingURLPreviewMetadataProvider:
-    URLPreviewMetadataProviding
-{
-    var shouldFetchSubresources = false
-    var timeout: TimeInterval = 0
-
-    private let onFetch: () -> Void
-
-    init(onFetch: @escaping () -> Void) {
-        self.onFetch = onFetch
-    }
-
-    func startFetchingMetadata(
-        for url: URL,
-        completionHandler: @escaping @Sendable (LPLinkMetadata?, Error?) -> Void
-    ) {
-        onFetch()
-        completionHandler(
-            nil,
-            NSError(
-                domain: "URLPreviewMetadataProviderTests",
-                code: 1
-            )
-        )
-    }
-
-    func cancel() {}
 }
 
 @MainActor

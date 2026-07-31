@@ -3,7 +3,7 @@ import Foundation
 actor ClipboardCatalog {
     private let store: LauncherStore?
     private var items: [ClipboardItem] = []
-    private var storageAvailable: Bool
+    private let storageAvailable: Bool
     private var latestItemID: UUID?
     private var latestContentHash: String?
     private var writesSinceMaintenance = 0
@@ -26,7 +26,6 @@ actor ClipboardCatalog {
             updateLatestItem()
             return snapshot(message: nil)
         } catch {
-            storageAvailable = false
             return snapshot(message: "Clipboard history could not be loaded.")
         }
     }
@@ -48,7 +47,7 @@ actor ClipboardCatalog {
         retentionDays: Int,
         maximumItems: Int
     ) async -> FeatureSnapshot<ClipboardItem> {
-        guard let store, storageAvailable else {
+        guard let store else {
             merge(capture: capture)
             pruneInMemory(
                 retentionDays: retentionDays,
@@ -78,7 +77,6 @@ actor ClipboardCatalog {
             }
             return snapshot(message: nil)
         } catch {
-            storageAvailable = false
             merge(capture: capture)
             pruneInMemory(
                 retentionDays: retentionDays,
@@ -94,8 +92,31 @@ actor ClipboardCatalog {
             return snapshot(message: nil)
         }
         let willPin = !items[index].isPinned
+        if willPin {
+            let pinnedItems = items.filter(\.isPinned)
+            guard pinnedItems.count < ClipboardStoragePolicy.maximumPinnedItems else {
+                return snapshot(
+                    message: "Pinned item limit reached. Unpin an item before pinning another."
+                )
+            }
+            if items[index].kind == .image {
+                let pinnedImageBytes = pinnedItems.reduce(into: 0) { total, item in
+                    guard item.kind == .image else { return }
+                    total += item.imageByteCount ?? item.imageData?.count ?? 0
+                }
+                let newImageBytes = items[index].imageByteCount
+                    ?? items[index].imageData?.count
+                    ?? 0
+                guard pinnedImageBytes + newImageBytes
+                        <= ClipboardStoragePolicy.maximumPinnedImageBytes else {
+                    return snapshot(
+                        message: "Pinned image storage limit reached. Unpin an image first."
+                    )
+                }
+            }
+        }
 
-        guard let store, storageAvailable else {
+        guard let store else {
             items[index].isPinned = willPin
             items[index].pinnedAt = willPin ? Date() : nil
             items.sort(by: Self.sort)
@@ -111,7 +132,6 @@ actor ClipboardCatalog {
             items.sort(by: Self.sort)
             return snapshot(message: nil)
         } catch {
-            storageAvailable = false
             return snapshot(message: "Pinned state could not be saved.")
         }
     }
@@ -124,7 +144,7 @@ actor ClipboardCatalog {
             return snapshot(message: nil)
         }
 
-        guard let store, storageAvailable else {
+        guard let store else {
             updateUse(at: index, usedAt: usedAt)
             return snapshot(message: nil)
         }
@@ -136,7 +156,6 @@ actor ClipboardCatalog {
             updateUse(at: refreshedIndex, usedAt: usedAt)
             return snapshot(message: nil)
         } catch {
-            storageAvailable = false
             if let currentIndex = items.firstIndex(where: { $0.id == id }) {
                 updateUse(at: currentIndex, usedAt: usedAt)
             }
@@ -148,17 +167,16 @@ actor ClipboardCatalog {
         if let data = items.first(where: { $0.id == id })?.imageData {
             return data
         }
-        guard let store, storageAvailable else { return nil }
+        guard let store else { return nil }
         do {
             return try await store.loadClipboardImageData(id: id)
         } catch {
-            storageAvailable = false
             return nil
         }
     }
 
     func delete(id: UUID) async -> FeatureSnapshot<ClipboardItem> {
-        guard let store, storageAvailable else {
+        guard let store else {
             items.removeAll(where: { $0.id == id })
             if latestItemID == id {
                 updateLatestItem()
@@ -173,13 +191,12 @@ actor ClipboardCatalog {
             }
             return snapshot(message: nil)
         } catch {
-            storageAvailable = false
             return snapshot(message: "The clipboard item could not be deleted.")
         }
     }
 
     func clear(includePinned: Bool) async -> FeatureSnapshot<ClipboardItem> {
-        guard let store, storageAvailable else {
+        guard let store else {
             removeClearedItems(includePinned: includePinned)
             return snapshot(message: "Clipboard history was cleared only for this session.")
         }
@@ -188,7 +205,6 @@ actor ClipboardCatalog {
             removeClearedItems(includePinned: includePinned)
             return snapshot(message: nil)
         } catch {
-            storageAvailable = false
             return snapshot(message: "Clipboard history could not be cleared.")
         }
     }
@@ -198,7 +214,7 @@ actor ClipboardCatalog {
         maximumItems: Int,
         now: Date = Date()
     ) async -> FeatureSnapshot<ClipboardItem> {
-        guard let store, storageAvailable else {
+        guard let store else {
             pruneInMemory(
                 retentionDays: retentionDays,
                 maximumItems: maximumItems,
@@ -219,7 +235,6 @@ actor ClipboardCatalog {
             )
             return snapshot(message: nil)
         } catch {
-            storageAvailable = false
             return snapshot(message: "Clipboard retention settings could not be applied.")
         }
     }

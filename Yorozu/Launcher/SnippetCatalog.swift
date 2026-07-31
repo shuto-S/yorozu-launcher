@@ -3,7 +3,7 @@ import Foundation
 actor SnippetCatalog {
     private let store: LauncherStore?
     private var snippets: [Snippet] = []
-    private var storageAvailable: Bool
+    private let storageAvailable: Bool
 
     init(store: LauncherStore?, initialSnippets: [Snippet] = []) {
         self.store = store
@@ -19,7 +19,6 @@ actor SnippetCatalog {
             snippets = try await store.loadSnippets().sorted(by: Self.sort)
             return snapshot(message: nil)
         } catch {
-            storageAvailable = false
             return snapshot(message: "Snippets could not be loaded.")
         }
     }
@@ -42,7 +41,7 @@ actor SnippetCatalog {
             throw SnippetValidationError.duplicateKeyword
         }
 
-        guard let store, storageAvailable else {
+        guard let store else {
             upsert(snippet)
             return snapshot(message: "The snippet is available only for this session.")
         }
@@ -66,7 +65,7 @@ actor SnippetCatalog {
     }
 
     func delete(id: UUID) async -> FeatureSnapshot<Snippet> {
-        guard let store, storageAvailable else {
+        guard let store else {
             snippets.removeAll(where: { $0.id == id })
             return snapshot(message: "The snippet was removed only for this session.")
         }
@@ -75,7 +74,6 @@ actor SnippetCatalog {
             snippets.removeAll(where: { $0.id == id })
             return snapshot(message: nil)
         } catch {
-            storageAvailable = false
             return snapshot(message: "The snippet could not be deleted.")
         }
     }
@@ -85,7 +83,7 @@ actor SnippetCatalog {
             return snapshot(message: nil)
         }
 
-        guard let store, storageAvailable else {
+        guard let store else {
             updateUse(at: index, usedAt: usedAt)
             return snapshot(message: nil)
         }
@@ -97,7 +95,6 @@ actor SnippetCatalog {
             updateUse(at: refreshedIndex, usedAt: usedAt)
             return snapshot(message: nil)
         } catch {
-            storageAvailable = false
             return snapshot(message: "Snippet usage could not be saved.")
         }
     }
@@ -124,7 +121,6 @@ actor SnippetCatalog {
     private func updateUse(at index: Int, usedAt: Date) {
         snippets[index].useCount += 1
         snippets[index].lastUsedAt = usedAt
-        snippets[index].updatedAt = usedAt
         snippets.sort(by: Self.sort)
     }
 

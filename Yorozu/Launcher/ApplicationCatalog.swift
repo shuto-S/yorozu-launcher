@@ -11,7 +11,7 @@ actor ApplicationCatalog {
     private let aliasPreferenceSaver: AliasPreferenceSaver?
     private var applications: [LaunchableApplication] = []
     private var lastIndexedAt: Date?
-    private var storageAvailable: Bool
+    private let storageAvailable: Bool
 
     init(
         store: LauncherStore?,
@@ -43,7 +43,6 @@ actor ApplicationCatalog {
             applications = try await store.loadApplications()
             return snapshot(message: nil)
         } catch {
-            storageAvailable = false
             return snapshot(message: "The saved application index could not be loaded.")
         }
     }
@@ -52,12 +51,11 @@ actor ApplicationCatalog {
         do {
             let discovered = try await discoverer.discoverApplications()
             let indexedAt = Date()
-            if let store, storageAvailable {
+            if let store {
                 do {
                     try await store.replaceApplications(discovered, indexedAt: indexedAt)
                     applications = try await store.loadApplications()
                 } catch {
-                    storageAvailable = false
                     applications = mergeInMemory(discovered)
                     lastIndexedAt = indexedAt
                     return snapshot(message: "The index was updated, but history could not be saved.")
@@ -109,7 +107,7 @@ actor ApplicationCatalog {
         guard let index = applications.firstIndex(where: { $0.id == identity }) else {
             throw LauncherError.applicationUnavailable("The selected application")
         }
-        guard storageAvailable, let aliasPreferenceSaver else {
+        guard let aliasPreferenceSaver else {
             throw LauncherError.aliasStorageUnavailable
         }
 
@@ -154,14 +152,14 @@ actor ApplicationCatalog {
     }
 
     private func persistPreference(at index: Int) async {
-        guard let store, storageAvailable else { return }
+        guard let store else { return }
         do {
             try await store.savePreference(
                 identity: applications[index].id,
                 preference: applications[index].preference
             )
         } catch {
-            storageAvailable = false
+            return
         }
     }
 
@@ -199,7 +197,7 @@ actor FeatureCommandCatalog {
     private var states = FeatureCommand.all.map {
         FeatureCommandState(command: $0, preference: .empty)
     }
-    private var storageAvailable: Bool
+    private let storageAvailable: Bool
 
     init(store: LauncherStore?) {
         self.store = store
@@ -225,7 +223,6 @@ actor FeatureCommandCatalog {
             states = loaded
             return snapshot(message: nil)
         } catch {
-            storageAvailable = false
             return snapshot(message: "Feature usage history could not be loaded.")
         }
     }
@@ -240,7 +237,7 @@ actor FeatureCommandCatalog {
         states[index].preference.launchCount += 1
         states[index].preference.lastLaunchedAt = usedAt
 
-        guard let store, storageAvailable else {
+        guard let store else {
             return snapshot(message: nil)
         }
         do {
@@ -250,7 +247,6 @@ actor FeatureCommandCatalog {
             )
             return snapshot(message: nil)
         } catch {
-            storageAvailable = false
             return snapshot(message: "Feature usage history could not be saved.")
         }
     }

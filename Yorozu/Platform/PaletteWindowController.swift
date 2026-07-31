@@ -510,12 +510,12 @@ final class PaletteWindowController: NSWindowController, NSWindowDelegate, NSPop
             self?.confirmDeletion(of: result)
         }
         viewModel.copyContent = { [weak self] content in
-            guard let self else { return false }
-            let copied = await self.pasteCoordinator.copy(content)
-            if copied {
+            guard let self else { return .writeFailedAndRestoreFailed }
+            let result = await self.pasteCoordinator.copy(content)
+            if result.wasWritten {
                 self.hide(restorePreviousApplication: true)
             }
-            return copied
+            return result
         }
         viewModel.pasteContent = { [weak self] content, completion in
             guard let self else {
@@ -523,11 +523,24 @@ final class PaletteWindowController: NSWindowController, NSWindowDelegate, NSPop
                 return
             }
             let targetApplication = self.previousApplication
+            let route = self.viewModel.route
+            let origin = self.viewModel.presentationOrigin
+            let selection = self.viewModel.selectedID
             self.hide(restorePreviousApplication: false)
             self.pasteCoordinator.paste(
                 content,
                 into: targetApplication,
-                completion: completion
+                completion: { [weak self] result in
+                    guard let self else {
+                        completion(result)
+                        return
+                    }
+                    if result != .pasted {
+                        self.show(route: route, origin: origin)
+                        self.viewModel.restoreSelectionAfterOperation(selection)
+                    }
+                    completion(result)
+                }
             )
         }
     }

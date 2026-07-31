@@ -1,5 +1,4 @@
 import AppKit
-@preconcurrency import LinkPresentation
 import SwiftUI
 
 struct PaletteView: View {
@@ -1435,9 +1434,9 @@ private struct URLClipboardPreview: View {
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
-            case let .ready(url, metadataData):
+            case let .ready(url, document):
                 if url.absoluteString == previewURL?.absoluteString {
-                    RichLinkPreview(metadataData: metadataData)
+                    RichLinkPreview(document: document)
                         .frame(maxWidth: .infinity, minHeight: 160, maxHeight: 250)
                         .accessibilityLabel("Preview of \(url.host() ?? url.absoluteString)")
                 }
@@ -1472,72 +1471,33 @@ private struct URLClipboardPreview: View {
     }
 }
 
-private struct RichLinkPreview: NSViewRepresentable {
-    let metadataData: Data
+private struct RichLinkPreview: View {
+    let document: URLPreviewDocument
 
-    func makeNSView(context: Context) -> LinkPreviewContainerView {
-        let view = LinkPreviewContainerView()
-        view.update(metadataData: metadataData)
-        return view
-    }
-
-    func updateNSView(_ nsView: LinkPreviewContainerView, context: Context) {
-        nsView.update(metadataData: metadataData)
-    }
-}
-
-private final class LinkPreviewContainerView: NSView {
-    private var displayedMetadataData: Data?
-    private var pendingMetadataData: Data?
-    private var linkView: LPLinkView?
-    private var renderTask: Task<Void, Never>?
-
-    func update(metadataData: Data) {
-        guard displayedMetadataData != metadataData,
-              pendingMetadataData != metadataData else {
-            return
-        }
-        pendingMetadataData = metadataData
-        renderTask?.cancel()
-        renderTask = Task { @MainActor [weak self] in
-            await Task.yield()
-            guard let self,
-                  !Task.isCancelled,
-                  pendingMetadataData == metadataData else {
-                return
-            }
-            let startedAt = ProcessInfo.processInfo.systemUptime
-            guard let metadata = try? NSKeyedUnarchiver.unarchivedObject(
-                ofClass: LPLinkMetadata.self,
-                from: metadataData
-            ) else {
-                pendingMetadataData = nil
-                return
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            if let imageData = document.imageData,
+               let image = NSImage(data: imageData) {
+                Image(nsImage: image)
+                    .resizable()
+                    .scaledToFit()
+                    .frame(maxWidth: .infinity, maxHeight: 170)
+                    .accessibilityHidden(true)
             }
 
-            displayedMetadataData = metadataData
-            pendingMetadataData = nil
-            linkView?.removeFromSuperview()
-
-            let newLinkView = LPLinkView(metadata: metadata)
-            newLinkView.translatesAutoresizingMaskIntoConstraints = false
-            addSubview(newLinkView)
-            NSLayoutConstraint.activate([
-                newLinkView.leadingAnchor.constraint(equalTo: leadingAnchor),
-                newLinkView.trailingAnchor.constraint(equalTo: trailingAnchor),
-                newLinkView.topAnchor.constraint(equalTo: topAnchor),
-                newLinkView.bottomAnchor.constraint(equalTo: bottomAnchor),
-            ])
-            linkView = newLinkView
-            LauncherPerformanceTrace.duration(
-                "url_preview_ready",
-                startedAt: startedAt
-            )
+            VStack(alignment: .leading, spacing: 3) {
+                Text(document.title)
+                    .font(.headline)
+                    .lineLimit(2)
+                if let siteName = document.siteName, !siteName.isEmpty {
+                    Text(siteName)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+            }
         }
-    }
-
-    deinit {
-        renderTask?.cancel()
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 

@@ -81,7 +81,7 @@ struct SettingsView: View {
         case .clipboard:
             ClipboardSettingsView(viewModel: viewModel)
         case .shortcuts:
-            ShortcutsSettingsView()
+            ShortcutsSettingsView(settings: viewModel.shortcutSettings)
         }
     }
 
@@ -104,6 +104,29 @@ private struct GeneralSettingsView: View {
 
     var body: some View {
         Form {
+            if let notice = viewModel.storageRecoveryNotice {
+                Section {
+                    Text("Yorozu recovered from a storage problem and created a new local database.")
+
+                    LabeledContent("Recovered") {
+                        Text(notice.recoveredAt, format: .dateTime)
+                    }
+
+                    HStack {
+                        Button("Reveal Backup") {
+                            viewModel.revealStorageRecoveryBackup()
+                        }
+                        Button("Dismiss") {
+                            viewModel.dismissStorageRecoveryNotice()
+                        }
+                    }
+                } header: {
+                    Text("Storage Recovery")
+                } footer: {
+                    Text("The previous database was preserved for manual recovery.")
+                }
+            }
+
             Section {
                 LabeledContent("settings.index-count") {
                     Text(viewModel.indexCount, format: .number)
@@ -149,14 +172,18 @@ private struct GeneralSettingsView: View {
 }
 
 private struct ShortcutsSettingsView: View {
+    @ObservedObject var settings: AppShortcutSettings
+
     var body: some View {
         Form {
             Section {
                 ForEach(AppShortcutCatalog.settings) { shortcut in
                     LabeledContent {
-                        KeyboardShortcuts.Recorder(for: shortcut.name)
+                        KeyboardShortcuts.Recorder(
+                            shortcut: settings.binding(for: shortcut)
+                        )
                             .shortcutValidation { candidate in
-                                AppShortcutCatalog.validation(
+                                settings.validation(
                                     for: shortcut,
                                     shortcut: candidate
                                 )
@@ -174,7 +201,7 @@ private struct ShortcutsSettingsView: View {
 
                 LabeledContent {
                     Button("Reset Shortcuts") {
-                        AppShortcutCatalog.reset()
+                        settings.reset()
                     }
                 } label: {
                     Text("Defaults")
@@ -227,7 +254,7 @@ private struct ClipboardSettingsView: View {
             } header: {
                 Text("Link Previews")
             } footer: {
-                Text("When selected, public web links can load a title, image, and icon from the linked website. Yorozu never loads local or private network addresses.")
+                Text("When enabled, Yorozu validates each HTTP or HTTPS destination and resolved address, then loads bounded page metadata and an optional preview image.")
             }
 
             Section("Retention") {
@@ -242,8 +269,8 @@ private struct ClipboardSettingsView: View {
 
                 Picker("Maximum Items", selection: $preferences.maximumItems) {
                     Text("500").tag(500)
+                    Text("1,000").tag(1_000)
                     Text("2,000").tag(2_000)
-                    Text("10,000").tag(10_000)
                 }
                 .onChange(of: preferences.maximumItems) {
                     viewModel.applyClipboardRetentionSettings()

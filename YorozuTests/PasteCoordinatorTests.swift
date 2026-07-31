@@ -118,6 +118,34 @@ final class PasteCoordinatorTests: XCTestCase {
         XCTAssertEqual(fixture.pasteboard.restoreCount, 0)
     }
 
+    func testSnapshotLimitFailureLeavesClipboardUntouched() async {
+        let fixture = makeFixture()
+        fixture.pasteboard.snapshotResult = .preservationLimitExceeded
+
+        let result = await fixture.coordinator.performPaste(
+            .text("private clipboard content"),
+            into: fixture.target
+        )
+
+        XCTAssertEqual(result, .failedBecauseClipboardCouldNotBePreserved)
+        XCTAssertEqual(fixture.pasteboard.replaceCount, 0)
+        XCTAssertEqual(fixture.events.postPasteCount, 0)
+    }
+
+    func testWriteFailureReturnsFailedWithoutPostingPaste() async {
+        let fixture = makeFixture()
+        fixture.pasteboard.replacementResult = .writeFailedAndRestored
+
+        let result = await fixture.coordinator.performPaste(
+            .text("private clipboard content"),
+            into: fixture.target
+        )
+
+        XCTAssertEqual(result, .failed)
+        XCTAssertEqual(fixture.pasteboard.replaceCount, 1)
+        XCTAssertEqual(fixture.events.postPasteCount, 0)
+    }
+
     func testUnchangedInjectedClipboardIsRestoredAfterPaste() async {
         let fixture = makeFixture()
         fixture.target.becomesActiveWhenActivated = true
@@ -159,6 +187,97 @@ final class PasteCoordinatorTests: XCTestCase {
 
         XCTAssertEqual(fixture.suppression.count, 2)
         XCTAssertEqual(fixture.suppression.durations, [.seconds(2), .seconds(2)])
+    }
+
+    func testSystemPasteboardRejectsInvalidContentBeforeClearing() throws {
+        let pasteboard = NSPasteboard(
+            name: .init("com.yorozu.tests.\(UUID().uuidString)")
+        )
+        pasteboard.clearContents()
+        pasteboard.setString("original", forType: .string)
+        let accessor = SystemPasteboardAccessor(pasteboard: pasteboard)
+        let snapshot = try XCTUnwrap(accessor.snapshot().capturedValue)
+
+        let missingPath = "/private/tmp/yorozu-missing-\(UUID().uuidString)"
+        XCTAssertEqual(
+            accessor.replace(with: .files([missingPath]), preserving: snapshot),
+            .invalidContent
+        )
+        XCTAssertEqual(pasteboard.string(forType: .string), "original")
+
+        XCTAssertEqual(
+            accessor.replace(with: .image(Data()), preserving: snapshot),
+            .invalidContent
+        )
+        XCTAssertEqual(pasteboard.string(forType: .string), "original")
+
+        XCTAssertEqual(
+            accessor.replace(
+                with: .image(Data("not an image".utf8)),
+                preserving: snapshot
+            ),
+            .invalidContent
+        )
+        XCTAssertEqual(pasteboard.string(forType: .string), "original")
+    }
+
+    func testSystemPasteboardRestoresAfterWriteFailure() throws {
+        let pasteboard = NSPasteboard(
+            name: .init("com.yorozu.tests.\(UUID().uuidString)")
+        )
+        pasteboard.clearContents()
+        pasteboard.setString("original", forType: .string)
+        var writeCount = 0
+        let accessor = SystemPasteboardAccessor(
+            pasteboard: pasteboard,
+            writeObjects: { objects in
+                writeCount += 1
+                return writeCount == 1 ? false : pasteboard.writeObjects(objects)
+            }
+        )
+        let snapshot = try XCTUnwrap(accessor.snapshot().capturedValue)
+
+        XCTAssertEqual(
+            accessor.replace(with: .text("replacement"), preserving: snapshot),
+            .writeFailedAndRestored
+        )
+        XCTAssertEqual(pasteboard.string(forType: .string), "original")
+    }
+
+    func testSystemPasteboardReportsRestoreFailure() throws {
+        let pasteboard = NSPasteboard(
+            name: .init("com.yorozu.tests.\(UUID().uuidString)")
+        )
+        pasteboard.clearContents()
+        pasteboard.setString("original", forType: .string)
+        let accessor = SystemPasteboardAccessor(
+            pasteboard: pasteboard,
+            writeObjects: { _ in false }
+        )
+        let snapshot = try XCTUnwrap(accessor.snapshot().capturedValue)
+
+        XCTAssertEqual(
+            accessor.replace(with: .text("replacement"), preserving: snapshot),
+            .writeFailedAndRestoreFailed
+        )
+    }
+
+    func testSystemPasteboardSnapshotLimitDoesNotMutateContents() {
+        let pasteboard = NSPasteboard(
+            name: .init("com.yorozu.tests.\(UUID().uuidString)")
+        )
+        let items = (0..<17).map { index -> NSPasteboardItem in
+            let item = NSPasteboardItem()
+            item.setString("item-\(index)", forType: .string)
+            return item
+        }
+        pasteboard.clearContents()
+        XCTAssertTrue(pasteboard.writeObjects(items))
+        let changeCount = pasteboard.changeCount
+        let accessor = SystemPasteboardAccessor(pasteboard: pasteboard)
+
+        XCTAssertEqual(accessor.snapshot(), .preservationLimitExceeded)
+        XCTAssertEqual(pasteboard.changeCount, changeCount)
     }
 
     func testPasteCoordinatorContainsNoLoggingCalls() throws {
@@ -249,34 +368,48 @@ private final class FakePasteTarget: PasteTargetApplication {
 
 @MainActor
 private final class FakePasteboard: PasteboardAccessing {
-    let originalSnapshot = [
-        PasteboardItemSnapshot(
-            values: [
-                PasteboardTypeData(
-                    type: "public.utf8-plain-text",
-                    data: Data("original".utf8)
-                ),
-            ]
-        ),
-    ]
+    let originalSnapshot = PasteboardSnapshot(
+        items: [
+            PasteboardItemSnapshot(
+                values: [
+                    PasteboardTypeData(
+                        type: "public.utf8-plain-text",
+                        data: Data("original".utf8)
+                    ),
+                ]
+            ),
+        ]
+    )
 
     private(set) var changeCount = 1
     private(set) var restoreCount = 0
-    private(set) var restoredSnapshots: [PasteboardItemSnapshot]?
+    private(set) var replaceCount = 0
+    private(set) var restoredSnapshots: PasteboardSnapshot?
+    var snapshotResult: PasteboardSnapshotResult?
+    var replacementResult: PasteboardReplacementResult?
 
-    func snapshot() -> [PasteboardItemSnapshot] {
-        originalSnapshot
+    func snapshot() -> PasteboardSnapshotResult {
+        snapshotResult ?? .captured(originalSnapshot)
     }
 
-    func write(_ content: PasteboardContent) -> Bool {
+    func replace(
+        with content: PasteboardContent,
+        preserving snapshot: PasteboardSnapshot
+    ) -> PasteboardReplacementResult {
+        replaceCount += 1
+        if let replacementResult {
+            return replacementResult
+        }
         changeCount += 1
-        return true
+        return .written(changeCount: changeCount)
     }
 
-    func restore(_ snapshots: [PasteboardItemSnapshot]) {
+    @discardableResult
+    func restore(_ snapshot: PasteboardSnapshot) -> Bool {
         changeCount += 1
         restoreCount += 1
-        restoredSnapshots = snapshots
+        restoredSnapshots = snapshot
+        return true
     }
 
     func simulateExternalWrite() {
@@ -301,5 +434,14 @@ private final class SuppressionSpy {
     var durations: [Duration] = []
     var count: Int {
         durations.count
+    }
+}
+
+private extension PasteboardSnapshotResult {
+    var capturedValue: PasteboardSnapshot? {
+        guard case let .captured(snapshot) = self else {
+            return nil
+        }
+        return snapshot
     }
 }

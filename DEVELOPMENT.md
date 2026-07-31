@@ -113,6 +113,17 @@ Privacy invariants:
 
 Clipboard maintenance is intentionally amortized. Non-image captures perform full database retention maintenance every 32 writes; in-memory pruning still occurs for each capture. Image captures perform full maintenance immediately.
 
+### Storage recovery
+
+At startup, Yorozu validates the current migrations against a temporary database before attempting recovery of the real database. If corruption, schema incompatibility, or invalid persisted values prevent startup, Yorozu makes one recovery attempt:
+
+1. close the current database;
+2. move SQLite, WAL, and SHM files to `Application Support/com.yorozu.app/Recovery/<UTC timestamp>/`;
+3. create and hydrate a fresh database;
+4. show a recovery notice in Settings with Reveal Backup and Dismiss actions.
+
+An incomplete backup move is rolled back where possible, and the source database is never deleted as a recovery shortcut. Busy, disk-full, permission, and general I/O errors do not trigger recovery; they remain retryable.
+
 ## Validation
 
 ### Unit and integration
@@ -140,6 +151,21 @@ xcodebuild \
 ```
 
 The UI runner requires Xcode Automation permission. If it cannot enable automation or materialize a worker, report that separately from unit and integration results.
+
+### Isolated UI-test environment
+
+Pass `--ui-testing-run-id <unique-value>` when starting the test host. UI-test mode must use:
+
+- a temporary SQLite database;
+- a dedicated `UserDefaults` suite;
+- fixed application fixtures and a fake application launcher;
+- a fake pasteboard;
+- Clipboard monitoring disabled;
+- fake Accessibility and event-posting dependencies;
+- global shortcut registration disabled and shortcut recorders backed by isolated bindings;
+- URL preview networking disabled.
+
+Failure to construct this environment is fatal. UI tests must never fall back to production dependencies. Test shutdown waits for Clipboard monitoring to stop, closes the store, and only then removes the temporary directory.
 
 ### Manual acceptance
 
