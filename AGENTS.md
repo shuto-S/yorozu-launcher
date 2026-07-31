@@ -2,6 +2,13 @@
 
 This file applies to the entire repository. Follow the user's current request and higher-level instructions first.
 
+## Documentation map
+
+- `README.md`: product overview, supported environment, and quick start.
+- `DEVELOPMENT.md`: local setup, architecture, validation, performance measurement, and Git hygiene.
+- `IMPLEMENTATION_PLAN.md`: implemented scope, current constraints, and roadmap.
+- The code and shared Xcode settings are authoritative when documentation drifts.
+
 ## Product constraints
 
 - Yorozu is a lightweight native macOS command palette.
@@ -10,6 +17,18 @@ This file applies to the entire repository. Follow the user's current request an
 - Keep the app as an `LSUIElement` menu-bar utility with no regular Dock window.
 - Preserve the keyboard-first interaction model while keeping all primary actions mouse-accessible.
 - Keep product-facing copy in English.
+- Keep Root Search, Clipboard History, Snippets, Aliases, and Settings in the existing palette.
+- AI chat, snippet auto-expansion, cloud sync, and distribution automation are not implemented. Do not imply otherwise in product copy or documentation.
+
+## Repository map
+
+- `Yorozu/App`: lifecycle, dependency construction, menu bar, and shortcut registration.
+- `Yorozu/Core`: shared command, application, clipboard, snippet, and route models.
+- `Yorozu/Launcher`: discovery, catalogs, ranking, persistence, and `LauncherViewModel`.
+- `Yorozu/Platform`: `NSPanel`, SwiftUI surfaces, pasteboard, Accessibility, URL previews, and settings.
+- `YorozuTests`: unit and integration tests.
+- `YorozuUITests`: macOS UI automation.
+- `Config`: shared Debug signing defaults and the ignored local signing override.
 
 ## Architecture
 
@@ -21,6 +40,11 @@ This file applies to the entire repository. Follow the user's current request an
 - Keep persistence in `LauncherStore`; do not introduce parallel storage for existing entities.
 - Reuse the shared route, two-pane layout, Action Panel, and shortcut registry before adding new variants.
 - Do not add dependencies without explicit user approval.
+- Keep command payloads lightweight. Pass stable identifiers across UI boundaries and resolve full models from the current snapshot.
+- Preserve route and search revision checks so canceled asynchronous work cannot overwrite the current route or selection.
+- Keep the current dependency set pinned unless a requested change requires otherwise:
+  - KeyboardShortcuts 3.0.1
+  - GRDB.swift 7.11.1
 
 ## UI and input
 
@@ -35,6 +59,10 @@ This file applies to the entire repository. Follow the user's current request an
 - Treat launcher presentation, route changes, and selection movement as latency-sensitive paths.
 - Keep clipboard conversion, image decoding, hashing, large-text normalization, database writes, and URL preview work off the main route-transition path.
 - Cancel stale searches and previews, and prevent canceled work from overwriting current selection state.
+- Do not rebuild the result-list hierarchy merely because the route opens a detail pane.
+- Keep default route results cached in memory, and update lookup indexes when publishing a new result snapshot.
+- Preserve the bounded image and failed-URL preview caches. Do not retry a failed URL preview every time selection returns to it.
+- Clipboard database retention maintenance is deliberately amortized for non-image captures. In-memory pruning remains on the capture path; image captures trigger full database maintenance immediately.
 - Performance targets:
   - warm palette presentation p95 under 80 ms;
   - search over 2,000 items p95 under 30 ms;
@@ -52,7 +80,7 @@ This file applies to the entire repository. Follow the user's current request an
 
 ## Validation
 
-Start with focused tests, then run the full macOS build when risk warrants it:
+Start with focused tests. `DEVELOPMENT.md` contains the full matrix.
 
 ```bash
 xcodebuild \
@@ -67,10 +95,14 @@ xcodebuild \
   -scheme Yorozu \
   -configuration Debug \
   -destination 'platform=macOS,arch=arm64' \
+  -only-testing:YorozuTests \
   test
 ```
 
+- Run `-only-testing:YorozuUITests` separately so UI automation failures are not reported as unit-test failures.
+- The Xcode test runner may require Automation permission before it can materialize a macOS UI-test worker.
 - Distinguish unit/integration success, UI automation, and manual acceptance.
 - For UI changes, check Light, Dark, Reduce Transparency, Increase Contrast, Reduce Motion, keyboard navigation, mouse operation, and VoiceOver where relevant.
 - For IME changes, manually verify composition, candidate navigation, confirmation, and cancellation in every affected search field.
+- For performance changes, compare multiple independent runs of the original and changed binaries; do not reuse old screen-observed figures.
 - After changes, inspect the intended Git diff and confirm ignored privacy-sensitive artifacts are not staged.

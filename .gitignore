@@ -8,12 +8,31 @@ DerivedData/
 build/
 .build/
 *.xcresult
+*.xcarchive
+*.dSYM/
+*.profdata
+*.xccovarchive
+*.xccovreport
 
 # SwiftPM local state
 .swiftpm/
 
+# Editor and local agent state
+.idea/
+.vscode/
+.codex/
+.agents/
+
 # Local code-signing configuration
 Config/Local.xcconfig
+
+# Local environment and diagnostics
+.env
+.env.*
+!.env.example
+*.log
+*.trace
+performance-results/
 
 # Local databases and runtime data
 *.sqlite
@@ -23,4 +42,5 @@ Config/Local.xcconfig
 # Local visual QA evidence may contain application names or clipboard content.
 audit-artifacts/
 design-qa-artifacts/
+qa-artifacts/
 design-qa.md

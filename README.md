@@ -3,7 +3,7 @@
 Yorozu is a lightweight, keyboard-first launcher for macOS. It brings application launching, clipboard history, snippets, aliases, and settings into one native command palette.
 
 > [!NOTE]
-> Yorozu is in early development. The current build targets macOS 26 or later on Apple Silicon.
+> Yorozu is an early development build for macOS 26 or later on Apple Silicon. There is no packaged release yet.
 
 ## Features
 
@@ -17,13 +17,28 @@ Yorozu is a lightweight, keyboard-first launcher for macOS. It brings applicatio
 - Japanese IME-safe command handling
 - Native AppKit and SwiftUI interface
 
+## Default controls
+
+| Action | Shortcut |
+|---|---|
+| Open Yorozu | `⌥ Space` |
+| Move selection | `↑` / `↓` |
+| Run the primary action | `Return` |
+| Open the Action Panel | `⌘ K` |
+| Go back or close | `Esc` |
+| Open Settings | `⌘ ,` |
+
+Feature-specific global shortcuts can be configured in Settings.
+
 ## Requirements
 
 - macOS 26 or later
 - Apple Silicon Mac
 - Xcode 26 or later
 
-## Build
+## Quick start
+
+Clone the repository and build the shared Debug configuration:
 
 The project builds ad hoc by default, so it does not require a personal Apple Development Team.
 
@@ -36,7 +51,11 @@ xcodebuild \
   build
 ```
 
-Automatic paste uses macOS Accessibility permission. For that permission to remain stable between local builds, copy the signing template and enter your own Apple Development Team:
+Open the built app from Xcode's Products group or from the corresponding DerivedData `Build/Products/Debug` directory.
+
+### Stable local signing
+
+Automatic paste uses macOS Accessibility permission. Ad hoc signatures change between builds, so copy the signing template and enter your own Apple Development Team when testing paste behavior:
 
 ```bash
 cp Config/Local.example.xcconfig Config/Local.xcconfig
@@ -44,7 +63,11 @@ cp Config/Local.example.xcconfig Config/Local.xcconfig
 
 `Config/Local.xcconfig` is intentionally ignored by Git. Never commit personal signing identifiers or provisioning data.
 
-## Test
+After changing the signature, macOS may require you to remove the stale Yorozu entry from Privacy & Security → Accessibility and add the current build again. Yorozu never changes TCC data automatically.
+
+## Validation
+
+Run unit and integration tests independently from UI automation:
 
 ```bash
 xcodebuild \
@@ -52,14 +75,19 @@ xcodebuild \
   -scheme Yorozu \
   -configuration Debug \
   -destination 'platform=macOS,arch=arm64' \
+  -only-testing:YorozuTests \
   test
 ```
+
+UI tests require Xcode Automation permission and should be run with `-only-testing:YorozuUITests`.
 
 ## Privacy
 
 Clipboard history and snippets are stored locally. Yorozu does not send clipboard or snippet content over the network. URL previews are optional because loading one can contact the linked website.
 
 The repository intentionally excludes local visual QA captures and runtime databases because they can contain application names, URLs, or clipboard content.
+
+Yorozu does not implement AI chat, cloud sync, telemetry, or snippet auto-expansion in the current version.
 
 ## Project structure
 
@@ -75,4 +103,10 @@ YorozuTests/
 YorozuUITests/
 ```
 
-The broader implementation direction is documented in [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md).
+## Development documentation
+
+- [DEVELOPMENT.md](DEVELOPMENT.md): setup, architecture, validation, performance harnesses, and contribution hygiene
+- [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md): current implementation status and roadmap
+- [AGENTS.md](AGENTS.md): repository constraints for coding agents
+
+No license has been selected yet. Until one is added, the source remains under its default copyright restrictions.
