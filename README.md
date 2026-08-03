@@ -1,6 +1,6 @@
 # Yorozu
 
-Yorozu is a lightweight, keyboard-first launcher for macOS. It brings application launching, clipboard history, snippets, aliases, and settings into one native command palette.
+Yorozu is a lightweight, keyboard-first launcher for macOS. It brings application launching, clipboard history, snippets, aliases, multi-provider AI chat, and settings into one native command palette.
 
 > [!NOTE]
 > Yorozu is an early development build for macOS 26 or later on Apple Silicon. There is no packaged release yet.
@@ -11,7 +11,9 @@ Yorozu is a lightweight, keyboard-first launcher for macOS. It brings applicatio
 - Pinning, aliases, and recent-use ranking
 - Clipboard history for text, URLs, files, and images
 - Snippet creation, search, copy, and paste
-- Dedicated two-pane screens for Clipboard History, Snippets, Aliases, and Settings
+- Dedicated screens for Clipboard History, Snippets, Aliases, AI Chat, and Settings
+- Codex chat through the installed `codex app-server` and the user's ChatGPT plan
+- OpenAI Responses API chat with streaming, Web Search, file inputs, and local title indexing
 - Configurable global shortcuts
 - Keyboard-first navigation with mouse support
 - Japanese IME-safe command handling
@@ -85,9 +87,11 @@ UI tests require Xcode Automation permission and should be run with `-only-testi
 
 Clipboard history and snippets are stored locally. Yorozu does not send clipboard or snippet content over the network. URL previews are optional because loading one can contact the linked website.
 
+AI Chat is explicit. Codex is enabled by default and delegates ChatGPT authentication and conversation content to the installed `codex app-server`; Yorozu never reads or stores Codex tokens. The optional OpenAI API provider keeps the user's API key in macOS Keychain and uses API Platform billing. Yorozu stores only provider IDs, chat titles, model IDs, and list metadata in SQLite. It does not synchronize with ChatGPT history and never attaches clipboard content automatically.
+
 The repository intentionally excludes local visual QA captures and runtime databases because they can contain application names, URLs, or clipboard content.
 
-Yorozu does not implement AI chat, cloud sync, telemetry, or snippet auto-expansion in the current version.
+Yorozu does not implement cloud sync, telemetry, or snippet auto-expansion in the current version.
 
 ## Project structure
 

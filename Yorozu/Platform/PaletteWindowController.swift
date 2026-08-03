@@ -35,6 +35,7 @@ enum PaletteKeyEventAction: Equatable {
     case handleCommandShortcut
     case moveSelection(Int)
     case performPrimaryAction
+    case submitModal
     case escape
 }
 
@@ -53,11 +54,24 @@ enum PaletteKeyEventPolicy {
         modifiers: NSEvent.ModifierFlags,
         hasMarkedText: Bool,
         route: PaletteRoute,
-        isActionPanelPresented: Bool
+        isActionPanelPresented: Bool,
+        isModalPresented: Bool = false,
+        isAIConversationPage: Bool = false
     ) -> PaletteKeyEventAction {
         let independentModifiers = modifiers.intersection(
             .deviceIndependentFlagsMask
         )
+
+        if isModalPresented {
+            if hasMarkedText, textCompositionKeyCodes.contains(keyCode) {
+                return .passThrough
+            }
+            if independentModifiers.contains(.command),
+               keyCode == 36 || keyCode == 76 {
+                return .submitModal
+            }
+            return keyCode == 53 ? .escape : .passThrough
+        }
 
         // Command shortcuts remain app commands even while an input method has
         // marked text. Unmodified composition keys must reach the field editor.
@@ -69,6 +83,13 @@ enum PaletteKeyEventPolicy {
            !independentModifiers.contains(.command),
            textCompositionKeyCodes.contains(keyCode) {
             return .passThrough
+        }
+
+        if route.isAI, isAIConversationPage, !isActionPanelPresented {
+            if independentModifiers.contains(.command) {
+                return .handleCommandShortcut
+            }
+            return keyCode == 53 ? .escape : .passThrough
         }
 
         if route == .settings {
@@ -177,14 +198,13 @@ final class PalettePanel: NSPanel {
 }
 
 @MainActor
-final class PaletteWindowController: NSWindowController, NSWindowDelegate, NSPopoverDelegate {
+final class PaletteWindowController: NSWindowController, NSWindowDelegate {
     private let viewModel: LauncherViewModel
     private let pasteCoordinator: PasteCoordinator
     private let automaticallyHides: Bool
     private let accessibilityOverrides: AccessibilityDisplayOverrides
     private var previousApplication: NSRunningApplication?
     private var keyEventMonitor: Any?
-    private var activePopover: NSPopover?
 
     init(viewModel: LauncherViewModel, pasteCoordinator: PasteCoordinator) {
         self.viewModel = viewModel
@@ -311,7 +331,6 @@ final class PaletteWindowController: NSWindowController, NSWindowDelegate, NSPop
         viewModel.dismissActionPanel(restoreSearchFocus: false)
         viewModel.paletteDidHide()
         window?.orderOut(nil)
-        activePopover?.close()
         if restorePreviousApplication {
             previousApplication?.activate(options: [])
         }
@@ -472,15 +491,9 @@ final class PaletteWindowController: NSWindowController, NSWindowDelegate, NSPop
     }
     #endif
 
-    func popoverDidClose(_ notification: Notification) {
-        activePopover = nil
-        viewModel.focusRequestForPopoverDismissal()
-    }
-
     func windowDidResignKey(_ notification: Notification) {
         guard automaticallyHides,
               window?.isVisible == true,
-              activePopover?.isShown != true,
               window?.attachedSheet == nil else {
             return
         }
@@ -502,12 +515,6 @@ final class PaletteWindowController: NSWindowController, NSWindowDelegate, NSPop
         }
         viewModel.dismissAndRestorePreviousApplication = { [weak self] in
             self?.hide(restorePreviousApplication: true)
-        }
-        viewModel.presentSnippetEditor = { [weak self] snippet in
-            self?.showSnippetEditor(snippet)
-        }
-        viewModel.confirmDelete = { [weak self] result in
-            self?.confirmDeletion(of: result)
         }
         viewModel.copyContent = { [weak self] content in
             guard let self else { return .writeFailedAndRestoreFailed }
@@ -556,8 +563,7 @@ final class PaletteWindowController: NSWindowController, NSWindowDelegate, NSPop
     private func installKeyMonitor() {
         keyEventMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard let self,
-                  self.window?.isKeyWindow == true,
-                  self.activePopover?.isShown != true else {
+                  self.window?.isKeyWindow == true else {
                 return event
             }
 
@@ -566,7 +572,10 @@ final class PaletteWindowController: NSWindowController, NSWindowDelegate, NSPop
                 modifiers: event.modifierFlags,
                 hasMarkedText: self.fieldEditorHasMarkedText,
                 route: self.viewModel.route,
-                isActionPanelPresented: self.viewModel.isActionPanelPresented
+                isActionPanelPresented: self.viewModel.isActionPanelPresented,
+                isModalPresented: self.viewModel.isModalPresented,
+                isAIConversationPage: self.viewModel.route.isAI
+                    && !self.viewModel.aiChatViewModel.isListVisible
             )
 
             switch action {
@@ -593,6 +602,9 @@ final class PaletteWindowController: NSWindowController, NSWindowDelegate, NSPop
                 } else {
                     self.viewModel.performPrimaryAction()
                 }
+                return nil
+            case .submitModal:
+                self.viewModel.performModalSubmit()
                 return nil
             case .escape:
                 if self.viewModel.isActionPanelPresented {
@@ -636,7 +648,9 @@ final class PaletteWindowController: NSWindowController, NSWindowDelegate, NSPop
         case 3 where modifiers.contains(.shift):
             viewModel.performAction(.reveal)
         case 45:
-            if viewModel.route == .aliases {
+            if viewModel.route.isAI {
+                viewModel.aiChatViewModel.beginNewChat()
+            } else if viewModel.route == .aliases {
                 viewModel.beginAddAlias()
             } else {
                 viewModel.newSnippet()
@@ -644,7 +658,9 @@ final class PaletteWindowController: NSWindowController, NSWindowDelegate, NSPop
         case 2:
             viewModel.performAction(.duplicateSnippet)
         case 51, 117:
-            if viewModel.route == .aliases {
+            if viewModel.route.isAI {
+                viewModel.requestAIConversationDeletion()
+            } else if viewModel.route == .aliases {
                 viewModel.requestAliasDeletion()
             } else {
                 viewModel.performAction(.delete)
@@ -661,85 +677,6 @@ final class PaletteWindowController: NSWindowController, NSWindowDelegate, NSPop
         return true
     }
 
-    private func showSnippetEditor(_ snippet: Snippet?) {
-        guard let contentView = window?.contentView else { return }
-        let editor = SnippetEditorView(
-            snippet: snippet,
-            onCancel: { [weak self] in
-                self?.activePopover?.close()
-            },
-            onSave: { [weak self] name, keyword, content, completion in
-                self?.viewModel.saveSnippet(
-                    existing: snippet,
-                    name: name,
-                    keyword: keyword,
-                    content: content,
-                    completion: completion
-                )
-            }
-        )
-        let controller = NSHostingController(
-            rootView: editor.environment(\.locale, Locale(identifier: "en"))
-        )
-        let popover = makePopover(
-            contentSize: NSSize(width: 480, height: 390),
-            contentViewController: controller
-        )
-        show(popover: popover, relativeTo: contentView, verticalOffset: 72)
-    }
-
-    private func makePopover(
-        contentSize: NSSize,
-        contentViewController: NSViewController
-    ) -> NSPopover {
-        activePopover?.close()
-        let popover = NSPopover()
-        popover.behavior = .transient
-        popover.contentSize = contentSize
-        popover.contentViewController = contentViewController
-        popover.delegate = self
-        activePopover = popover
-        return popover
-    }
-
-    private func show(
-        popover: NSPopover,
-        relativeTo contentView: NSView,
-        verticalOffset: CGFloat
-    ) {
-        let anchor = NSRect(
-            x: contentView.bounds.midX - 1,
-            y: contentView.bounds.maxY - verticalOffset,
-            width: 2,
-            height: 2
-        )
-        popover.show(relativeTo: anchor, of: contentView, preferredEdge: .maxY)
-    }
-
-    private func confirmDeletion(of result: CommandResult) {
-        guard let window else { return }
-        let alert = NSAlert()
-        alert.alertStyle = .warning
-        switch result.kind {
-        case .clipboard:
-            alert.messageText = "Delete Clipboard Item?"
-            alert.informativeText = "This item will be permanently removed from clipboard history."
-        case .snippet:
-            alert.messageText = "Delete Snippet?"
-            alert.informativeText = "“\(result.title)” will be permanently deleted."
-        case .application, .feature:
-            return
-        }
-        alert.addButton(withTitle: "Delete")
-        alert.addButton(withTitle: "Cancel")
-        alert.buttons.first?.hasDestructiveAction = true
-        alert.beginSheetModal(for: window) { [weak self] response in
-            if response == .alertFirstButtonReturn {
-                self?.viewModel.deleteConfirmed(result)
-            }
-        }
-    }
-
     private func position(window: NSWindow) {
         let mouseLocation = NSEvent.mouseLocation
         let screen = NSScreen.screens.first(where: { NSMouseInRect(mouseLocation, $0.frame, false) })
@@ -749,106 +686,5 @@ final class PaletteWindowController: NSWindowController, NSWindowDelegate, NSPop
         let originX = visibleFrame.midX - window.frame.width / 2
         let originY = visibleFrame.maxY - visibleFrame.height * 0.18 - window.frame.height
         window.setFrameOrigin(NSPoint(x: originX, y: max(originY, visibleFrame.minY)))
-    }
-}
-
-private struct SnippetEditorView: View {
-    let snippet: Snippet?
-    let onCancel: () -> Void
-    let onSave: (
-        _ name: String,
-        _ keyword: String,
-        _ content: String,
-        _ completion: @escaping @MainActor (Bool, String?) -> Void
-    ) -> Void
-
-    @State private var name: String
-    @State private var keyword: String
-    @State private var content: String
-    @State private var validationMessage: String?
-    @State private var isSaving = false
-    @FocusState private var focusedField: Field?
-
-    private enum Field {
-        case name
-        case keyword
-        case content
-    }
-
-    init(
-        snippet: Snippet?,
-        onCancel: @escaping () -> Void,
-        onSave: @escaping (
-            _ name: String,
-            _ keyword: String,
-            _ content: String,
-            _ completion: @escaping @MainActor (Bool, String?) -> Void
-        ) -> Void
-    ) {
-        self.snippet = snippet
-        self.onCancel = onCancel
-        self.onSave = onSave
-        _name = State(initialValue: snippet?.name ?? "")
-        _keyword = State(initialValue: snippet?.keyword ?? "")
-        _content = State(initialValue: snippet?.content ?? "")
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            Text(snippet == nil ? "New Snippet" : "Edit Snippet")
-                .font(.headline)
-
-            TextField("Name", text: $name)
-                .focused($focusedField, equals: .name)
-
-            TextField("Keyword (optional)", text: $keyword)
-                .focused($focusedField, equals: .keyword)
-
-            VStack(alignment: .leading, spacing: 6) {
-                Text("Content")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                TextEditor(text: $content)
-                    .focused($focusedField, equals: .content)
-                    .frame(minHeight: 180)
-            }
-
-            if let validationMessage {
-                Label(validationMessage, systemImage: "exclamationmark.triangle")
-                    .font(.caption)
-                    .foregroundStyle(.red)
-            }
-
-            HStack {
-                Spacer()
-                Button("Cancel", role: .cancel) {
-                    onCancel()
-                }
-                .keyboardShortcut(.cancelAction)
-
-                Button("Save") {
-                    save()
-                }
-                .keyboardShortcut(.defaultAction)
-                .disabled(isSaving)
-            }
-        }
-        .padding(18)
-        .onAppear {
-            focusedField = .name
-        }
-    }
-
-    private func save() {
-        validationMessage = nil
-        isSaving = true
-        onSave(name, keyword, content) { success, message in
-            isSaving = false
-            if success {
-                onCancel()
-            } else {
-                validationMessage = message
-            }
-        }
     }
 }

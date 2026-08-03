@@ -1,11 +1,12 @@
 import Darwin
 import Foundation
 
-enum PaletteRoute: String, Hashable, Sendable {
+enum PaletteRoute: Hashable, Sendable {
     case root
     case clipboard
     case snippets
     case aliases
+    case ai(providerID: AIProviderID)
     case settings
 
     var searchPlaceholder: String {
@@ -18,6 +19,8 @@ enum PaletteRoute: String, Hashable, Sendable {
             "Search Snippets"
         case .aliases:
             "Search Aliases"
+        case .ai:
+            "Search Chats"
         case .settings:
             "Settings"
         }
@@ -33,10 +36,19 @@ enum PaletteRoute: String, Hashable, Sendable {
             "Search snippets"
         case .aliases:
             "Search application aliases"
+        case .ai:
+            "Search AI chats"
         case .settings:
             "Settings"
         }
     }
+
+    var aiProviderID: AIProviderID? {
+        guard case let .ai(providerID) = self else { return nil }
+        return providerID
+    }
+
+    var isAI: Bool { aiProviderID != nil }
 }
 
 enum PalettePresentationOrigin: Hashable, Sendable {
@@ -44,16 +56,20 @@ enum PalettePresentationOrigin: Hashable, Sendable {
     case direct
 }
 
-enum FeatureCommand: String, Hashable, Sendable {
+enum FeatureCommand: Hashable, Sendable {
     case clipboardHistory
     case snippets
     case aliases
+    case aiCodex
+    case aiOpenAI
     case settings
 
     static let all: [FeatureCommand] = [
         .clipboardHistory,
         .snippets,
         .aliases,
+        .aiCodex,
+        .aiOpenAI,
         .settings,
     ]
 
@@ -65,6 +81,10 @@ enum FeatureCommand: String, Hashable, Sendable {
             "Snippets"
         case .aliases:
             "Aliases"
+        case .aiCodex:
+            "AI Chat: Codex"
+        case .aiOpenAI:
+            "AI Chat: OpenAI"
         case .settings:
             "Settings"
         }
@@ -78,6 +98,10 @@ enum FeatureCommand: String, Hashable, Sendable {
             "Create and paste reusable text"
         case .aliases:
             "Manage custom keywords for applications"
+        case .aiCodex:
+            "Uses your ChatGPT plan through Codex"
+        case .aiOpenAI:
+            "Uses API credits and usage-based billing"
         case .settings:
             "Configure Yorozu"
         }
@@ -91,6 +115,10 @@ enum FeatureCommand: String, Hashable, Sendable {
             "text.quote"
         case .aliases:
             "character.cursor.ibeam"
+        case .aiCodex:
+            "terminal"
+        case .aiOpenAI:
+            "sparkles"
         case .settings:
             "gearshape"
         }
@@ -104,6 +132,10 @@ enum FeatureCommand: String, Hashable, Sendable {
             .snippets
         case .aliases:
             .aliases
+        case .aiCodex:
+            .ai(providerID: .codex)
+        case .aiOpenAI:
+            .ai(providerID: .openAIAPI)
         case .settings:
             .settings
         }
@@ -123,8 +155,36 @@ enum FeatureCommand: String, Hashable, Sendable {
             self = .snippets
         case .aliases:
             self = .aliases
+        case let .ai(providerID):
+            switch providerID {
+            case .codex:
+                self = .aiCodex
+            case .openAIAPI:
+                self = .aiOpenAI
+            default:
+                return nil
+            }
         case .settings:
             self = .settings
+        }
+    }
+
+    var providerID: AIProviderID? {
+        switch self {
+        case .aiCodex: .codex
+        case .aiOpenAI: .openAIAPI
+        default: nil
+        }
+    }
+
+    var rawValue: String {
+        switch self {
+        case .clipboardHistory: "clipboardHistory"
+        case .snippets: "snippets"
+        case .aliases: "aliases"
+        case .aiCodex: "aiChat.codex"
+        case .aiOpenAI: "aiChat.openai_api"
+        case .settings: "settings"
         }
     }
 }

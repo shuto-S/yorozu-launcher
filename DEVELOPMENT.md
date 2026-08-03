@@ -164,6 +164,7 @@ Pass `--ui-testing-run-id <unique-value>` when starting the test host. UI-test m
 - fake Accessibility and event-posting dependencies;
 - global shortcut registration disabled and shortcut recorders backed by isolated bindings;
 - URL preview networking disabled.
+- fake Codex/OpenAI providers, credentials, conversation fixtures, and chat services with no network access.
 
 Failure to construct this environment is fatal. UI tests must never fall back to production dependencies. Test shutdown waits for Clipboard monitoring to stop, closes the store, and only then removes the temporary directory.
 
@@ -178,7 +179,7 @@ For UI or input changes, check:
 - keyboard selection and one-row-at-a-time scroll following
 - mouse selection and footer actions
 - outside-click dismissal
-- Root, Clipboard, Snippets, Aliases, and Settings route transitions
+- Root, Clipboard, Snippets, Aliases, AI Chat, and Settings route transitions
 - Japanese IME composition, candidate movement, confirmation, and cancellation
 - automatic paste and copy fallback with Accessibility both allowed and denied
 

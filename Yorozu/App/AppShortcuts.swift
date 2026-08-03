@@ -9,6 +9,7 @@ extension KeyboardShortcuts.Name {
     static let openClipboardHistory = Self("openClipboardHistory")
     static let openSnippets = Self("openSnippets")
     static let openAliases = Self("openAliases")
+    static let openAIChat = Self("openAIChat")
 }
 
 struct AppShortcutDefinition: Identifiable {
@@ -44,6 +45,12 @@ enum AppShortcutCatalog {
                 title: "Open Aliases",
                 detail: "Open application aliases directly from anywhere.",
                 name: .openAliases
+            ),
+            AppShortcutDefinition(
+                id: "open-ai-chat",
+                title: "Open AI Chat",
+                detail: "Open your AI chats directly from anywhere.",
+                name: .openAIChat
             ),
         ]
     }

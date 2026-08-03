@@ -7,9 +7,10 @@ struct GlassSearchField: NSViewRepresentable {
     let placeholder: String
     let accessibilityLabel: String
     let leadingInset: CGFloat
+    var onSubmit: (() -> Void)? = nil
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(text: $text)
+        Coordinator(text: $text, onSubmit: onSubmit)
     }
 
     func makeNSView(context: Context) -> NSView {
@@ -68,6 +69,7 @@ struct GlassSearchField: NSViewRepresentable {
         searchField.placeholderString = placeholder
         searchField.setAccessibilityLabel(accessibilityLabel)
         context.coordinator.leadingConstraint?.constant = leadingInset
+        context.coordinator.onSubmit = onSubmit
         guard context.coordinator.lastFocusRequest != focusRequest else { return }
         context.coordinator.lastFocusRequest = focusRequest
         DispatchQueue.main.async {
@@ -87,14 +89,30 @@ struct GlassSearchField: NSViewRepresentable {
         weak var searchField: NSSearchField?
         var leadingConstraint: NSLayoutConstraint?
         var lastFocusRequest = -1
+        var onSubmit: (() -> Void)?
 
-        init(text: Binding<String>) {
+        init(text: Binding<String>, onSubmit: (() -> Void)?) {
             _text = text
+            self.onSubmit = onSubmit
         }
 
         func controlTextDidChange(_ notification: Notification) {
             guard let searchField = notification.object as? NSSearchField else { return }
             text = searchField.stringValue
+        }
+
+        func control(
+            _ control: NSControl,
+            textView: NSTextView,
+            doCommandBy commandSelector: Selector
+        ) -> Bool {
+            guard commandSelector == #selector(NSResponder.insertNewline(_:)),
+                  !textView.hasMarkedText(),
+                  let onSubmit else {
+                return false
+            }
+            onSubmit()
+            return true
         }
     }
 }

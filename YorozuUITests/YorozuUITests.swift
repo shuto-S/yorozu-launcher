@@ -55,14 +55,13 @@ final class YorozuUITests: XCTestCase {
         XCTAssertTrue(actionPanel.waitForNonExistence(timeout: 2))
         XCTAssertTrue(actionSearch.waitForNonExistence(timeout: 2))
         XCTAssertTrue(
-            application.textFields["aliases.alias-field"]
+            application.textFields["modal.alias.value"]
                 .waitForExistence(timeout: 2)
         )
+        application.buttons["modal.cancel"].click()
         XCTAssertTrue(
             application.descendants(matching: .any)["launcher.aliases"].exists
         )
-
-        application.buttons["aliases.cancel"].click()
         XCTAssertTrue(application.searchFields["launcher.search"].exists)
     }
 
@@ -273,20 +272,20 @@ final class YorozuUITests: XCTestCase {
 
         application.buttons["launcher.footer.addAlias"].click()
         let applicationSearch = application
-            .descendants(matching: .any)["aliases.application-search"]
+            .descendants(matching: .any)["modal.alias.application-search"]
         XCTAssertTrue(applicationSearch.waitForExistence(timeout: 2))
         applicationSearch.typeText("vsc")
 
         let codeCandidate = application
             .descendants(matching: .any)[
-                "aliases.application.bundle:com.microsoft.vscode"
+                "modal.alias.application.bundle:com.microsoft.vscode"
             ]
         XCTAssertTrue(codeCandidate.waitForExistence(timeout: 3))
         codeCandidate.click()
-        application.buttons["aliases.continue"].click()
+        application.buttons["modal.alias.continue"].click()
 
         let aliasField = application
-            .descendants(matching: .any)["aliases.alias-field"]
+            .descendants(matching: .any)["modal.alias.value"]
         XCTAssertTrue(aliasField.waitForExistence(timeout: 2))
         aliasField.click()
         aliasField.typeText("temporary")
@@ -294,6 +293,77 @@ final class YorozuUITests: XCTestCase {
 
         XCTAssertTrue(aliasField.waitForNonExistence(timeout: 2))
         XCTAssertTrue(aliases.exists)
+    }
+
+    @MainActor
+    func testSnippetEditorUsesTheSharedInPaletteModal() {
+        continueAfterFailure = false
+        let application = XCUIApplication()
+        application.launchArguments = ["--ui-testing", "--ui-testing-sticky"]
+        application.launch()
+
+        let rootSearch = application.searchFields["launcher.search"]
+        XCTAssertTrue(rootSearch.waitForExistence(timeout: 5))
+        rootSearch.typeText("snippets")
+        application.typeKey(.return, modifierFlags: [])
+
+        let newSnippet = application.buttons["launcher.footer.newSnippet"]
+        XCTAssertTrue(newSnippet.waitForExistence(timeout: 2))
+        newSnippet.click()
+
+        let modal = application.descendants(matching: .any)["palette.modal"]
+        XCTAssertTrue(modal.waitForExistence(timeout: 2))
+        XCTAssertTrue(application.textFields["modal.snippet.name"].exists)
+        XCTAssertTrue(application.textViews["modal.snippet.content"].exists)
+
+        application.typeKey("k", modifierFlags: .command)
+        XCTAssertFalse(
+            application.descendants(matching: .any)["launcher.action-panel"].exists
+        )
+
+        application.typeKey(.escape, modifierFlags: [])
+        XCTAssertTrue(modal.waitForNonExistence(timeout: 2))
+        XCTAssertTrue(newSnippet.exists)
+    }
+
+    @MainActor
+    func testAIChatUsesSinglePaneListAndConversationNavigation() {
+        continueAfterFailure = false
+        let application = XCUIApplication()
+        application.launchArguments = ["--ui-testing", "--ui-testing-sticky"]
+        application.launch()
+
+        let rootSearch = application.searchFields["launcher.search"]
+        XCTAssertTrue(rootSearch.waitForExistence(timeout: 5))
+        rootSearch.typeText("AI Chat")
+
+        let aiRow = application
+            .descendants(matching: .any)["launcher.row.feature:aiChat.codex"]
+        XCTAssertTrue(aiRow.waitForExistence(timeout: 2))
+        aiRow.click()
+        application.typeKey(.return, modifierFlags: [])
+
+        XCTAssertTrue(
+            application.descendants(matching: .any)["launcher.ai"]
+                .waitForExistence(timeout: 2)
+        )
+        let chatListSearch = application.searchFields["launcher.search"]
+        XCTAssertTrue(chatListSearch.waitForExistence(timeout: 2))
+        let conversationRow = application
+            .descendants(matching: .any)["ai.chat-row.conversation-ui-test"]
+        XCTAssertTrue(conversationRow.waitForExistence(timeout: 2))
+        conversationRow.doubleClick()
+
+        XCTAssertTrue(
+            application.descendants(matching: .any)["ai.composer"]
+                .waitForExistence(timeout: 2)
+        )
+        XCTAssertFalse(chatListSearch.exists)
+
+        application.typeKey(.escape, modifierFlags: [])
+        XCTAssertTrue(chatListSearch.waitForExistence(timeout: 2))
+        application.typeKey(.escape, modifierFlags: [])
+        XCTAssertTrue(rootSearch.waitForExistence(timeout: 2))
     }
 
     @MainActor

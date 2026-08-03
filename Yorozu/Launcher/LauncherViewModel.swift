@@ -16,6 +16,26 @@ enum LauncherActionID: String, CaseIterable, Identifiable {
     case editSnippet
     case duplicateSnippet
     case delete
+    case aiOpenChat
+    case aiNewChat
+    case aiChangeModel
+    case aiModelTerra
+    case aiModelSol
+    case aiModelLuna
+    case aiModel4
+    case aiModel5
+    case aiModel6
+    case aiModel7
+    case aiModel8
+    case aiModel9
+    case aiModel10
+    case aiToggleWebSearch
+    case aiAttachFiles
+    case aiArchive
+    case aiDelete
+    case aiToggleArchiveScope
+    case aiCopyLastResponse
+    case aiStopGenerating
 
     var id: Self { self }
 }
@@ -47,6 +67,30 @@ struct LauncherFooterAction: Identifiable, Equatable {
 enum AliasEditorMode: Equatable {
     case selectingApplication
     case editing(ApplicationIdentity)
+}
+
+enum SnippetEditorMode: Equatable {
+    case new
+    case editing(UUID)
+}
+
+enum PaletteConfirmation: Equatable {
+    case deleteClipboard(UUID)
+    case deleteSnippet(UUID)
+    case deleteAlias(ApplicationIdentity)
+    case deleteAIConversation(AIConversationReference)
+    case clearClipboardHistory(includePinned: Bool)
+    case codexSignOut
+    case removeOpenAIAPIKey
+}
+
+enum PaletteModal: Equatable {
+    case snippetEditor(SnippetEditorMode)
+    case aliasApplicationPicker
+    case aliasEditor(ApplicationIdentity)
+    case openAIAPIKey
+    case codexExecutablePath
+    case confirmation(PaletteConfirmation)
 }
 
 @MainActor
@@ -102,6 +146,15 @@ final class LauncherViewModel {
     private(set) var storageRecoveryNotice: StorageRecoveryNotice?
     private(set) var focusRequest = 0
     private(set) var isActionPanelPresented = false
+    private(set) var paletteModal: PaletteModal?
+    private(set) var isModalProcessing = false
+    private(set) var modalFocusRequest = 0
+    var modalErrorMessage: String?
+    var snippetNameDraft = ""
+    var snippetKeywordDraft = ""
+    var snippetContentDraft = ""
+    var openAIAPIKeyDraft = ""
+    var codexExecutablePathDraft = ""
     var actionQuery = "" {
         didSet {
             guard actionQuery != oldValue else { return }
@@ -130,13 +183,10 @@ final class LauncherViewModel {
     private(set) var aliasValidationMessage: String?
     private(set) var isSavingAlias = false
     private(set) var aliasFocusRequest = 0
-    private(set) var aliasDeletionCandidate: LaunchableApplication?
 
     var dismissForLaunch: (() -> Void)?
     var reopenAfterLaunchFailure: (() -> Void)?
     var dismissAndRestorePreviousApplication: (() -> Void)?
-    var presentSnippetEditor: ((Snippet?) -> Void)?
-    var confirmDelete: ((CommandResult) -> Void)?
     var pasteContent: ((
         PasteboardContent,
         @escaping @MainActor (PasteResult) -> Void
@@ -146,6 +196,23 @@ final class LauncherViewModel {
     let clipboardPreferences: ClipboardPreferences
     let urlPreviewService: URLPreviewService
     let shortcutSettings: AppShortcutSettings
+    let aiChatViewModelStore: AIChatViewModelStore
+
+    var aiProviderPreferences: AIProviderPreferences {
+        aiChatViewModelStore.providerPreferences
+    }
+
+    var aiChatViewModel: AIChatViewModel {
+        if let providerID = route.aiProviderID,
+           let value = aiChatViewModelStore.viewModel(for: providerID) {
+            return value
+        }
+        return aiChatViewModelStore.defaultViewModel() ?? .disabled()
+    }
+
+    func aiChatViewModel(for providerID: AIProviderID) -> AIChatViewModel? {
+        aiChatViewModelStore.viewModel(for: providerID)
+    }
 
     private let catalog: ApplicationCatalog
     private let featureCatalog: FeatureCommandCatalog
@@ -179,6 +246,8 @@ final class LauncherViewModel {
         clipboardPreferences: ClipboardPreferences,
         urlPreviewService: URLPreviewService,
         shortcutSettings: AppShortcutSettings = AppShortcutSettings(),
+        aiChatViewModel: AIChatViewModel? = nil,
+        aiChatViewModelStore: AIChatViewModelStore? = nil,
         launcher: any ApplicationLaunching,
         clipboardImageDecoder: any ClipboardImageDecoding = ClipboardImageDecoder(),
         storageRecoveryNotice: StorageRecoveryNotice? = nil
@@ -190,11 +259,26 @@ final class LauncherViewModel {
         self.clipboardPreferences = clipboardPreferences
         self.urlPreviewService = urlPreviewService
         self.shortcutSettings = shortcutSettings
+        if let aiChatViewModelStore {
+            self.aiChatViewModelStore = aiChatViewModelStore
+        } else {
+            let value = aiChatViewModel ?? .disabled()
+            let suite = UserDefaults(
+                suiteName: "com.yorozu.app.ai-provider-fallback.\(UUID().uuidString)"
+            ) ?? .standard
+            self.aiChatViewModelStore = AIChatViewModelStore(
+                viewModels: [value],
+                providerPreferences: AIProviderPreferences(defaults: suite)
+            )
+        }
         self.launcher = launcher
         self.clipboardImageDecoder = clipboardImageDecoder
         self.storageRecoveryNotice = storageRecoveryNotice
         clipboardImageCache.countLimit = 8
         clipboardImageCache.totalCostLimit = 32 * 1_024 * 1_024
+        self.aiProviderPreferences.didChange = { [weak self] in
+            self?.handleAIProviderPreferencesChange()
+        }
     }
 
     var selectedResult: CommandResult? {
@@ -247,8 +331,79 @@ final class LauncherViewModel {
         )
     }
 
+    var isModalPresented: Bool {
+        paletteModal != nil
+    }
+
+    var modalSnippet: Snippet? {
+        guard case let .snippetEditor(.editing(id)) = paletteModal else { return nil }
+        return snippetByID[id]
+    }
+
+    var modalConfirmationTitle: String {
+        guard case let .confirmation(confirmation) = paletteModal else { return "" }
+        switch confirmation {
+        case .deleteClipboard:
+            return "Delete Clipboard Item?"
+        case .deleteSnippet:
+            return "Delete Snippet?"
+        case .deleteAlias:
+            return "Delete Alias?"
+        case .deleteAIConversation:
+            return "Delete Chat?"
+        case let .clearClipboardHistory(includePinned):
+            return includePinned ? "Clear All Clipboard History?" : "Clear Clipboard History?"
+        case .codexSignOut:
+            return "Sign Out of ChatGPT?"
+        case .removeOpenAIAPIKey:
+            return "Remove OpenAI API Key?"
+        }
+    }
+
+    var modalConfirmationMessage: String {
+        guard case let .confirmation(confirmation) = paletteModal else { return "" }
+        switch confirmation {
+        case .deleteClipboard:
+            return "This item will be permanently removed from clipboard history."
+        case let .deleteSnippet(id):
+            let name = snippetByID[id]?.name ?? "This snippet"
+            return "\u{201c}\(name)\u{201d} will be permanently deleted."
+        case let .deleteAlias(identity):
+            let name = installedApplications.first(where: { $0.id == identity })?.primaryName
+                ?? "this application"
+            return "The alias for \(name) will be removed. The application and its usage history will not be affected."
+        case .deleteAIConversation:
+            return "The chat and its provider conversation items will be permanently deleted."
+        case let .clearClipboardHistory(includePinned):
+            return includePinned
+                ? "Pinned items will also be permanently deleted."
+                : "Pinned items will be kept."
+        case .codexSignOut:
+            return "Yorozu will stop using your ChatGPT account until you sign in again."
+        case .removeOpenAIAPIKey:
+            return "The saved key will be removed from macOS Keychain."
+        }
+    }
+
+    var modalConfirmationActionTitle: String {
+        guard case let .confirmation(confirmation) = paletteModal else { return "" }
+        switch confirmation {
+        case .deleteClipboard, .deleteSnippet, .deleteAlias, .deleteAIConversation:
+            return "Delete"
+        case let .clearClipboardHistory(includePinned):
+            return includePinned ? "Clear All" : "Clear History"
+        case .codexSignOut:
+            return "Sign Out"
+        case .removeOpenAIAPIKey:
+            return "Remove Key"
+        }
+    }
+
     var actionPanelTitle: String {
-        selectedResult?.title ?? ""
+        if route.isAI {
+            return aiChatViewModel.actionPanelTitle
+        }
+        return selectedResult?.title ?? ""
     }
 
     var searchPlaceholder: String {
@@ -271,6 +426,8 @@ final class LauncherViewModel {
             "No Snippets"
         case .aliases:
             query.isEmpty ? "No Aliases Yet" : "No Matching Aliases"
+        case .ai:
+            "No Chats Yet"
         case .settings:
             "Settings"
         }
@@ -286,6 +443,8 @@ final class LauncherViewModel {
             "text.quote"
         case .aliases:
             "character.cursor.ibeam"
+        case .ai:
+            "bubble.left.and.bubble.right"
         case .settings:
             "gearshape"
         }
@@ -307,6 +466,8 @@ final class LauncherViewModel {
                 $0.preference.alias?.isEmpty == false
             }.count
             return "\(count) aliases"
+        case .ai:
+            return "AI Chat"
         case .settings:
             return "Settings"
         }
@@ -337,6 +498,8 @@ final class LauncherViewModel {
                 LauncherFooterAction(id: .addAlias, shortcut: "⌘N", title: "Add Alias"),
                 LauncherFooterAction(id: .actions, shortcut: "⌘K", title: "Actions"),
             ]
+        case .ai:
+            []
         case .settings:
             []
         }
@@ -372,6 +535,9 @@ final class LauncherViewModel {
     }
 
     var actionItems: [LauncherActionItem] {
+        if route.isAI {
+            return aiChatViewModel.actionItems
+        }
         guard let result = selectedResult else { return [] }
         switch result.payload {
         case let .application(application):
@@ -488,6 +654,7 @@ final class LauncherViewModel {
     }
 
     func shutdown() {
+        dismissModal(restoreFocus: false)
         searchTask?.cancel()
         searchTask = nil
         clipboardImageLoadTask?.cancel()
@@ -495,6 +662,7 @@ final class LauncherViewModel {
         urlPreviewService.cancel(resetState: true)
         startupTasks.forEach { $0.cancel() }
         startupTasks.removeAll(keepingCapacity: false)
+        aiChatViewModelStore.shutdown()
     }
 
     func prepareForPresentation(
@@ -502,13 +670,19 @@ final class LauncherViewModel {
         origin: PalettePresentationOrigin = .direct
     ) {
         dismissActionPanel(restoreSearchFocus: false)
-        cancelAliasEditing()
-        aliasDeletionCandidate = nil
+        dismissModal(restoreFocus: false)
         resetClipboardImagePreview()
         errorMessage = nil
         statusMessage = nil
         focusRequest += 1
-        transitionRoute(to: route, origin: origin)
+        transitionRoute(
+            to: route,
+            origin: origin,
+            resetsSelection: route == .root
+        )
+        if route.isAI {
+            aiChatViewModel.prepareForPresentation()
+        }
         if let feature = FeatureCommand(route: route) {
             recordFeatureUse(feature)
         }
@@ -535,6 +709,11 @@ final class LauncherViewModel {
     }
 
     func moveSelection(by delta: Int) {
+        guard paletteModal == nil else { return }
+        if route.isAI {
+            aiChatViewModel.moveSelection(by: delta)
+            return
+        }
         if aliasEditorMode == .selectingApplication {
             moveAliasApplicationSelection(by: delta)
             return
@@ -546,6 +725,11 @@ final class LauncherViewModel {
     }
 
     func performPrimaryAction() {
+        guard paletteModal == nil else { return }
+        if route.isAI {
+            aiChatViewModel.performPrimaryAction()
+            return
+        }
         switch aliasEditorMode {
         case .selectingApplication:
             chooseSelectedAliasApplication()
@@ -557,9 +741,7 @@ final class LauncherViewModel {
             break
         }
         guard let result = selectedResult else {
-            if route == .snippets {
-                presentSnippetEditor?(nil)
-            }
+            if route == .snippets { newSnippet() }
             return
         }
         switch result.payload {
@@ -598,6 +780,9 @@ final class LauncherViewModel {
         statusMessage = nil
         focusRequest += 1
         transitionRoute(to: feature.route, origin: .root)
+        if feature.route.isAI {
+            aiChatViewModel.prepareForPresentation()
+        }
     }
 
     func togglePinForSelectedResult() {
@@ -643,6 +828,7 @@ final class LauncherViewModel {
         aliasDraft = ""
         aliasValidationMessage = nil
         aliasFocusRequest += 1
+        presentModal(.aliasApplicationPicker)
     }
 
     func beginEditingSelectedAlias() {
@@ -712,10 +898,11 @@ final class LauncherViewModel {
                 statusMessage = "Alias saved"
                 selectedID = Self.applicationResultID(identity)
                 refreshSearch()
-                focusRequest += 1
+                dismissModal()
             } catch {
                 isSavingAlias = false
                 aliasValidationMessage = error.localizedDescription
+                modalErrorMessage = error.localizedDescription
             }
         }
     }
@@ -734,21 +921,19 @@ final class LauncherViewModel {
               application.preference.alias != nil else {
             return
         }
-        dismissActionPanel()
-        aliasDeletionCandidate = application
-    }
-
-    func cancelAliasDeletion() {
-        aliasDeletionCandidate = nil
+        presentModal(.confirmation(.deleteAlias(application.id)))
     }
 
     func confirmAliasDeletion() {
-        guard let application = aliasDeletionCandidate else { return }
+        guard case let .confirmation(.deleteAlias(identity)) = paletteModal,
+              let application = installedApplications.first(where: { $0.id == identity }) else {
+            return
+        }
         let deletedIndex = results.firstIndex {
             $0.id == Self.applicationResultID(application.id)
         } ?? 0
-        aliasDeletionCandidate = nil
-
+        isModalProcessing = true
+        modalErrorMessage = nil
         Task {
             do {
                 apply(
@@ -762,8 +947,10 @@ final class LauncherViewModel {
                     preserveSelection: false,
                     preferredSelectionIndex: deletedIndex
                 )
+                dismissModal()
             } catch {
-                errorMessage = error.localizedDescription
+                isModalProcessing = false
+                modalErrorMessage = error.localizedDescription
             }
         }
     }
@@ -903,13 +1090,48 @@ final class LauncherViewModel {
     func newSnippet() {
         guard route == .snippets else { return }
         dismissActionPanel(restoreSearchFocus: false)
-        presentSnippetEditor?(nil)
+        snippetNameDraft = ""
+        snippetKeywordDraft = ""
+        snippetContentDraft = ""
+        presentModal(.snippetEditor(.new))
     }
 
     func editSelectedSnippet() {
         guard let snippet = selectedSnippet else { return }
         dismissActionPanel(restoreSearchFocus: false)
-        presentSnippetEditor?(snippet)
+        snippetNameDraft = snippet.name
+        snippetKeywordDraft = snippet.keyword ?? ""
+        snippetContentDraft = snippet.content
+        presentModal(.snippetEditor(.editing(snippet.id)))
+    }
+
+    func saveSnippetFromModal() {
+        guard case let .snippetEditor(mode) = paletteModal,
+              !isModalProcessing else { return }
+        let existing: Snippet?
+        switch mode {
+        case .new:
+            existing = nil
+        case let .editing(id):
+            existing = snippetByID[id]
+        }
+        isModalProcessing = true
+        modalErrorMessage = nil
+        saveSnippet(
+            existing: existing,
+            name: snippetNameDraft,
+            keyword: snippetKeywordDraft,
+            content: snippetContentDraft
+        ) { [weak self] success, message in
+            guard let self else { return }
+            self.isModalProcessing = false
+            if success {
+                self.statusMessage = existing == nil ? "Snippet created" : "Snippet saved"
+                self.dismissModal()
+            } else {
+                self.modalErrorMessage = message ?? "The snippet could not be saved."
+            }
+        }
     }
 
     func saveSnippet(
@@ -961,30 +1183,36 @@ final class LauncherViewModel {
               selectedResult.kind == .clipboard || selectedResult.kind == .snippet else {
             return
         }
-        confirmDelete?(selectedResult)
+        switch selectedResult.payload {
+        case let .clipboard(id):
+            presentModal(.confirmation(.deleteClipboard(id)))
+        case let .snippet(id):
+            presentModal(.confirmation(.deleteSnippet(id)))
+        case .application, .feature:
+            break
+        }
     }
 
-    func deleteConfirmed(_ result: CommandResult) {
+    private func deleteConfirmed(_ confirmation: PaletteConfirmation) {
+        isModalProcessing = true
+        modalErrorMessage = nil
         Task {
-            switch result.payload {
-            case let .clipboard(id):
+            switch confirmation {
+            case let .deleteClipboard(id):
                 apply(clipboardSnapshot: await clipboardCatalog.delete(id: id))
-            case let .snippet(id):
+            case let .deleteSnippet(id):
                 apply(snippetSnapshot: await snippetCatalog.delete(id: id))
-            case .application, .feature:
+            default:
+                isModalProcessing = false
                 return
             }
             refreshSearch()
+            dismissModal()
         }
     }
 
-    func clearClipboardHistory(includePinned: Bool) {
-        Task {
-            apply(
-                clipboardSnapshot: await clipboardCatalog.clear(includePinned: includePinned)
-            )
-            refreshSearch()
-        }
+    func requestClearClipboardHistory(includePinned: Bool) {
+        presentModal(.confirmation(.clearClipboardHistory(includePinned: includePinned)))
     }
 
     func applyClipboardRetentionSettings() {
@@ -1012,7 +1240,8 @@ final class LauncherViewModel {
     }
 
     func showActionMenu() {
-        guard selectedResult != nil,
+        guard (route.isAI ? !aiChatViewModel.actionItems.isEmpty : selectedResult != nil),
+              paletteModal == nil,
               route != .aliases || aliasEditorMode == nil else {
             return
         }
@@ -1032,6 +1261,9 @@ final class LauncherViewModel {
         isActionPanelPresented = false
         actionQuery = ""
         selectedActionID = nil
+        if route.isAI {
+            aiChatViewModel.cancelActionNavigation()
+        }
         if restoreSearchFocus {
             focusRequest += 1
         }
@@ -1058,6 +1290,20 @@ final class LauncherViewModel {
     }
 
     func performAction(_ action: LauncherActionID) {
+        if action.rawValue.hasPrefix("ai") {
+            if action == .aiDelete {
+                requestAIConversationDeletion()
+                return
+            }
+            aiChatViewModel.performAction(action)
+            if action == .aiChangeModel {
+                actionQuery = ""
+                selectedActionID = filteredActionItems.first?.id
+            } else {
+                dismissActionPanel()
+            }
+            return
+        }
         switch action {
         case .open:
             dismissActionPanel(restoreSearchFocus: false)
@@ -1087,14 +1333,23 @@ final class LauncherViewModel {
         case .delete:
             dismissActionPanel()
             requestDeleteSelected()
+        case .aiOpenChat, .aiNewChat, .aiChangeModel, .aiModelTerra,
+             .aiModelSol, .aiModelLuna, .aiModel4, .aiModel5, .aiModel6,
+             .aiModel7, .aiModel8, .aiModel9, .aiModel10,
+             .aiToggleWebSearch, .aiAttachFiles,
+             .aiArchive, .aiDelete, .aiToggleArchiveScope,
+             .aiCopyLastResponse, .aiStopGenerating:
+            break
         }
     }
 
     func escape() {
-        if isActionPanelPresented {
+        if paletteModal != nil {
+            dismissModal()
+        } else if isActionPanelPresented {
             dismissActionPanel()
-        } else if aliasDeletionCandidate != nil {
-            cancelAliasDeletion()
+        } else if route.isAI, aiChatViewModel.handleEscape() {
+            return
         } else if aliasEditorMode != nil {
             cancelAliasEditing()
         } else if route != .root, presentationOrigin == .root {
@@ -1109,19 +1364,197 @@ final class LauncherViewModel {
 
     func returnToRoot() {
         dismissActionPanel(restoreSearchFocus: false)
-        cancelAliasEditing()
-        aliasDeletionCandidate = nil
+        dismissModal(restoreFocus: false)
         resetClipboardImagePreview()
         statusMessage = nil
         focusRequest += 1
         transitionRoute(to: .root, origin: .direct)
     }
 
-    func focusRequestForPopoverDismissal() {
-        focusRequest += 1
+    func presentOpenAIAPIKeyModal() {
+        openAIAPIKeyDraft = ""
+        presentModal(.openAIAPIKey)
+    }
+
+    func presentCodexExecutablePathModal() {
+        codexExecutablePathDraft = aiProviderPreferences.codexExecutablePath
+        presentModal(.codexExecutablePath)
+    }
+
+    func saveOpenAIAPIKeyFromModal() {
+        guard paletteModal == .openAIAPIKey,
+              !isModalProcessing,
+              let viewModel = aiChatViewModel(for: .openAIAPI) else { return }
+        isModalProcessing = true
+        modalErrorMessage = nil
+        viewModel.saveAPIKey(openAIAPIKeyDraft) { [weak self] success, message in
+            guard let self else { return }
+            self.isModalProcessing = false
+            if success {
+                self.dismissModal()
+            } else {
+                self.modalErrorMessage = message ?? "The API key could not be saved."
+            }
+        }
+    }
+
+    func saveCodexExecutablePathFromModal() {
+        guard paletteModal == .codexExecutablePath,
+              !isModalProcessing,
+              let viewModel = aiChatViewModel(for: .codex) else { return }
+        let path = codexExecutablePathDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        isModalProcessing = true
+        modalErrorMessage = nil
+        viewModel.updateCodexExecutablePath(path) { [weak self] success, message in
+            guard let self else { return }
+            self.isModalProcessing = false
+            if success {
+                self.aiProviderPreferences.codexExecutablePath = path
+                self.dismissModal()
+            } else {
+                self.modalErrorMessage = message ?? "The executable path could not be saved."
+            }
+        }
+    }
+
+    func useAutomaticCodexDetection() {
+        codexExecutablePathDraft = ""
+        saveCodexExecutablePathFromModal()
+    }
+
+    func requestCodexSignOut() {
+        presentModal(.confirmation(.codexSignOut))
+    }
+
+    func requestOpenAIAPIKeyRemoval() {
+        presentModal(.confirmation(.removeOpenAIAPIKey))
+    }
+
+    func requestAIConversationDeletion() {
+        guard let target = aiChatViewModel.deletionTarget else { return }
+        presentModal(.confirmation(.deleteAIConversation(target.reference)))
+    }
+
+    func confirmModalAction() {
+        guard case let .confirmation(confirmation) = paletteModal,
+              !isModalProcessing else { return }
+        switch confirmation {
+        case .deleteClipboard, .deleteSnippet:
+            deleteConfirmed(confirmation)
+        case .deleteAlias:
+            confirmAliasDeletion()
+        case let .deleteAIConversation(reference):
+            guard let viewModel = aiChatViewModel(for: reference.providerID) else {
+                modalErrorMessage = "The AI provider is unavailable."
+                return
+            }
+            isModalProcessing = true
+            modalErrorMessage = nil
+            viewModel.deleteConversation(reference: reference) { [weak self] success, message in
+                guard let self else { return }
+                self.isModalProcessing = false
+                if success {
+                    self.dismissModal()
+                } else {
+                    self.modalErrorMessage = message ?? "The chat could not be deleted."
+                }
+            }
+        case let .clearClipboardHistory(includePinned):
+            isModalProcessing = true
+            Task {
+                apply(
+                    clipboardSnapshot: await clipboardCatalog.clear(
+                        includePinned: includePinned
+                    )
+                )
+                refreshSearch()
+                dismissModal()
+            }
+        case .codexSignOut:
+            guard let viewModel = aiChatViewModel(for: .codex) else {
+                modalErrorMessage = "Codex is unavailable."
+                return
+            }
+            isModalProcessing = true
+            viewModel.signOut { [weak self] success, message in
+                guard let self else { return }
+                self.isModalProcessing = false
+                if success {
+                    self.dismissModal()
+                } else {
+                    self.modalErrorMessage = message ?? "Yorozu could not sign out."
+                }
+            }
+        case .removeOpenAIAPIKey:
+            guard let viewModel = aiChatViewModel(for: .openAIAPI) else {
+                modalErrorMessage = "OpenAI API is unavailable."
+                return
+            }
+            isModalProcessing = true
+            viewModel.removeAPIKey { [weak self] success, message in
+                guard let self else { return }
+                self.isModalProcessing = false
+                if success {
+                    self.dismissModal()
+                } else {
+                    self.modalErrorMessage = message ?? "The API key could not be removed."
+                }
+            }
+        }
+    }
+
+    func performModalSubmit() {
+        switch paletteModal {
+        case .snippetEditor:
+            saveSnippetFromModal()
+        case .aliasApplicationPicker:
+            chooseSelectedAliasApplication()
+        case .aliasEditor:
+            saveAlias()
+        case .openAIAPIKey:
+            saveOpenAIAPIKeyFromModal()
+        case .codexExecutablePath:
+            saveCodexExecutablePathFromModal()
+        case .confirmation, nil:
+            break
+        }
+    }
+
+    func dismissModal(restoreFocus: Bool = true) {
+        guard paletteModal != nil
+                || aliasEditorMode != nil
+                || !snippetNameDraft.isEmpty
+                || !snippetKeywordDraft.isEmpty
+                || !snippetContentDraft.isEmpty
+                || !openAIAPIKeyDraft.isEmpty
+                || !codexExecutablePathDraft.isEmpty else { return }
+        paletteModal = nil
+        modalErrorMessage = nil
+        isModalProcessing = false
+        snippetNameDraft = ""
+        snippetKeywordDraft = ""
+        snippetContentDraft = ""
+        openAIAPIKeyDraft = ""
+        codexExecutablePathDraft = ""
+        aliasEditorMode = nil
+        aliasDraft = ""
+        aliasApplicationQuery = ""
+        selectedAliasApplicationID = nil
+        aliasValidationMessage = nil
+        isSavingAlias = false
+        if restoreFocus { focusRequest += 1 }
+    }
+
+    private func presentModal(_ modal: PaletteModal) {
+        dismissActionPanel(restoreSearchFocus: false)
+        paletteModal = modal
+        modalErrorMessage = nil
+        isModalProcessing = false
+        modalFocusRequest += 1
     }
 
     func paletteDidHide() {
+        dismissModal(restoreFocus: false)
         searchTask?.cancel()
         searchRevision += 1
         resetClipboardImagePreview()
@@ -1136,6 +1569,7 @@ final class LauncherViewModel {
         aliasValidationMessage = nil
         selectedID = Self.applicationResultID(application.id)
         aliasFocusRequest += 1
+        presentModal(.aliasEditor(application.id))
     }
 
     private func reconcileAliasApplicationSelection() {
@@ -1203,6 +1637,8 @@ final class LauncherViewModel {
                 matches = applications.map {
                     Self.applicationResult($0, query: currentQuery)
                 }
+            case .ai:
+                matches = []
             case .settings:
                 matches = []
             }
@@ -1224,7 +1660,8 @@ final class LauncherViewModel {
 
     private func transitionRoute(
         to newRoute: PaletteRoute,
-        origin: PalettePresentationOrigin
+        origin: PalettePresentationOrigin,
+        resetsSelection: Bool = false
     ) {
         let startedAt = ProcessInfo.processInfo.systemUptime
         if let selectedID {
@@ -1254,7 +1691,7 @@ final class LauncherViewModel {
         // always start those routes at the newest/highest-ranked item. Other
         // routes still restore their selection (for example, returning to the
         // feature row in Root Search).
-        let rememberedSelection = shouldResetSelectionOnEntry(newRoute)
+        let rememberedSelection = (resetsSelection || shouldResetSelectionOnEntry(newRoute))
             ? nil
             : selectionByRoute[newRoute]
         let nextSelection: CommandResultID?
@@ -1279,7 +1716,7 @@ final class LauncherViewModel {
                 "route_usable_list",
                 startedAt: startedAt
             )
-        } else if newRoute != .settings {
+        } else if newRoute != .settings, !newRoute.isAI {
             refreshSearch(preserveSelection: true)
         }
     }
@@ -1299,6 +1736,8 @@ final class LauncherViewModel {
         case .snippets:
             snippetDefaultResults
         case .settings:
+            []
+        case .ai:
             []
         case .aliases:
             nil
@@ -1336,6 +1775,10 @@ final class LauncherViewModel {
         let normalized = query.launcherNormalized
         return featureCommands.compactMap { state in
             let feature = state.command
+            if let providerID = feature.providerID,
+               !aiProviderPreferences.isEnabled(providerID) {
+                return nil
+            }
             let score: Int
             if normalized.isEmpty {
                 score = 0
@@ -1359,6 +1802,18 @@ final class LauncherViewModel {
                 isPinned: state.preference.isPinned,
                 payload: .feature(feature)
             )
+        }
+    }
+
+    private func handleAIProviderPreferencesChange() {
+        rebuildRootDefaultResults()
+        if let providerID = route.aiProviderID,
+           !aiProviderPreferences.isEnabled(providerID) {
+            aiChatViewModel.stopGenerating()
+            transitionRoute(to: .settings, origin: .direct)
+        }
+        if route == .root {
+            refreshSearch(preserveSelection: true)
         }
     }
 

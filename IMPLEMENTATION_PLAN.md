@@ -52,10 +52,23 @@ The current target is:
 - add, edit, and delete without a separate utility window
 - immediate reflection in Root Search
 
+### AI Chat
+
+- dedicated single-pane route: Root Search → chat list → conversation
+- shared provider-neutral models, `AIChatViewModel`, list, conversation, composer, message, and Action Panel UI
+- Codex enabled by default through the installed `codex app-server` and Sign in with ChatGPT
+- optional OpenAI API provider that can be enabled alongside Codex
+- local title-only search and last-message ordering without network requests
+- OpenAI Responses API streaming backed by Conversations API state
+- API-key storage in macOS Keychain
+- model selection, opt-in Web Search, explicit file inputs, citations, archive, and complete-delete retry
+- minimal SQLite index containing title, model, archive/deletion state, and timestamps only
+- no ChatGPT sidebar/history synchronization and no implicit Clipboard attachment
+
 ### Settings and interaction
 
 - Settings integrated into the existing palette
-- General, Clipboard, and Shortcuts sections
+- General, Clipboard, AI, and Shortcuts sections
 - configurable shortcuts for Yorozu and feature routes
 - current-process Accessibility status
 - keyboard-first operation with mouse-accessible primary actions
@@ -114,17 +127,17 @@ Core/
 
 Launcher/
   Application discovery and ranking
-  Clipboard, snippet, and feature catalogs
+  Clipboard, snippet, AI conversation, and feature catalogs
   LauncherStore
   LauncherViewModel
 
 Platform/
   PaletteWindowController and PaletteView
   Pasteboard, Accessibility, and paste coordination
-  Settings and native URL previews
+  Settings, OpenAI integration, and native URL previews
 ```
 
-The runtime database is the single persistence source for launcher preferences, feature usage, clipboard history, snippets, and URL-preview metadata. Search never queries SQLite per keystroke.
+The runtime database is the single persistence source for launcher preferences, feature usage, clipboard history, snippets, AI chat list metadata, and URL-preview metadata. Search never queries SQLite per keystroke. AI message bodies and attachments are not stored in SQLite.
 
 ## Quality targets
 
@@ -151,6 +164,9 @@ Privacy and reliability requirements:
 - Automatic paste requires current-process Accessibility trust and stable local signing.
 - Non-image database retention cleanup is batched; expired rows can remain on disk until the next maintenance pass or explicit settings prune.
 - A URL preview that fails is not retried again during the same app process.
+- Codex requires an installed compatible `codex` executable and an authenticated ChatGPT account.
+- OpenAI API Chat requires a user-provided API key and API Platform billing.
+- Local provider conversation indexes cannot be reconstructed by enumerating all remote conversations.
 - UI automation depends on Xcode Automation permission and can fail before executing tests even when unit tests and the app are healthy.
 - There is no packaged, notarized release yet.
 
@@ -177,20 +193,11 @@ Privacy and reliability requirements:
 - versioned releases and release notes
 - update mechanism only after signature and rollback design are reviewed
 
-### Optional AI integration
-
-AI is not part of the current application. If pursued later, it must remain a separate, explicitly opened route with:
-
-- user-provided credentials stored in Keychain or a user-authenticated backend
-- no ChatGPT history-sync claim
-- no implicit clipboard or selected-text attachment
-- visible network and data-retention behavior
-- no effect on launcher startup or normal offline search
-
 ## Out of scope for the current release
 
 - ChatGPT conversation-history synchronization
 - autonomous Mac operation
+- Voice, image generation, Custom GPTs, MCP, and File Search
 - extension marketplace or third-party code execution
 - team sharing or cloud sync
 - Windows, Linux, iOS, or Mac App Store distribution

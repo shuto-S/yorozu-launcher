@@ -23,6 +23,7 @@ final class LauncherViewModelTests: XCTestCase {
         XCTAssertFalse(environment.startsClipboardMonitor)
         XCTAssertFalse(environment.usesLivePasteIntegration)
         XCTAssertFalse(environment.allowsURLPreviewNetwork)
+        XCTAssertFalse(environment.usesLiveAIIntegration)
         XCTAssertFalse(environment.registersGlobalShortcuts)
         XCTAssertTrue(environment.isolatesShortcutSettings)
         XCTAssertTrue(
@@ -163,6 +164,43 @@ final class LauncherViewModelTests: XCTestCase {
         XCTAssertEqual(
             keyAction(keyCode: 36, route: .aliases),
             .performPrimaryAction
+        )
+    }
+
+    func testModalPassesCompositionKeysAndBlocksPaletteCommands() {
+        for keyCode: UInt16 in [36, 76, 126, 125, 53, 48] {
+            XCTAssertEqual(
+                keyAction(
+                    keyCode: keyCode,
+                    hasMarkedText: true,
+                    isModalPresented: true
+                ),
+                .passThrough
+            )
+        }
+        XCTAssertEqual(
+            keyAction(keyCode: 40, modifiers: .command, isModalPresented: true),
+            .passThrough
+        )
+        XCTAssertEqual(
+            keyAction(keyCode: 36, modifiers: .command, isModalPresented: true),
+            .submitModal
+        )
+        XCTAssertEqual(
+            keyAction(keyCode: 76, modifiers: .command, isModalPresented: true),
+            .submitModal
+        )
+        XCTAssertEqual(
+            keyAction(keyCode: 36, isModalPresented: true),
+            .passThrough
+        )
+        XCTAssertEqual(
+            keyAction(keyCode: 76, isModalPresented: true),
+            .passThrough
+        )
+        XCTAssertEqual(
+            keyAction(keyCode: 53, isModalPresented: true),
+            .escape
         )
     }
 
@@ -836,6 +874,7 @@ final class LauncherViewModelTests: XCTestCase {
                 "open-clipboard-history",
                 "open-snippets",
                 "open-aliases",
+                "open-ai-chat",
             ]
         )
     }
@@ -924,6 +963,26 @@ final class LauncherViewModelTests: XCTestCase {
         XCTAssertEqual(fixture.viewModel.route, .settings)
     }
 
+    func testAIChatIsSearchableAndReturnsToRootWhenOpenedFromRoot() async throws {
+        let fixture = try makeFixture(launcherShouldFail: false)
+        fixture.viewModel.start()
+        fixture.viewModel.query = "AI Chat: Codex"
+
+        try await waitUntil {
+            fixture.viewModel.results.map(\.title) == ["AI Chat: Codex"]
+        }
+
+        fixture.viewModel.performPrimaryAction()
+        XCTAssertEqual(
+            fixture.viewModel.route,
+            .ai(providerID: .codex)
+        )
+        XCTAssertEqual(fixture.viewModel.aiChatViewModel.destination, .list(.active))
+
+        fixture.viewModel.escape()
+        XCTAssertEqual(fixture.viewModel.route, .root)
+    }
+
     func testRootResultsMixFeaturesAndApplicationsByLastUse() async throws {
         let fixture = try makeFixture(launcherShouldFail: false)
         try await fixture.store.savePreference(
@@ -949,13 +1008,20 @@ final class LauncherViewModelTests: XCTestCase {
 
         fixture.viewModel.start()
         try await waitUntil {
-            fixture.viewModel.results.count == 5
+            fixture.viewModel.results.count == 6
                 && fixture.viewModel.installedApplications.count == 1
         }
 
         XCTAssertEqual(
             fixture.viewModel.results.map(\.title),
-            ["Snippets", "Fixture", "Aliases", "Clipboard History", "Settings"]
+            [
+                "Snippets",
+                "Fixture",
+                "AI Chat: Codex",
+                "Aliases",
+                "Clipboard History",
+                "Settings",
+            ]
         )
 
         fixture.viewModel.query = "Fixture"
@@ -967,8 +1033,39 @@ final class LauncherViewModelTests: XCTestCase {
 
         XCTAssertEqual(
             fixture.viewModel.results.map(\.title),
-            ["Snippets", "Fixture", "Aliases", "Clipboard History", "Settings"]
+            [
+                "Snippets",
+                "Fixture",
+                "AI Chat: Codex",
+                "Aliases",
+                "Clipboard History",
+                "Settings",
+            ]
         )
+    }
+
+    func testShortcutPresentationResetsRootSelectionAfterEscapeDismissal() async throws {
+        let fixture = try makeFixture(launcherShouldFail: false)
+        fixture.viewModel.start()
+        try await waitUntil {
+            fixture.viewModel.results.count == 6
+                && fixture.viewModel.installedApplications.count == 1
+        }
+        let firstResultID = try XCTUnwrap(fixture.viewModel.results.first?.id)
+        var didDismiss = false
+        fixture.viewModel.dismissAndRestorePreviousApplication = {
+            didDismiss = true
+            fixture.viewModel.paletteDidHide()
+        }
+
+        fixture.viewModel.moveSelection(by: 3)
+        XCTAssertNotEqual(fixture.viewModel.selectedID, firstResultID)
+        fixture.viewModel.escape()
+        XCTAssertTrue(didDismiss)
+
+        fixture.viewModel.prepareForPresentation(route: .root, origin: .direct)
+
+        XCTAssertEqual(fixture.viewModel.selectedID, firstResultID)
     }
 
     func testRootActionPanelOpensAliasesEditorForSelectedApplication() async throws {
@@ -982,13 +1079,53 @@ final class LauncherViewModelTests: XCTestCase {
         fixture.viewModel.showActionMenu()
         fixture.viewModel.performAction(.editAlias)
 
+        XCTAssertFalse(fixture.viewModel.isActionPanelPresented)
         XCTAssertEqual(fixture.viewModel.route, .aliases)
         XCTAssertEqual(fixture.viewModel.presentationOrigin, .root)
         XCTAssertEqual(
             fixture.viewModel.aliasEditorMode,
             .editing(ApplicationIdentity(rawValue: "bundle:com.example.fixture"))
         )
+        XCTAssertEqual(
+            fixture.viewModel.paletteModal,
+            .aliasEditor(ApplicationIdentity(rawValue: "bundle:com.example.fixture"))
+        )
         XCTAssertEqual(fixture.viewModel.aliasDraft, "")
+    }
+
+    func testSnippetModalDiscardsDraftAndBlocksActionPanel() throws {
+        let fixture = try makeFixture(launcherShouldFail: false)
+        fixture.viewModel.prepareForPresentation(route: .snippets, origin: .direct)
+
+        fixture.viewModel.newSnippet()
+        XCTAssertEqual(fixture.viewModel.paletteModal, .snippetEditor(.new))
+        fixture.viewModel.snippetNameDraft = "Unsaved"
+        fixture.viewModel.snippetContentDraft = "Private draft"
+
+        fixture.viewModel.showActionMenu()
+        XCTAssertFalse(fixture.viewModel.isActionPanelPresented)
+
+        fixture.viewModel.escape()
+        XCTAssertNil(fixture.viewModel.paletteModal)
+        XCTAssertEqual(fixture.viewModel.snippetNameDraft, "")
+        XCTAssertEqual(fixture.viewModel.snippetContentDraft, "")
+        XCTAssertEqual(fixture.viewModel.route, .snippets)
+    }
+
+    func testCredentialInputsOpenSharedModalWithoutPersistingDraftInViewModel() throws {
+        let fixture = try makeFixture(launcherShouldFail: false)
+        fixture.viewModel.prepareForPresentation(route: .settings, origin: .direct)
+
+        fixture.viewModel.presentOpenAIAPIKeyModal()
+        fixture.viewModel.openAIAPIKeyDraft = "secret-value"
+        XCTAssertEqual(fixture.viewModel.paletteModal, .openAIAPIKey)
+        fixture.viewModel.dismissModal()
+        XCTAssertEqual(fixture.viewModel.openAIAPIKeyDraft, "")
+
+        fixture.viewModel.presentCodexExecutablePathModal()
+        XCTAssertEqual(fixture.viewModel.paletteModal, .codexExecutablePath)
+        fixture.viewModel.dismissModal()
+        XCTAssertEqual(fixture.viewModel.codexExecutablePathDraft, "")
     }
 
     func testAddAliasSelectsExistingApplicationAndSavesIntoRootSearch() async throws {
@@ -1001,12 +1138,17 @@ final class LauncherViewModelTests: XCTestCase {
         fixture.viewModel.openFeature(.aliases)
         fixture.viewModel.beginAddAlias()
         XCTAssertEqual(fixture.viewModel.aliasEditorMode, .selectingApplication)
+        XCTAssertEqual(fixture.viewModel.paletteModal, .aliasApplicationPicker)
         XCTAssertEqual(
             fixture.viewModel.selectedAliasApplicationID,
             ApplicationIdentity(rawValue: "bundle:com.example.fixture")
         )
 
         fixture.viewModel.chooseSelectedAliasApplication()
+        XCTAssertEqual(
+            fixture.viewModel.paletteModal,
+            .aliasEditor(ApplicationIdentity(rawValue: "bundle:com.example.fixture"))
+        )
         fixture.viewModel.aliasDraft = "  work browser  "
         fixture.viewModel.saveAlias()
 
@@ -1208,8 +1350,11 @@ final class LauncherViewModelTests: XCTestCase {
         fixture.viewModel.selectedID = fixture.viewModel.results.first?.id
 
         fixture.viewModel.requestAliasDeletion()
-        XCTAssertEqual(fixture.viewModel.aliasDeletionCandidate?.id, first.id)
-        fixture.viewModel.confirmAliasDeletion()
+        XCTAssertEqual(
+            fixture.viewModel.paletteModal,
+            .confirmation(.deleteAlias(first.id))
+        )
+        fixture.viewModel.confirmModalAction()
 
         try await waitUntil {
             fixture.viewModel.results.count == 1
@@ -1228,14 +1373,16 @@ final class LauncherViewModelTests: XCTestCase {
         modifiers: NSEvent.ModifierFlags = [],
         hasMarkedText: Bool = false,
         route: PaletteRoute = .root,
-        isActionPanelPresented: Bool = false
+        isActionPanelPresented: Bool = false,
+        isModalPresented: Bool = false
     ) -> PaletteKeyEventAction {
         PaletteKeyEventPolicy.action(
             keyCode: keyCode,
             modifiers: modifiers,
             hasMarkedText: hasMarkedText,
             route: route,
-            isActionPanelPresented: isActionPanelPresented
+            isActionPanelPresented: isActionPanelPresented,
+            isModalPresented: isModalPresented
         )
     }
 
@@ -1247,8 +1394,10 @@ final class LauncherViewModelTests: XCTestCase {
         fixture.viewModel.start()
 
         try await waitUntil {
-            fixture.viewModel.results.count == 5
-                && fixture.viewModel.installedApplications.count == 1
+            fixture.viewModel.installedApplications.count == 1
+                && fixture.viewModel.results.contains(where: {
+                    $0.title == "Clipboard History"
+                })
         }
         let clipboardID = try XCTUnwrap(
             fixture.viewModel.results.first(where: { $0.title == "Clipboard History" })?.id

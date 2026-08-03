@@ -12,6 +12,8 @@ struct AppEnvironment {
     let temporaryDirectory: URL?
     let usesLivePasteIntegration: Bool
     let allowsURLPreviewNetwork: Bool
+    let usesLiveAIIntegration: Bool
+    let aiConversationFixtures: [AIConversationSummary]
     let registersGlobalShortcuts: Bool
     let isolatesShortcutSettings: Bool
 
@@ -33,6 +35,8 @@ struct AppEnvironment {
             temporaryDirectory: nil,
             usesLivePasteIntegration: true,
             allowsURLPreviewNetwork: true,
+            usesLiveAIIntegration: true,
+            aiConversationFixtures: [],
             registersGlobalShortcuts: true,
             isolatesShortcutSettings: false
         )
@@ -70,6 +74,20 @@ struct AppEnvironment {
             temporaryDirectory: directory,
             usesLivePasteIntegration: false,
             allowsURLPreviewNetwork: false,
+            usesLiveAIIntegration: false,
+            aiConversationFixtures: [
+                AIConversationSummary(
+                    providerID: .codex,
+                    providerConversationID: "conversation-ui-test",
+                    title: "Welcome to Yorozu AI",
+                    model: .terra,
+                    isArchived: false,
+                    deletionState: nil,
+                    createdAt: Date(timeIntervalSince1970: 1_700_000_000),
+                    lastMessageAt: Date(timeIntervalSince1970: 1_700_000_100),
+                    updatedAt: Date(timeIntervalSince1970: 1_700_000_100)
+                ),
+            ],
             registersGlobalShortcuts: false,
             isolatesShortcutSettings: true
         )
@@ -133,6 +151,194 @@ private final class UITestPasteboard: PasteboardAccessing {
     }
 }
 
+private actor UITestOpenAIChatService: OpenAIChatServing {
+    func availableModelIDs(apiKey: String) -> Set<String> {
+        Set(AIModel.openAIModels.map(\.rawValue))
+    }
+
+    func createConversation(
+        apiKey: String,
+        title: String,
+        model: AIModel
+    ) -> String {
+        "conversation-ui-created"
+    }
+
+    func updateConversation(
+        apiKey: String,
+        conversationID: String,
+        title: String,
+        model: AIModel,
+        isArchived: Bool
+    ) {}
+
+    func loadConversation(
+        apiKey: String,
+        conversationID: String,
+        limit: Int,
+        after: String?
+    ) -> AIConversationPage {
+        AIConversationPage(
+            messages: [
+                AIChatMessage(
+                    id: "message-ui-user-1",
+                    role: .user,
+                    text: "How can I keep Yorozu fast?",
+                    citations: [],
+                    attachments: [],
+                    isStreaming: false
+                ),
+                AIChatMessage(
+                    id: "message-ui-assistant-1",
+                    role: .assistant,
+                    text: "Keep the launch path local, cache searchable snapshots in memory, and move network or database work away from selection changes.",
+                    citations: [],
+                    attachments: [],
+                    isStreaming: false
+                ),
+                AIChatMessage(
+                    id: "message-ui-user-2",
+                    role: .user,
+                    text: "What should I measure?",
+                    citations: [],
+                    attachments: [],
+                    isStreaming: false
+                ),
+                AIChatMessage(
+                    id: "message-ui-assistant-2",
+                    role: .assistant,
+                    text: "Track warm palette presentation, route transitions, keyboard selection latency, idle CPU, and resident memory. Measure multiple independent runs before comparing changes.",
+                    citations: [],
+                    attachments: [],
+                    isStreaming: false
+                ),
+                AIChatMessage(
+                    id: "message-ui-user-3",
+                    role: .user,
+                    text: "How should the UI behave?",
+                    citations: [],
+                    attachments: [],
+                    isStreaming: false
+                ),
+                AIChatMessage(
+                    id: "message-ui-assistant-3",
+                    role: .assistant,
+                    text: "Keep keyboard navigation immediate, make every primary action mouse-accessible, and avoid rebuilding the result hierarchy during route changes.",
+                    citations: [],
+                    attachments: [],
+                    isStreaming: false
+                ),
+                AIChatMessage(
+                    id: "message-ui-user-4",
+                    role: .user,
+                    text: "And for long-running work?",
+                    citations: [],
+                    attachments: [],
+                    isStreaming: false
+                ),
+                AIChatMessage(
+                    id: "message-ui-assistant-4",
+                    role: .assistant,
+                    text: "Cancel stale searches and previews, coalesce streaming updates, and keep bounded caches so long sessions stay responsive.",
+                    citations: [],
+                    attachments: [],
+                    isStreaming: false
+                ),
+            ],
+            nextCursor: nil,
+            hasMore: false
+        )
+    }
+
+    func uploadAttachment(
+        apiKey: String,
+        attachment: AIChatAttachment
+    ) throws -> AIUploadedAttachment {
+        throw AIChatError.invalidAttachment
+    }
+
+    nonisolated func streamResponse(
+        apiKey: String,
+        request: AIChatSendRequest
+    ) -> AsyncThrowingStream<AIChatStreamEvent, Error> {
+        AsyncThrowingStream { continuation in
+            continuation.yield(.responseCreated("response-ui-test"))
+            continuation.yield(.textDelta("Yorozu AI is ready."))
+            continuation.yield(.completed)
+            continuation.finish()
+        }
+    }
+
+    func deleteConversationCompletely(
+        apiKey: String,
+        conversationID: String
+    ) {}
+}
+
+private actor UITestAIChatProvider: AIChatProvider {
+    nonisolated let descriptor: AIProviderDescriptor
+    private let service = UITestOpenAIChatService()
+
+    init(providerID: AIProviderID) {
+        descriptor = AIProviderDescriptor(
+            id: providerID,
+            displayName: providerID == .codex ? "Codex" : "OpenAI API",
+            rootCommandTitle: providerID == .codex
+                ? "AI Chat: Codex"
+                : "AI Chat: OpenAI",
+            description: "UI test provider",
+            symbolName: providerID == .codex ? "terminal" : "sparkles",
+            capabilities: [.authentication, .modelSelection, .streaming, .archive, .deletion]
+        )
+    }
+
+    func availability() -> AIProviderAvailability { .available }
+    func authenticationState() -> AIAuthenticationState {
+        .authenticated(detail: "Test account")
+    }
+    func availableModels() -> [AIModel] { AIModel.openAIModels }
+    func createConversation(title: String, model: AIModel) async throws -> String {
+        try await service.createConversation(apiKey: "ui-test-key", title: title, model: model)
+    }
+    func updateConversation(
+        conversationID: String,
+        title: String,
+        model: AIModel,
+        isArchived: Bool
+    ) async throws {
+        try await service.updateConversation(
+            apiKey: "ui-test-key",
+            conversationID: conversationID,
+            title: title,
+            model: model,
+            isArchived: isArchived
+        )
+    }
+    func loadConversation(
+        conversationID: String,
+        limit: Int,
+        after: String?
+    ) async throws -> AIConversationPage {
+        try await service.loadConversation(
+            apiKey: "ui-test-key",
+            conversationID: conversationID,
+            limit: limit,
+            after: after
+        )
+    }
+    func uploadAttachment(_ attachment: AIChatAttachment) async throws -> AIUploadedAttachment {
+        throw AIChatError.invalidAttachment
+    }
+    nonisolated func streamResponse(
+        request: AIChatSendRequest
+    ) -> AsyncThrowingStream<AIChatStreamEvent, Error> {
+        UITestOpenAIChatService().streamResponse(apiKey: "ui-test-key", request: request)
+    }
+    func stopGeneration(conversationID: String) async {}
+    func deleteConversationCompletely(conversationID: String) async throws {}
+    func shutdown() async {}
+}
+
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private let logger = Logger(subsystem: "com.yorozu.app", category: "lifecycle")
@@ -171,6 +377,69 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         store: store,
         networkEnabled: environment.allowsURLPreviewNetwork
     )
+    private lazy var aiProviderPreferences = AIProviderPreferences(defaults: environment.defaults)
+    private lazy var codexAIChatPreferences = AIChatPreferences(
+        defaults: environment.defaults,
+        providerID: .codex
+    )
+    private lazy var openAIAIChatPreferences = AIChatPreferences(
+        defaults: environment.defaults,
+        providerID: .openAIAPI
+    )
+    private lazy var aiCredentials: any OpenAICredentialStoring = {
+        let usesLiveAIIntegration = environment.usesLiveAIIntegration
+        return DeferredOpenAICredentialStore {
+            if usesLiveAIIntegration {
+                return KeychainOpenAICredentialStore()
+            }
+            return InMemoryOpenAICredentialStore(value: "ui-test-key")
+        }
+    }()
+    private lazy var aiService: any OpenAIChatServing = {
+        let usesLiveAIIntegration = environment.usesLiveAIIntegration
+        return DeferredOpenAIChatService {
+            if usesLiveAIIntegration {
+                return OpenAIChatClient()
+            }
+            return UITestOpenAIChatService()
+        }
+    }()
+    private lazy var openAIProvider: any AIChatProvider = OpenAIAPIProvider(
+        service: aiService,
+        credentials: aiCredentials
+    )
+    private lazy var codexProvider: any AIChatProvider = {
+        if environment.usesLiveAIIntegration {
+            return CodexAIProvider(
+                configuredExecutablePath: aiProviderPreferences.codexExecutablePath
+            )
+        }
+        return UITestAIChatProvider(providerID: .codex)
+    }()
+    private lazy var openAIChatViewModel = AIChatViewModel(
+        catalog: AIConversationCatalog(
+            providerID: .openAIAPI,
+            store: store,
+            initialConversations: environment.aiConversationFixtures
+        ),
+        provider: environment.usesLiveAIIntegration
+            ? openAIProvider
+            : UITestAIChatProvider(providerID: .openAIAPI),
+        preferences: openAIAIChatPreferences
+    )
+    private lazy var codexChatViewModel = AIChatViewModel(
+        catalog: AIConversationCatalog(
+            providerID: .codex,
+            store: store,
+            initialConversations: environment.aiConversationFixtures
+        ),
+        provider: codexProvider,
+        preferences: codexAIChatPreferences
+    )
+    private lazy var aiChatViewModelStore = AIChatViewModelStore(
+        viewModels: [codexChatViewModel, openAIChatViewModel],
+        providerPreferences: aiProviderPreferences
+    )
 
     lazy var viewModel = LauncherViewModel(
         catalog: catalog,
@@ -182,6 +451,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         shortcutSettings: AppShortcutSettings(
             usesIsolatedStorage: environment.isolatesShortcutSettings
         ),
+        aiChatViewModelStore: aiChatViewModelStore,
         launcher: environment.launcher,
         storageRecoveryNotice: storeOpenResult.recoveryNotice
     )
@@ -253,9 +523,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             KeyboardShortcuts.onKeyUp(for: .openAliases) { [weak self] in
                 self?.paletteController.toggle(route: .aliases)
             }
+            KeyboardShortcuts.onKeyUp(for: .openAIChat) { [weak self] in
+                guard let self,
+                      let providerID = self.aiProviderPreferences.defaultProviderID else {
+                    return
+                }
+                self.paletteController.toggle(route: .ai(providerID: providerID))
+            }
         }
 
         viewModel.start()
+        if let store, !aiProviderPreferences.isEnabled(.openAIAPI) {
+            Task { @MainActor [weak self] in
+                guard let self,
+                      let conversations = try? await store.loadAIConversationIndex(
+                          providerID: .openAIAPI
+                      ),
+                      !conversations.isEmpty else {
+                    return
+                }
+                self.aiProviderPreferences.enableOpenAIForLegacyCredential()
+            }
+        }
         clipboardPreferences.recordingSettingsDidChange = { [weak self] settings in
             guard let self else { return }
             Task {
@@ -389,7 +678,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 .toggleLauncher,
                 .openClipboardHistory,
                 .openSnippets,
-                .openAliases
+                .openAliases,
+                .openAIChat
             )
         }
         paletteController.invalidate()

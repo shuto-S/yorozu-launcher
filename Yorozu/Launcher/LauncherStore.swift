@@ -605,6 +605,79 @@ actor LauncherStore {
         }
     }
 
+    func loadAIConversationIndex(
+        providerID: AIProviderID
+    ) throws -> [AIConversationSummary] {
+        try ensureOpen()
+        return try databaseQueue.read { database in
+            try Row.fetchAll(
+                database,
+                sql: """
+                    SELECT *
+                    FROM ai_conversation_index
+                    WHERE provider_id = ?
+                    ORDER BY last_message_at DESC, provider_conversation_id ASC
+                    """
+                , arguments: [providerID.rawValue]
+            ).map(Self.aiConversation(from:))
+        }
+    }
+
+    func saveAIConversation(_ conversation: AIConversationSummary) throws {
+        try ensureOpen()
+        try databaseQueue.write { database in
+            try database.execute(
+                sql: """
+                    INSERT INTO ai_conversation_index (
+                        provider_id,
+                        provider_conversation_id,
+                        title,
+                        model_id,
+                        is_archived,
+                        deletion_state,
+                        created_at,
+                        last_message_at,
+                        updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(provider_id, provider_conversation_id) DO UPDATE SET
+                        title = excluded.title,
+                        model_id = excluded.model_id,
+                        is_archived = excluded.is_archived,
+                        deletion_state = excluded.deletion_state,
+                        last_message_at = excluded.last_message_at,
+                        updated_at = excluded.updated_at
+                    """,
+                arguments: [
+                    conversation.providerID.rawValue,
+                    conversation.providerConversationID,
+                    conversation.title,
+                    conversation.model.rawValue,
+                    conversation.isArchived,
+                    conversation.deletionState?.rawValue,
+                    conversation.createdAt.timeIntervalSince1970,
+                    conversation.lastMessageAt.timeIntervalSince1970,
+                    conversation.updatedAt.timeIntervalSince1970,
+                ]
+            )
+        }
+    }
+
+    func deleteAIConversationIndex(
+        providerID: AIProviderID,
+        id: String
+    ) throws {
+        try ensureOpen()
+        try databaseQueue.write { database in
+            try database.execute(
+                sql: """
+                    DELETE FROM ai_conversation_index
+                    WHERE provider_id = ? AND provider_conversation_id = ?
+                    """,
+                arguments: [providerID.rawValue, id]
+            )
+        }
+    }
+
     private func ensureOpen() throws {
         guard !isClosed else {
             throw LauncherStoreError.storeClosed
@@ -714,7 +787,108 @@ actor LauncherStore {
             // safe preview pipeline uses bounded Codable documents instead.
             try database.execute(sql: "DELETE FROM url_preview_cache")
         }
+        migrator.registerMigration("v7_ai_chat_index") { database in
+            try database.execute(
+                sql: """
+                    CREATE TABLE ai_conversation_index (
+                        conversation_id TEXT PRIMARY KEY NOT NULL,
+                        title TEXT NOT NULL,
+                        model_id TEXT NOT NULL,
+                        is_archived INTEGER NOT NULL DEFAULT 0,
+                        deletion_state TEXT,
+                        created_at REAL NOT NULL,
+                        last_message_at REAL NOT NULL,
+                        updated_at REAL NOT NULL
+                    );
+
+                    CREATE INDEX ai_conversation_last_message
+                    ON ai_conversation_index(last_message_at DESC);
+                    """
+            )
+        }
+        migrator.registerMigration("v8_ai_provider_index") { database in
+            try database.execute(
+                sql: """
+                    CREATE TABLE ai_conversation_index_v8 (
+                        provider_id TEXT NOT NULL,
+                        provider_conversation_id TEXT NOT NULL,
+                        title TEXT NOT NULL,
+                        model_id TEXT NOT NULL,
+                        is_archived INTEGER NOT NULL DEFAULT 0,
+                        deletion_state TEXT,
+                        created_at REAL NOT NULL,
+                        last_message_at REAL NOT NULL,
+                        updated_at REAL NOT NULL,
+                        PRIMARY KEY (provider_id, provider_conversation_id)
+                    );
+
+                    INSERT INTO ai_conversation_index_v8 (
+                        provider_id,
+                        provider_conversation_id,
+                        title,
+                        model_id,
+                        is_archived,
+                        deletion_state,
+                        created_at,
+                        last_message_at,
+                        updated_at
+                    )
+                    SELECT
+                        'openai_api',
+                        conversation_id,
+                        title,
+                        model_id,
+                        is_archived,
+                        deletion_state,
+                        created_at,
+                        last_message_at,
+                        updated_at
+                    FROM ai_conversation_index;
+
+                    DROP TABLE ai_conversation_index;
+                    ALTER TABLE ai_conversation_index_v8
+                        RENAME TO ai_conversation_index;
+
+                    CREATE INDEX ai_conversation_last_message
+                    ON ai_conversation_index(provider_id, last_message_at DESC);
+                    """
+            )
+        }
         return migrator
+    }
+
+    private nonisolated static func aiConversation(
+        from row: Row
+    ) throws -> AIConversationSummary {
+        let rawModel: String = row["model_id"]
+        let rawProviderID: String = row["provider_id"]
+        let rawDeletionState: String? = row["deletion_state"]
+        let deletionState: AIConversationDeletionState?
+        if let rawDeletionState {
+            guard let parsed = AIConversationDeletionState(rawValue: rawDeletionState) else {
+                throw LauncherStoreError.invalidPersistedValue(
+                    table: "ai_conversation_index",
+                    column: "deletion_state"
+                )
+            }
+            deletionState = parsed
+        } else {
+            deletionState = nil
+        }
+        let createdAt: Double = row["created_at"]
+        let lastMessageAt: Double = row["last_message_at"]
+        let updatedAt: Double = row["updated_at"]
+        return AIConversationSummary(
+            providerID: AIProviderID(rawValue: rawProviderID),
+            providerConversationID: row["provider_conversation_id"],
+            title: row["title"],
+            model: AIModel(rawValue: rawModel),
+            isArchived: row["is_archived"],
+            deletionState: deletionState,
+            createdAt: Date(timeIntervalSince1970: createdAt),
+            lastMessageAt: Date(timeIntervalSince1970: lastMessageAt),
+            updatedAt: Date(timeIntervalSince1970: updatedAt)
+        )
     }
 
     private nonisolated static func validatePersistedValues(
@@ -753,6 +927,23 @@ actor LauncherStore {
                     table: "snippets",
                     column: "id"
                 )
+            }
+
+            if try database.tableExists("ai_conversation_index") {
+                let aiRows = try Row.fetchAll(
+                    database,
+                    sql: "SELECT model_id, deletion_state FROM ai_conversation_index"
+                )
+                for row in aiRows {
+                    let deletionState: String? = row["deletion_state"]
+                    if let deletionState,
+                       AIConversationDeletionState(rawValue: deletionState) == nil {
+                        throw LauncherStoreError.invalidPersistedValue(
+                            table: "ai_conversation_index",
+                            column: "deletion_state"
+                        )
+                    }
+                }
             }
         }
     }

@@ -6,6 +6,7 @@ import SwiftUI
 private enum SettingsDestination: String, CaseIterable, Identifiable {
     case general
     case clipboard
+    case ai
     case shortcuts
 
     var id: Self { self }
@@ -16,6 +17,8 @@ private enum SettingsDestination: String, CaseIterable, Identifiable {
             "settings.sidebar.general"
         case .clipboard:
             "Clipboard"
+        case .ai:
+            "AI"
         case .shortcuts:
             "settings.sidebar.shortcuts"
         }
@@ -27,6 +30,8 @@ private enum SettingsDestination: String, CaseIterable, Identifiable {
             "gearshape"
         case .clipboard:
             "clipboard"
+        case .ai:
+            "sparkles"
         case .shortcuts:
             "keyboard"
         }
@@ -80,6 +85,8 @@ struct SettingsView: View {
             GeneralSettingsView(viewModel: viewModel)
         case .clipboard:
             ClipboardSettingsView(viewModel: viewModel)
+        case .ai:
+            AISettingsView(launcherViewModel: viewModel)
         case .shortcuts:
             ShortcutsSettingsView(settings: viewModel.shortcutSettings)
         }
@@ -96,6 +103,231 @@ struct SettingsView: View {
         default:
             break
         }
+    }
+}
+
+private struct AISettingsView: View {
+    var launcherViewModel: LauncherViewModel
+    @ObservedObject private var providerPreferences: AIProviderPreferences
+    @State private var selectedProviderID: AIProviderID = .codex
+
+    init(launcherViewModel: LauncherViewModel) {
+        self.launcherViewModel = launcherViewModel
+        providerPreferences = launcherViewModel.aiProviderPreferences
+    }
+
+    var body: some View {
+        Form {
+            Section("Default Provider") {
+                Picker("Provider", selection: defaultProviderBinding) {
+                    ForEach(enabledProviderIDs) { providerID in
+                        Text(providerName(providerID)).tag(Optional(providerID))
+                    }
+                    if enabledProviderIDs.isEmpty {
+                        Text("None").tag(Optional<AIProviderID>.none)
+                    }
+                }
+                Text("The AI shortcut opens this provider when no provider is specified.")
+                    .foregroundStyle(.secondary)
+            }
+
+            Section("Providers") {
+                providerRow(
+                    id: .codex,
+                    description: "Uses your ChatGPT plan through Codex",
+                    symbol: "terminal"
+                )
+                providerRow(
+                    id: .openAIAPI,
+                    description: "Uses API credits and usage-based billing",
+                    symbol: "sparkles"
+                )
+            }
+
+            Section("Provider Settings") {
+                Picker("Provider", selection: $selectedProviderID) {
+                    Text("Codex").tag(AIProviderID.codex)
+                    Text("OpenAI API").tag(AIProviderID.openAIAPI)
+                }
+                .pickerStyle(.segmented)
+            }
+
+            if let viewModel = launcherViewModel.aiChatViewModel(for: selectedProviderID) {
+                providerDetail(viewModel)
+            }
+        }
+        .formStyle(.grouped)
+        .scrollContentBackground(.hidden)
+        .background(Color.clear)
+        .accessibilityIdentifier("settings.detail.ai")
+        .onAppear {
+            launcherViewModel.aiChatViewModel(for: selectedProviderID)?
+                .loadCredentialStatus()
+        }
+        .onChange(of: selectedProviderID) { _, providerID in
+            launcherViewModel.aiChatViewModel(for: providerID)?.loadCredentialStatus()
+        }
+    }
+
+    private var enabledProviderIDs: [AIProviderID] {
+        providerPreferences.enabledProviderIDs.sorted {
+            if $0 == .codex { return true }
+            if $1 == .codex { return false }
+            return $0.rawValue < $1.rawValue
+        }
+    }
+
+    private var defaultProviderBinding: Binding<AIProviderID?> {
+        Binding(
+            get: { providerPreferences.defaultProviderID },
+            set: { providerPreferences.setDefault($0) }
+        )
+    }
+
+    private func providerRow(
+        id: AIProviderID,
+        description: String,
+        symbol: String
+    ) -> some View {
+        HStack(spacing: 10) {
+            Image(systemName: symbol)
+                .frame(width: 24)
+                .foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(providerName(id))
+                    .font(.headline)
+                Text(description)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer()
+            Toggle(
+                "Enabled",
+                isOn: Binding(
+                    get: { providerPreferences.isEnabled(id) },
+                    set: { providerPreferences.setEnabled($0, for: id) }
+                )
+            )
+            .labelsHidden()
+        }
+        .contentShape(Rectangle())
+        .onTapGesture { selectedProviderID = id }
+    }
+
+    @ViewBuilder
+    private func providerDetail(_ viewModel: AIChatViewModel) -> some View {
+        Section {
+            HStack(alignment: .top, spacing: 10) {
+                Image(systemName: viewModel.credentialStatusSymbolName)
+                    .foregroundStyle(
+                        viewModel.credentialStatus == .saved ? AnyShapeStyle(.tint) : AnyShapeStyle(.secondary)
+                    )
+                    .imageScale(.large)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(viewModel.credentialStatusTitle)
+                        .font(.headline)
+                    Text(viewModel.credentialStatusDetail)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                if viewModel.credentialStatus == .checking {
+                    ProgressView().controlSize(.small)
+                } else {
+                    Button("Refresh Status") { viewModel.loadCredentialStatus() }
+                        .buttonStyle(.link)
+                }
+            }
+
+            if selectedProviderID == .codex {
+                LabeledContent("Codex Executable") {
+                    Text(
+                        providerPreferences.codexExecutablePath.isEmpty
+                            ? "Detected automatically"
+                            : providerPreferences.codexExecutablePath
+                    )
+                    .lineLimit(1)
+                }
+                HStack {
+                    Button(
+                        providerPreferences.codexExecutablePath.isEmpty
+                            ? "Set Executable Path…"
+                            : "Change Executable Path…"
+                    ) {
+                        launcherViewModel.presentCodexExecutablePathModal()
+                    }
+                    Button("Sign In with ChatGPT") { viewModel.signInWithChatGPT() }
+                    Button("Sign Out", role: .destructive) {
+                        launcherViewModel.requestCodexSignOut()
+                    }
+                        .disabled(viewModel.credentialStatus != .saved)
+                }
+            } else {
+                HStack {
+                    Button(viewModel.hasAPIKey ? "Replace API Key…" : "Set API Key…") {
+                        launcherViewModel.presentOpenAIAPIKeyModal()
+                    }
+                    Button("Test Connection") { Task { await viewModel.testConnection() } }
+                        .disabled(!viewModel.hasAPIKey)
+                    Button("Remove Key", role: .destructive) {
+                        launcherViewModel.requestOpenAIAPIKeyRemoval()
+                    }
+                        .disabled(!viewModel.hasAPIKey)
+                }
+            }
+
+            if let message = viewModel.credentialStatusMessage {
+                Text(message)
+                    .foregroundStyle(.secondary)
+                    .accessibilityIdentifier("settings.ai.credential-message")
+            }
+        } header: {
+            Text(providerName(selectedProviderID))
+        } footer: {
+            if selectedProviderID == .codex {
+                Text(
+                    "Yorozu communicates with the installed Codex app-server. "
+                        + "Codex manages ChatGPT authentication; Yorozu never reads or stores its tokens."
+                )
+            } else {
+                Text(
+                    "Your API key is stored in macOS Keychain. Yorozu never writes it to its database or logs."
+                )
+            }
+        }
+
+        if !viewModel.availableModels.isEmpty {
+            Section("Defaults") {
+                Picker("Model", selection: viewModel.preferencesBinding) {
+                    ForEach(viewModel.availableModels) { model in
+                        Text(model.title).tag(model)
+                    }
+                }
+                if viewModel.providerDescriptor.capabilities.contains(.webSearch) {
+                    Toggle(
+                        "Enable Web Search for New Chats",
+                        isOn: viewModel.webSearchPreferenceBinding
+                    )
+                }
+            }
+        }
+
+        Section {
+            if selectedProviderID == .codex {
+                Text(
+                    "Codex usage follows your ChatGPT plan. Yorozu stores only chat titles and the Codex thread IDs it creates."
+                )
+            } else {
+                Text(
+                    "OpenAI API usage is billed to your API Platform account. Conversation messages and uploaded files are stored by OpenAI."
+                )
+            }
+        } header: {
+            Text("Data and Billing")
+        }
+        .foregroundStyle(.secondary)
+    }
+
+    private func providerName(_ id: AIProviderID) -> String {
+        id == .codex ? "Codex" : "OpenAI API"
     }
 }
 
@@ -223,14 +455,6 @@ private struct ClipboardSettingsView: View {
     var viewModel: LauncherViewModel
     @ObservedObject private var preferences: ClipboardPreferences
     @State private var isAccessibilityGranted = AXIsProcessTrusted()
-    @State private var clearAction: ClearAction?
-
-    private enum ClearAction: String, Identifiable {
-        case unpinned
-        case all
-
-        var id: Self { self }
-    }
 
     init(viewModel: LauncherViewModel) {
         self.viewModel = viewModel
@@ -352,10 +576,10 @@ private struct ClipboardSettingsView: View {
                 LabeledContent {
                     HStack {
                         Button("Clear History…") {
-                            clearAction = .unpinned
+                            viewModel.requestClearClipboardHistory(includePinned: false)
                         }
                         Button("Clear All…", role: .destructive) {
-                            clearAction = .all
+                            viewModel.requestClearClipboardHistory(includePinned: true)
                         }
                     }
                 } label: {
@@ -374,27 +598,6 @@ private struct ClipboardSettingsView: View {
             NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)
         ) { _ in
             refreshAccessibilityStatus()
-        }
-        .alert(item: $clearAction) { action in
-            if action == .all {
-                Alert(
-                    title: Text("Clear All Clipboard History?"),
-                    message: Text("Pinned items will also be permanently deleted."),
-                    primaryButton: .destructive(Text("Clear All")) {
-                        viewModel.clearClipboardHistory(includePinned: true)
-                    },
-                    secondaryButton: .cancel()
-                )
-            } else {
-                Alert(
-                    title: Text("Clear Clipboard History?"),
-                    message: Text("Pinned items will be kept."),
-                    primaryButton: .destructive(Text("Clear History")) {
-                        viewModel.clearClipboardHistory(includePinned: false)
-                    },
-                    secondaryButton: .cancel()
-                )
-            }
         }
     }
 

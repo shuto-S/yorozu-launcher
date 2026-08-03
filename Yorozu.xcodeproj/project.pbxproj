@@ -33,11 +33,18 @@
 		B10000000000000000000018 /* ClipboardCatalog.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000016 /* ClipboardCatalog.swift */; };
 		B10000000000000000000019 /* SnippetCatalog.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000017 /* SnippetCatalog.swift */; };
 		B1000000000000000000001A /* ClipboardServices.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000018 /* ClipboardServices.swift */; };
+		B1000000000000000000001B /* AIModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000019 /* AIModels.swift */; };
+		B1000000000000000000001C /* AIConversationCatalog.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000001A /* AIConversationCatalog.swift */; };
+		B1000000000000000000001D /* AIChatViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000001B /* AIChatViewModel.swift */; };
+		B1000000000000000000001E /* OpenAIChatServices.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000001C /* OpenAIChatServices.swift */; };
+		B1000000000000000000001F /* AIChatView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000001D /* AIChatView.swift */; };
+		B10000000000000000000020 /* CodexAppServerServices.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000001E /* CodexAppServerServices.swift */; };
 		B20000000000000000000001 /* SearchScorerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000001 /* SearchScorerTests.swift */; };
 		B20000000000000000000002 /* ApplicationDiscoveryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000002 /* ApplicationDiscoveryTests.swift */; };
 		B20000000000000000000003 /* LauncherStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000003 /* LauncherStoreTests.swift */; };
 		B20000000000000000000004 /* LauncherViewModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000004 /* LauncherViewModelTests.swift */; };
 		B20000000000000000000005 /* PasteCoordinatorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000005 /* PasteCoordinatorTests.swift */; };
+		B20000000000000000000006 /* AIChatTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000006 /* AIChatTests.swift */; };
 		B30000000000000000000001 /* YorozuUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A30000000000000000000001 /* YorozuUITests.swift */; };
 /* End PBXBuildFile section */
 
@@ -83,11 +90,18 @@
 		A10000000000000000000016 /* ClipboardCatalog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClipboardCatalog.swift; sourceTree = "<group>"; };
 		A10000000000000000000017 /* SnippetCatalog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SnippetCatalog.swift; sourceTree = "<group>"; };
 		A10000000000000000000018 /* ClipboardServices.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClipboardServices.swift; sourceTree = "<group>"; };
+		A10000000000000000000019 /* AIModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AIModels.swift; sourceTree = "<group>"; };
+		A1000000000000000000001A /* AIConversationCatalog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AIConversationCatalog.swift; sourceTree = "<group>"; };
+		A1000000000000000000001B /* AIChatViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AIChatViewModel.swift; sourceTree = "<group>"; };
+		A1000000000000000000001C /* OpenAIChatServices.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OpenAIChatServices.swift; sourceTree = "<group>"; };
+		A1000000000000000000001D /* AIChatView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AIChatView.swift; sourceTree = "<group>"; };
+		A1000000000000000000001E /* CodexAppServerServices.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodexAppServerServices.swift; sourceTree = "<group>"; };
 		A20000000000000000000001 /* SearchScorerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SearchScorerTests.swift; sourceTree = "<group>"; };
 		A20000000000000000000002 /* ApplicationDiscoveryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ApplicationDiscoveryTests.swift; sourceTree = "<group>"; };
 		A20000000000000000000003 /* LauncherStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LauncherStoreTests.swift; sourceTree = "<group>"; };
 		A20000000000000000000004 /* LauncherViewModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LauncherViewModelTests.swift; sourceTree = "<group>"; };
 		A20000000000000000000005 /* PasteCoordinatorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PasteCoordinatorTests.swift; sourceTree = "<group>"; };
+		A20000000000000000000006 /* AIChatTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AIChatTests.swift; sourceTree = "<group>"; };
 		A30000000000000000000001 /* YorozuUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = YorozuUITests.swift; sourceTree = "<group>"; };
 		A40000000000000000000001 /* Yorozu.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Yorozu.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		A40000000000000000000002 /* YorozuTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = YorozuTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -164,6 +178,7 @@
 			children = (
 				A10000000000000000000003 /* LauncherModels.swift */,
 				A10000000000000000000015 /* FeatureModels.swift */,
+				A10000000000000000000019 /* AIModels.swift */,
 			);
 			name = Core;
 			path = Yorozu/Core;
@@ -181,6 +196,8 @@
 				A1000000000000000000000A /* LauncherViewModel.swift */,
 				A10000000000000000000016 /* ClipboardCatalog.swift */,
 				A10000000000000000000017 /* SnippetCatalog.swift */,
+				A1000000000000000000001A /* AIConversationCatalog.swift */,
+				A1000000000000000000001B /* AIChatViewModel.swift */,
 			);
 			name = Launcher;
 			path = Yorozu/Launcher;
@@ -196,6 +213,9 @@
 				A1000000000000000000000F /* PaletteWindowController.swift */,
 				A10000000000000000000010 /* MenuBarController.swift */,
 				A10000000000000000000018 /* ClipboardServices.swift */,
+				A1000000000000000000001C /* OpenAIChatServices.swift */,
+				A1000000000000000000001D /* AIChatView.swift */,
+				A1000000000000000000001E /* CodexAppServerServices.swift */,
 			);
 			name = Platform;
 			path = Yorozu/Platform;
@@ -220,6 +240,7 @@
 				A20000000000000000000003 /* LauncherStoreTests.swift */,
 				A20000000000000000000004 /* LauncherViewModelTests.swift */,
 				A20000000000000000000005 /* PasteCoordinatorTests.swift */,
+				A20000000000000000000006 /* AIChatTests.swift */,
 			);
 			path = YorozuTests;
 			sourceTree = "<group>";
@@ -385,6 +406,7 @@
 				B10000000000000000000016 /* AppShortcuts.swift in Sources */,
 				B10000000000000000000003 /* LauncherModels.swift in Sources */,
 				B10000000000000000000017 /* FeatureModels.swift in Sources */,
+				B1000000000000000000001B /* AIModels.swift in Sources */,
 				B10000000000000000000004 /* SearchScorer.swift in Sources */,
 				B10000000000000000000005 /* LauncherStore.swift in Sources */,
 				B10000000000000000000006 /* ApplicationDiscovery.swift in Sources */,
@@ -394,6 +416,8 @@
 				B1000000000000000000000A /* LauncherViewModel.swift in Sources */,
 				B10000000000000000000018 /* ClipboardCatalog.swift in Sources */,
 				B10000000000000000000019 /* SnippetCatalog.swift in Sources */,
+				B1000000000000000000001C /* AIConversationCatalog.swift in Sources */,
+				B1000000000000000000001D /* AIChatViewModel.swift in Sources */,
 				B1000000000000000000000B /* GlassSearchField.swift in Sources */,
 				B1000000000000000000000C /* ApplicationIconCache.swift in Sources */,
 				B1000000000000000000000D /* PaletteView.swift in Sources */,
@@ -401,6 +425,9 @@
 				B1000000000000000000000F /* PaletteWindowController.swift in Sources */,
 				B10000000000000000000010 /* MenuBarController.swift in Sources */,
 				B1000000000000000000001A /* ClipboardServices.swift in Sources */,
+				B1000000000000000000001E /* OpenAIChatServices.swift in Sources */,
+				B1000000000000000000001F /* AIChatView.swift in Sources */,
+				B10000000000000000000020 /* CodexAppServerServices.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -413,6 +440,7 @@
 				B20000000000000000000003 /* LauncherStoreTests.swift in Sources */,
 				B20000000000000000000004 /* LauncherViewModelTests.swift in Sources */,
 				B20000000000000000000005 /* PasteCoordinatorTests.swift in Sources */,
+				B20000000000000000000006 /* AIChatTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

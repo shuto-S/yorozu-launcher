@@ -17,8 +17,8 @@ This file applies to the entire repository. Follow the user's current request an
 - Keep the app as an `LSUIElement` menu-bar utility with no regular Dock window.
 - Preserve the keyboard-first interaction model while keeping all primary actions mouse-accessible.
 - Keep product-facing copy in English.
-- Keep Root Search, Clipboard History, Snippets, Aliases, and Settings in the existing palette.
-- AI chat, snippet auto-expansion, cloud sync, and distribution automation are not implemented. Do not imply otherwise in product copy or documentation.
+- Keep Root Search, Clipboard History, Snippets, Aliases, AI Chat, and Settings in the existing palette.
+- Snippet auto-expansion, cloud sync, and distribution automation are not implemented. Do not imply otherwise in product copy or documentation.
 
 ## Repository map
 
@@ -50,7 +50,7 @@ This file applies to the entire repository. Follow the user's current request an
 
 - Prefer macOS 26 standard controls, semantic colors, system typography, and system separators.
 - Do not add custom blur, fixed appearance colors, custom shadows, or unnecessary nested glass effects.
-- Keep Root Search, Clipboard History, Snippets, Aliases, and Settings inside the existing palette rather than creating separate utility windows.
+- Keep Root Search, Clipboard History, Snippets, Aliases, AI Chat, and Settings inside the existing palette rather than creating separate utility windows.
 - Preserve Japanese IME composition. Before consuming Return, Enter, arrow, Escape, or Tab events, respect the field editor's marked-text state.
 - Keep keyboard selection scrolled into view and preserve mouse selection.
 
@@ -69,6 +69,7 @@ This file applies to the entire repository. Follow the user's current request an
   - idle CPU below 0.5%;
   - resident memory below 100 MB.
 - Never log clipboard bodies, snippet bodies, URLs, file paths, API keys, credentials, or user-selected text.
+- Keep AI message bodies and attachments out of SQLite and never access Keychain or OpenAI during normal Root Search startup.
 - Do not commit runtime databases, QA screenshots, clipboard captures, or local machine paths.
 
 ## Signing

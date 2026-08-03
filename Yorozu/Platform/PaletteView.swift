@@ -6,56 +6,56 @@ struct PaletteView: View {
 
     var body: some View {
         ZStack(alignment: .bottomTrailing) {
-            VStack(spacing: 0) {
-                paletteHeader
-                    .padding(.horizontal, 14)
-                Divider()
-                    .padding(.horizontal, 14)
-                results
-                    .padding(.horizontal, 8)
-                if viewModel.route != .settings {
-                    Divider()
-                        .padding(.horizontal, 14)
-                    footer
-                        .padding(.horizontal, 14)
+            Group {
+                if viewModel.route.isAI {
+                    AIChatView(
+                        viewModel: viewModel.aiChatViewModel,
+                        onBackToRoot: viewModel.returnToRoot,
+                        onShowActions: viewModel.showActionMenu
+                    )
+                } else {
+                    VStack(spacing: 0) {
+                        paletteHeader
+                            .padding(.horizontal, 14)
+                        Divider()
+                            .padding(.horizontal, 14)
+                        results
+                            .padding(.horizontal, 8)
+                        if viewModel.route != .settings {
+                            Divider()
+                                .padding(.horizontal, 14)
+                            footer
+                                .padding(.horizontal, 14)
+                        }
+                    }
+                    .padding(.top, 12)
                 }
             }
-            .padding(.top, 12)
+            .disabled(viewModel.isModalPresented)
+            .accessibilityHidden(viewModel.isModalPresented)
 
             if viewModel.isActionPanelPresented {
                 ActionPanelView(viewModel: viewModel)
                     .padding(.trailing, 22)
                     .padding(.bottom, 54)
             }
+
+            if viewModel.isModalPresented {
+                Color.primary.opacity(0.12)
+                    .ignoresSafeArea()
+                    .contentShape(Rectangle())
+                    .onTapGesture { }
+                    .accessibilityHidden(true)
+
+                PaletteModalView(viewModel: viewModel)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+                    .padding(24)
+            }
         }
         .frame(minWidth: 760, idealWidth: 760, maxWidth: 760)
         .coordinateSpace(name: "palette.content")
         .ignoresSafeArea(.container, edges: .top)
         .accessibilityElement(children: .contain)
-        .alert(
-            "Delete Alias?",
-            isPresented: Binding(
-                get: { viewModel.aliasDeletionCandidate != nil },
-                set: { isPresented in
-                    if !isPresented {
-                        viewModel.cancelAliasDeletion()
-                    }
-                }
-            ),
-            presenting: viewModel.aliasDeletionCandidate
-        ) { _ in
-            Button("Delete Alias", role: .destructive) {
-                viewModel.confirmAliasDeletion()
-            }
-            Button("Cancel", role: .cancel) {
-                viewModel.cancelAliasDeletion()
-            }
-        } message: { application in
-            Text(
-                "The alias for \(application.primaryName) will be removed. "
-                    + "The application and its usage history will not be affected."
-            )
-        }
     }
 
     @ViewBuilder
@@ -827,205 +827,13 @@ private struct CommandIconView: View {
 
 private struct AliasDetailView: View {
     @Bindable var viewModel: LauncherViewModel
-    @FocusState private var focusedField: Field?
-
-    private enum Field {
-        case applicationSearch
-        case alias
-    }
 
     var body: some View {
-        Group {
-            switch viewModel.aliasEditorMode {
-            case .selectingApplication:
-                applicationPicker
-            case .editing:
-                aliasEditor
-            case nil:
-                aliasDetails
-            }
-        }
+        aliasDetails
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color.clear)
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("aliases.detail")
-        .task(id: viewModel.aliasFocusRequest) {
-            await Task.yield()
-            switch viewModel.aliasEditorMode {
-            case .selectingApplication:
-                focusedField = .applicationSearch
-            case .editing:
-                focusedField = .alias
-            case nil:
-                focusedField = nil
-            }
-        }
-    }
-
-    private var applicationPicker: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            VStack(alignment: .leading, spacing: 10) {
-                Text("Add Alias")
-                    .font(.title3.weight(.semibold))
-
-                Text("Choose an application to add or edit its alias.")
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-
-                TextField(
-                    "Search Applications",
-                    text: $viewModel.aliasApplicationQuery
-                )
-                .textFieldStyle(.roundedBorder)
-                .focused($focusedField, equals: .applicationSearch)
-                .accessibilityIdentifier("aliases.application-search")
-            }
-            .padding(18)
-
-            Divider()
-
-            ScrollViewReader { proxy in
-                List(
-                    viewModel.aliasApplicationCandidates,
-                    selection: $viewModel.selectedAliasApplicationID
-                ) { application in
-                    HStack(spacing: 10) {
-                        CommandIconView(
-                            icon: .application(application.canonicalURL),
-                            size: 24
-                        )
-
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(application.primaryName)
-                                .font(.body.weight(.medium))
-                                .lineLimit(1)
-                            Text(
-                                application.preference.alias
-                                    ?? application.bundleIdentifier
-                                    ?? application.canonicalURL.path
-                            )
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                        }
-                    }
-                    .tag(application.id)
-                    .id(application.id)
-                    .contentShape(Rectangle())
-                    .onTapGesture(count: 2) {
-                        viewModel.chooseAliasApplication(application.id)
-                    }
-                    .simultaneousGesture(
-                        TapGesture().onEnded {
-                            viewModel.selectedAliasApplicationID = application.id
-                        }
-                    )
-                    .accessibilityElement(children: .combine)
-                    .accessibilityIdentifier(
-                        "aliases.application.\(application.id.rawValue)"
-                    )
-                }
-                .listStyle(.plain)
-                .scrollContentBackground(.hidden)
-                .onChange(of: viewModel.selectedAliasApplicationID) { _, identity in
-                    guard let identity else { return }
-                    proxy.scrollTo(identity)
-                }
-            }
-
-            Divider()
-
-            HStack {
-                Spacer()
-                Button("Cancel", role: .cancel) {
-                    viewModel.cancelAliasEditing()
-                }
-                .keyboardShortcut(.cancelAction)
-                .accessibilityIdentifier("aliases.cancel")
-
-                Button("Continue") {
-                    viewModel.chooseSelectedAliasApplication()
-                }
-                .keyboardShortcut(.defaultAction)
-                .disabled(viewModel.selectedAliasApplicationID == nil)
-                .accessibilityIdentifier("aliases.continue")
-            }
-            .padding(14)
-        }
-    }
-
-    @ViewBuilder
-    private var aliasEditor: some View {
-        if let application = viewModel.aliasEditingApplication {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 22) {
-                    applicationHeader(application)
-
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("Alias")
-                            .font(.headline)
-
-                        TextField(
-                            "For example: browser",
-                            text: $viewModel.aliasDraft
-                        )
-                        .textFieldStyle(.roundedBorder)
-                        .focused($focusedField, equals: .alias)
-                        .accessibilityIdentifier("aliases.alias-field")
-
-                        Text("Use 1–64 characters. Duplicate aliases are allowed.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-
-                        if let validationMessage = viewModel.aliasValidationMessage {
-                            Label(
-                                validationMessage,
-                                systemImage: "exclamationmark.triangle"
-                            )
-                            .font(.caption)
-                            .foregroundStyle(.red)
-                            .accessibilityIdentifier("aliases.validation")
-                        }
-                    }
-
-                    DetailMetadataSection(title: "Application") {
-                        DetailMetadataRow(
-                            label: "Bundle ID",
-                            value: application.bundleIdentifier ?? "Not Available"
-                        )
-                        DetailMetadataRow(
-                            label: "Application Path",
-                            value: application.canonicalURL.path
-                        )
-                    }
-
-                    HStack {
-                        Spacer()
-                        Button("Cancel", role: .cancel) {
-                            viewModel.cancelAliasEditing()
-                        }
-                        .keyboardShortcut(.cancelAction)
-                        .accessibilityIdentifier("aliases.cancel")
-
-                        Button("Save") {
-                            viewModel.saveAlias()
-                        }
-                        .keyboardShortcut(.defaultAction)
-                        .disabled(viewModel.isSavingAlias)
-                        .accessibilityIdentifier("aliases.save")
-                    }
-                }
-                .padding(20)
-            }
-            .scrollContentBackground(.hidden)
-        } else {
-            ContentUnavailableView(
-                "Application Unavailable",
-                systemImage: "questionmark.app",
-                description: Text("Choose another application.")
-            )
-        }
     }
 
     @ViewBuilder
@@ -1099,6 +907,325 @@ private struct AliasDetailView: View {
             }
         }
         .accessibilityElement(children: .combine)
+    }
+}
+
+private struct PaletteModalView: View {
+    @Bindable var viewModel: LauncherViewModel
+    @FocusState private var focusedField: Field?
+
+    private enum Field: Hashable {
+        case snippetName
+        case aliasApplicationSearch
+        case alias
+        case apiKey
+        case codexPath
+        case cancelConfirmation
+    }
+
+    var body: some View {
+        Group {
+            switch viewModel.paletteModal {
+            case .snippetEditor:
+                snippetEditor
+                    .frame(width: 500, height: 410)
+            case .aliasApplicationPicker:
+                aliasApplicationPicker
+                    .frame(width: 520, height: 410)
+            case .aliasEditor:
+                aliasEditor
+                    .frame(width: 470)
+            case .openAIAPIKey:
+                openAIAPIKeyEditor
+                    .frame(width: 460)
+            case .codexExecutablePath:
+                codexExecutablePathEditor
+                    .frame(width: 500)
+            case .confirmation:
+                confirmation
+                    .frame(width: 420)
+            case nil:
+                EmptyView()
+            }
+        }
+        .background(Color(nsColor: .windowBackgroundColor))
+        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .stroke(Color(nsColor: .separatorColor), lineWidth: 1)
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityAddTraits(.isModal)
+        .accessibilityIdentifier("palette.modal")
+        .task(id: viewModel.modalFocusRequest) {
+            await Task.yield()
+            switch viewModel.paletteModal {
+            case .snippetEditor:
+                focusedField = .snippetName
+            case .aliasApplicationPicker:
+                focusedField = .aliasApplicationSearch
+            case .aliasEditor:
+                focusedField = .alias
+            case .openAIAPIKey:
+                focusedField = .apiKey
+            case .codexExecutablePath:
+                focusedField = .codexPath
+            case .confirmation:
+                focusedField = .cancelConfirmation
+            case nil:
+                focusedField = nil
+            }
+        }
+    }
+
+    private var snippetEditor: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            modalHeader(viewModel.modalSnippet == nil ? "New Snippet" : "Edit Snippet")
+            Divider()
+            VStack(alignment: .leading, spacing: 14) {
+                TextField("Name", text: $viewModel.snippetNameDraft)
+                    .focused($focusedField, equals: .snippetName)
+                    .accessibilityIdentifier("modal.snippet.name")
+                TextField("Keyword (optional)", text: $viewModel.snippetKeywordDraft)
+                    .accessibilityIdentifier("modal.snippet.keyword")
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Content")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    TextEditor(text: $viewModel.snippetContentDraft)
+                        .frame(minHeight: 190)
+                        .accessibilityIdentifier("modal.snippet.content")
+                }
+                modalError
+                modalButtons(saveTitle: "Save", save: viewModel.saveSnippetFromModal)
+            }
+            .padding(18)
+        }
+    }
+
+    private var aliasApplicationPicker: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            modalHeader("Add Alias", subtitle: "Choose an application to add or edit its alias.")
+            Divider()
+            TextField("Search Applications", text: $viewModel.aliasApplicationQuery)
+                .focused($focusedField, equals: .aliasApplicationSearch)
+                .padding(14)
+                .accessibilityIdentifier("modal.alias.application-search")
+            Divider()
+            ScrollViewReader { proxy in
+                List(
+                    viewModel.aliasApplicationCandidates,
+                    selection: $viewModel.selectedAliasApplicationID
+                ) { application in
+                    HStack(spacing: 10) {
+                        CommandIconView(icon: .application(application.canonicalURL), size: 24)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(application.primaryName)
+                                .lineLimit(1)
+                            Text(
+                                application.preference.alias
+                                    ?? application.bundleIdentifier
+                                    ?? application.canonicalURL.path
+                            )
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                        }
+                    }
+                    .tag(application.id)
+                    .id(application.id)
+                    .contentShape(Rectangle())
+                    .onTapGesture(count: 2) {
+                        viewModel.chooseAliasApplication(application.id)
+                    }
+                    .simultaneousGesture(
+                        TapGesture().onEnded {
+                            viewModel.selectedAliasApplicationID = application.id
+                        }
+                    )
+                    .accessibilityElement(children: .combine)
+                    .accessibilityIdentifier(
+                        "modal.alias.application.\(application.id.rawValue)"
+                    )
+                }
+                .listStyle(.plain)
+                .scrollContentBackground(.hidden)
+                .onChange(of: viewModel.selectedAliasApplicationID) { _, identity in
+                    guard let identity else { return }
+                    proxy.scrollTo(identity)
+                }
+            }
+            Divider()
+            HStack {
+                Spacer()
+                cancelButton
+                Button("Continue") { viewModel.chooseSelectedAliasApplication() }
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(viewModel.selectedAliasApplicationID == nil)
+                    .accessibilityIdentifier("modal.alias.continue")
+            }
+            .padding(14)
+        }
+    }
+
+    @ViewBuilder
+    private var aliasEditor: some View {
+        if let application = viewModel.aliasEditingApplication {
+            VStack(alignment: .leading, spacing: 0) {
+                modalHeader("Edit Alias", subtitle: application.primaryName)
+                Divider()
+                VStack(alignment: .leading, spacing: 14) {
+                    HStack(spacing: 12) {
+                        CommandIconView(icon: .application(application.canonicalURL), size: 40)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(application.primaryName).font(.headline)
+                            Text(application.bundleIdentifier ?? application.canonicalURL.path)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                        }
+                    }
+                    TextField("For example: browser", text: $viewModel.aliasDraft)
+                        .focused($focusedField, equals: .alias)
+                        .accessibilityIdentifier("modal.alias.value")
+                    Text("Use 1–64 characters. Duplicate aliases are allowed.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    if let message = viewModel.aliasValidationMessage {
+                        errorLabel(message)
+                    } else {
+                        modalError
+                    }
+                    modalButtons(saveTitle: "Save", save: viewModel.saveAlias)
+                }
+                .padding(18)
+            }
+        } else {
+            VStack(alignment: .leading, spacing: 14) {
+                modalHeader("Application Unavailable")
+                Text("Choose another application.")
+                    .foregroundStyle(.secondary)
+                HStack { Spacer(); cancelButton }
+                    .padding([.horizontal, .bottom], 18)
+            }
+        }
+    }
+
+    private var openAIAPIKeyEditor: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            modalHeader("OpenAI API Key", subtitle: "The key is stored in macOS Keychain.")
+            Divider()
+            VStack(alignment: .leading, spacing: 14) {
+                SecureField("Paste your OpenAI API key", text: $viewModel.openAIAPIKeyDraft)
+                    .focused($focusedField, equals: .apiKey)
+                    .textContentType(.password)
+                    .accessibilityIdentifier("modal.openai.api-key")
+                modalError
+                modalButtons(saveTitle: "Save", save: viewModel.saveOpenAIAPIKeyFromModal)
+            }
+            .padding(18)
+        }
+    }
+
+    private var codexExecutablePathEditor: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            modalHeader(
+                "Codex Executable Path",
+                subtitle: "Leave this empty to use automatic detection."
+            )
+            Divider()
+            VStack(alignment: .leading, spacing: 14) {
+                TextField("/path/to/codex", text: $viewModel.codexExecutablePathDraft)
+                    .focused($focusedField, equals: .codexPath)
+                    .accessibilityIdentifier("modal.codex.path")
+                modalError
+                HStack {
+                    Button("Use Automatic Detection") {
+                        viewModel.useAutomaticCodexDetection()
+                    }
+                    .disabled(viewModel.isModalProcessing)
+                    Spacer()
+                    cancelButton
+                    Button("Save") { viewModel.saveCodexExecutablePathFromModal() }
+                        .keyboardShortcut(.defaultAction)
+                        .disabled(viewModel.isModalProcessing)
+                }
+            }
+            .padding(18)
+        }
+    }
+
+    private var confirmation: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            modalHeader(viewModel.modalConfirmationTitle)
+            Divider()
+            VStack(alignment: .leading, spacing: 16) {
+                Text(viewModel.modalConfirmationMessage)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                modalError
+                HStack {
+                    Spacer()
+                    Button("Cancel") { viewModel.dismissModal() }
+                        .keyboardShortcut(.defaultAction)
+                        .focused($focusedField, equals: .cancelConfirmation)
+                        .disabled(viewModel.isModalProcessing)
+                        .accessibilityIdentifier("modal.cancel")
+                    Button(viewModel.modalConfirmationActionTitle, role: .destructive) {
+                        viewModel.confirmModalAction()
+                    }
+                    .disabled(viewModel.isModalProcessing)
+                    .accessibilityIdentifier("modal.confirm")
+                }
+            }
+            .padding(18)
+        }
+    }
+
+    private func modalHeader(_ title: String, subtitle: String? = nil) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title).font(.headline)
+            if let subtitle {
+                Text(subtitle).font(.subheadline).foregroundStyle(.secondary)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(18)
+    }
+
+    @ViewBuilder
+    private var modalError: some View {
+        if let message = viewModel.modalErrorMessage {
+            errorLabel(message)
+        }
+    }
+
+    private func errorLabel(_ message: String) -> some View {
+        Label(message, systemImage: "exclamationmark.triangle")
+            .font(.caption)
+            .foregroundStyle(.red)
+            .fixedSize(horizontal: false, vertical: true)
+            .accessibilityIdentifier("modal.error")
+    }
+
+    private func modalButtons(saveTitle: String, save: @escaping () -> Void) -> some View {
+        HStack {
+            Spacer()
+            cancelButton
+            Button(saveTitle, action: save)
+                .keyboardShortcut(.defaultAction)
+                .disabled(viewModel.isModalProcessing)
+                .accessibilityIdentifier("modal.save")
+        }
+    }
+
+    private var cancelButton: some View {
+        Button("Cancel", role: .cancel) { viewModel.dismissModal() }
+            .keyboardShortcut(.cancelAction)
+            .disabled(viewModel.isModalProcessing)
+            .accessibilityIdentifier("modal.cancel")
     }
 }
 
