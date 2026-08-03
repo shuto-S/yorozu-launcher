@@ -63,6 +63,36 @@ final class ApplicationDiscoveryTests: XCTestCase {
         XCTAssertEqual(applications.map(\.bundleIdentifier), ["com.example.valid"])
     }
 
+    func testApplicationDirectoryMonitorReportsApplicationChanges() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: root,
+            withIntermediateDirectories: true
+        )
+        addTeardownBlock {
+            try? FileManager.default.removeItem(at: root)
+        }
+
+        let reportedChange = expectation(description: "Application directory changed")
+        let oneShot = OneShotExpectation(reportedChange)
+        let monitor = ApplicationDirectoryMonitor(
+            roots: [root],
+            latency: 0.05
+        ) {
+            oneShot.fulfill()
+        }
+        XCTAssertTrue(monitor.start())
+        defer { monitor.stop() }
+
+        try makeApplicationFixture(
+            at: root.appendingPathComponent("New.app", isDirectory: true),
+            bundleIdentifier: "com.example.new"
+        )
+
+        wait(for: [reportedChange], timeout: 3)
+    }
+
     private func discovered(path: String, priority: Int) -> DiscoveredApplication {
         DiscoveredApplication(
             id: ApplicationIdentity(rawValue: "bundle:test.example"),
@@ -107,5 +137,23 @@ final class ApplicationDiscoveryTests: XCTestCase {
             [.posixPermissions: 0o755],
             ofItemAtPath: executable.path
         )
+    }
+}
+
+private final class OneShotExpectation: @unchecked Sendable {
+    private let lock = NSLock()
+    private let expectation: XCTestExpectation
+    private var hasFulfilled = false
+
+    init(_ expectation: XCTestExpectation) {
+        self.expectation = expectation
+    }
+
+    func fulfill() {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !hasFulfilled else { return }
+        hasFulfilled = true
+        expectation.fulfill()
     }
 }

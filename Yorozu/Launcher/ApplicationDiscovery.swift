@@ -1,4 +1,5 @@
 import AppKit
+import CoreServices
 import Foundation
 
 actor FileSystemApplicationDiscoverer: ApplicationDiscovering {
@@ -17,14 +18,18 @@ actor FileSystemApplicationDiscoverer: ApplicationDiscovering {
         if let roots {
             self.roots = roots
         } else {
-            let homeApplications = FileManager.default.homeDirectoryForCurrentUser
-                .appendingPathComponent("Applications", isDirectory: true)
-            self.roots = [
-                (homeApplications, 0),
-                (URL(fileURLWithPath: "/Applications", isDirectory: true), 1),
-                (URL(fileURLWithPath: "/System/Applications", isDirectory: true), 2),
-            ]
+            self.roots = Self.standardRoots()
         }
+    }
+
+    nonisolated static func standardRoots() -> [(url: URL, priority: Int)] {
+        let homeApplications = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Applications", isDirectory: true)
+        return [
+            (homeApplications, 0),
+            (URL(fileURLWithPath: "/Applications", isDirectory: true), 1),
+            (URL(fileURLWithPath: "/System/Applications", isDirectory: true), 2),
+        ]
     }
 
     func discoverApplications() async throws -> [DiscoveredApplication] {
@@ -163,5 +168,115 @@ actor FileSystemApplicationDiscoverer: ApplicationDiscovering {
             normalizedSearchText: normalizedSearchText,
             rootPriority: rootPriority
         )
+    }
+}
+
+/// Watches the same roots as application discovery without adding work to palette presentation.
+/// FSEvents coalesces filesystem changes before this callback reaches the app.
+final class ApplicationDirectoryMonitor: @unchecked Sendable {
+    private final class CallbackBox: @unchecked Sendable {
+        let onChange: @Sendable () -> Void
+
+        init(onChange: @escaping @Sendable () -> Void) {
+            self.onChange = onChange
+        }
+    }
+
+    private static let callback: FSEventStreamCallback = {
+        _, context, numberOfEvents, _, flags, _ in
+        guard numberOfEvents > 0, let context else { return }
+
+        let eventFlags = UnsafeBufferPointer(
+            start: flags,
+            count: numberOfEvents
+        )
+        let containsRelevantEvent = eventFlags.contains { flag in
+            flag & FSEventStreamEventFlags(kFSEventStreamEventFlagHistoryDone) == 0
+        }
+        guard containsRelevantEvent else { return }
+
+        Unmanaged<CallbackBox>
+            .fromOpaque(context)
+            .takeUnretainedValue()
+            .onChange()
+    }
+
+    private let roots: [URL]
+    private let latency: TimeInterval
+    private let onChange: @Sendable () -> Void
+    private let queue = DispatchQueue(
+        label: "com.yorozu.app.application-index-monitor",
+        qos: .utility
+    )
+    private var stream: FSEventStreamRef?
+    private var callbackBox: CallbackBox?
+
+    init(
+        roots: [URL]? = nil,
+        latency: TimeInterval = 0.75,
+        onChange: @escaping @Sendable () -> Void
+    ) {
+        self.roots = roots
+            ?? FileSystemApplicationDiscoverer.standardRoots().map(\.url)
+        self.latency = latency
+        self.onChange = onChange
+    }
+
+    @discardableResult
+    func start() -> Bool {
+        queue.sync {
+            guard stream == nil else { return true }
+
+            let box = CallbackBox(onChange: onChange)
+            var context = FSEventStreamContext(
+                version: 0,
+                info: Unmanaged.passUnretained(box).toOpaque(),
+                retain: nil,
+                release: nil,
+                copyDescription: nil
+            )
+            guard let newStream = FSEventStreamCreate(
+                nil,
+                Self.callback,
+                &context,
+                roots.map(\.path) as CFArray,
+                FSEventStreamEventId(kFSEventStreamEventIdSinceNow),
+                latency,
+                FSEventStreamCreateFlags(
+                    kFSEventStreamCreateFlagWatchRoot
+                        | kFSEventStreamCreateFlagFileEvents
+                        | kFSEventStreamCreateFlagUseCFTypes
+                )
+            ) else {
+                return false
+            }
+
+            callbackBox = box
+            stream = newStream
+            FSEventStreamSetDispatchQueue(newStream, queue)
+            guard FSEventStreamStart(newStream) else {
+                FSEventStreamInvalidate(newStream)
+                FSEventStreamRelease(newStream)
+                stream = nil
+                callbackBox = nil
+                return false
+            }
+            return true
+        }
+    }
+
+    func stop() {
+        queue.sync {
+            guard let stream else { return }
+            FSEventStreamStop(stream)
+            FSEventStreamInvalidate(stream)
+            FSEventStreamRelease(stream)
+            self.stream = nil
+            callbackBox = nil
+        }
+    }
+
+    deinit {
+        stop()
     }
 }

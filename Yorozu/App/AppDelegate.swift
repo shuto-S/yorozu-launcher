@@ -16,6 +16,7 @@ struct AppEnvironment {
     let aiConversationFixtures: [AIConversationSummary]
     let registersGlobalShortcuts: Bool
     let isolatesShortcutSettings: Bool
+    let monitorsApplicationDirectories: Bool
 
     static func production() -> AppEnvironment {
         let result: LauncherStoreOpenResult
@@ -38,7 +39,8 @@ struct AppEnvironment {
             usesLiveAIIntegration: true,
             aiConversationFixtures: [],
             registersGlobalShortcuts: true,
-            isolatesShortcutSettings: false
+            isolatesShortcutSettings: false,
+            monitorsApplicationDirectories: true
         )
     }
 
@@ -89,7 +91,8 @@ struct AppEnvironment {
                 ),
             ],
             registersGlobalShortcuts: false,
-            isolatesShortcutSettings: true
+            isolatesShortcutSettings: true,
+            monitorsApplicationDirectories: false
         )
     }
 }
@@ -487,6 +490,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         pasteCoordinator: pasteCoordinator
     )
     private var menuBarController: MenuBarController?
+    private var applicationDirectoryMonitor: ApplicationDirectoryMonitor?
+    private var automaticReindexTask: Task<Void, Never>?
     private var terminationCleanupStarted = false
     private var terminationCleanupCompleted = false
 
@@ -533,6 +538,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         viewModel.start()
+        startApplicationDirectoryMonitorIfNeeded()
         if let store, !aiProviderPreferences.isEnabled(.openAIAPI) {
             Task { @MainActor [weak self] in
                 guard let self,
@@ -653,6 +659,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return .terminateCancel
         }
         terminationCleanupStarted = true
+        automaticReindexTask?.cancel()
+        automaticReindexTask = nil
+        applicationDirectoryMonitor?.stop()
+        applicationDirectoryMonitor = nil
         viewModel.shutdown()
         let clipboardMonitor = self.clipboardMonitor
         let store = store
@@ -691,6 +701,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return nil
         }
         return arguments[index + 1]
+    }
+
+    private func startApplicationDirectoryMonitorIfNeeded() {
+        guard environment.monitorsApplicationDirectories,
+              applicationDirectoryMonitor == nil else {
+            return
+        }
+
+        let monitor = ApplicationDirectoryMonitor { [weak self] in
+            Task { @MainActor [weak self] in
+                self?.scheduleAutomaticReindex()
+            }
+        }
+        guard monitor.start() else {
+            logger.error("Application directory monitoring could not be started")
+            return
+        }
+        applicationDirectoryMonitor = monitor
+    }
+
+    private func scheduleAutomaticReindex() {
+        automaticReindexTask?.cancel()
+        automaticReindexTask = Task { @MainActor [weak self] in
+            do {
+                try await Task.sleep(for: .milliseconds(750))
+            } catch {
+                return
+            }
+            guard !Task.isCancelled, let self else { return }
+            await self.viewModel.reindex()
+        }
     }
 
     #if DEBUG

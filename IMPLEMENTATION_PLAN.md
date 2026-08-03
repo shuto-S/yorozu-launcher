@@ -25,7 +25,7 @@ The current target is:
 - recent-use and frequency ranking
 - pinning and aliases
 - integrated Action Panel
-- Finder reveal and manual reindex
+- Finder reveal, automatic application-directory monitoring, and manual recovery reindex
 
 ### Clipboard History
 

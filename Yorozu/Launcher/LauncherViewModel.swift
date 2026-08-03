@@ -236,6 +236,7 @@ final class LauncherViewModel {
     private var selectionByRoute: [PaletteRoute: CommandResultID] = [:]
     private var isApplyingRouteState = false
     private var hasStarted = false
+    private var reindexRequestedWhileIndexing = false
     private let logger = Logger(subsystem: "com.yorozu.app", category: "launcher")
 
     init(
@@ -700,12 +701,19 @@ final class LauncherViewModel {
     }
 
     func reindex() async {
-        guard !isIndexing else { return }
-        isIndexing = true
-        let state = await catalog.reindex()
-        isIndexing = false
-        apply(snapshot: state)
-        refreshSearch()
+        if isIndexing {
+            reindexRequestedWhileIndexing = true
+            return
+        }
+
+        repeat {
+            reindexRequestedWhileIndexing = false
+            isIndexing = true
+            let state = await catalog.reindex()
+            isIndexing = false
+            apply(snapshot: state)
+            refreshSearch()
+        } while reindexRequestedWhileIndexing && !Task.isCancelled
     }
 
     func moveSelection(by delta: Int) {

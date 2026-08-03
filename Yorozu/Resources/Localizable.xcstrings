@@ -276,7 +276,7 @@
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Yorozu indexes applications when it starts. Reindex after installing or removing an application."
+            "value" : "Yorozu automatically updates the index when applications are installed, updated, or removed. Use Reindex Now if an application is still missing."
           }
         }
       }
