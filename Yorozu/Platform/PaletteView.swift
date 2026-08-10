@@ -13,6 +13,12 @@ struct PaletteView: View {
                         onBackToRoot: viewModel.returnToRoot,
                         onShowActions: viewModel.showActionMenu
                     )
+                } else if viewModel.route == .translation {
+                    TranslationView(
+                        viewModel: viewModel.translationViewModel,
+                        onBack: viewModel.returnToRoot,
+                        onOpenSettings: viewModel.openSettingsFromTranslation
+                    )
                 } else {
                     VStack(spacing: 0) {
                         paletteHeader
@@ -285,6 +291,224 @@ struct PaletteView: View {
         .frame(height: 42)
     }
 
+}
+
+private struct TranslationView: View {
+    @Bindable var viewModel: TranslationViewModel
+    let onBack: () -> Void
+    let onOpenSettings: () -> Void
+    @FocusState private var inputFocused: Bool
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 8) {
+                Button(action: onBack) {
+                    Image(systemName: "chevron.left")
+                        .font(.title3.weight(.semibold))
+                        .frame(width: 44, height: 44)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Back to Yorozu")
+
+                Text("Translate")
+                    .font(.title3.weight(.semibold))
+
+                Spacer()
+
+                Picker("Target language", selection: $viewModel.targetLanguage) {
+                    ForEach(TranslationViewModel.supportedTargetLanguages, id: \.self) {
+                        Text($0).tag($0)
+                    }
+                }
+                .pickerStyle(.menu)
+                .labelsHidden()
+                .accessibilityLabel("Target language")
+            }
+            .padding(.horizontal, 14)
+            .frame(minHeight: 58)
+
+            Divider()
+                .padding(.horizontal, 14)
+
+            if let selectionPermissionMessage = viewModel.selectionPermissionMessage {
+                HStack(spacing: 8) {
+                    Label(selectionPermissionMessage, systemImage: "hand.raised")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    Button("Open System Settings") {
+                        openAccessibilitySettings()
+                    }
+                    .buttonStyle(.link)
+                }
+                .padding(.horizontal, 18)
+                .padding(.vertical, 8)
+            }
+
+            if let errorMessage = viewModel.errorMessage {
+                Label(errorMessage, systemImage: "exclamationmark.triangle")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 18)
+                .padding(.vertical, 8)
+            }
+
+            if let configurationMessage = viewModel.configurationMessage {
+                HStack(spacing: 8) {
+                    Label(configurationMessage, systemImage: "gearshape")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    Button("Open Settings", action: onOpenSettings)
+                        .buttonStyle(.link)
+                }
+                .padding(.horizontal, 18)
+                .padding(.vertical, 8)
+            }
+
+            HStack(spacing: 0) {
+                translationPane(
+                    title: "Input"
+                ) {
+                    TextEditor(text: $viewModel.inputText)
+                        .focused($inputFocused)
+                        .font(.body)
+                        .scrollContentBackground(.hidden)
+                        .background(Color.clear)
+                        .overlay(alignment: .topLeading) {
+                            if viewModel.inputText.isEmpty {
+                                Text("Enter text to translate…")
+                                    .foregroundStyle(.tertiary)
+                                    .allowsHitTesting(false)
+                            }
+                        }
+                        .onChange(of: viewModel.inputText) { _, _ in
+                            if viewModel.outputTextIsPresent {
+                                viewModel.clearOutput()
+                            }
+                        }
+                }
+
+                Divider()
+
+                translationPane(title: "Translation") {
+                    ScrollView {
+                        Text(viewModel.outputText.isEmpty ? "Your translation will appear here." : viewModel.outputText)
+                            .foregroundStyle(viewModel.outputText.isEmpty ? .tertiary : .primary)
+                            .frame(maxWidth: .infinity, alignment: .topLeading)
+                            .textSelection(.enabled)
+                            .padding(.top, 2)
+                    }
+                    .scrollIndicators(.automatic)
+                }
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 12)
+            .frame(maxHeight: .infinity)
+
+            Divider()
+                .padding(.horizontal, 14)
+
+            HStack(spacing: 10) {
+                Picker("Provider", selection: Binding(
+                    get: { viewModel.selectedProviderID },
+                    set: { if let value = $0 { viewModel.selectProvider(value) } }
+                )) {
+                    ForEach(viewModel.providerViewModels, id: \.providerID) { provider in
+                        Text(provider.providerDescriptor.displayName)
+                            .tag(Optional(provider.providerID))
+                    }
+                }
+                .pickerStyle(.menu)
+                .labelsHidden()
+                .disabled(viewModel.providerViewModels.isEmpty || viewModel.isTranslating)
+                .accessibilityLabel("Translation provider")
+
+                Picker("Model", selection: Binding(
+                    get: { viewModel.selectedModel },
+                    set: { viewModel.selectModel($0) }
+                )) {
+                    ForEach(viewModel.availableModels) { model in
+                        Text(model.title).tag(model)
+                    }
+                }
+                .pickerStyle(.menu)
+                .labelsHidden()
+                .disabled(viewModel.availableModels.isEmpty || viewModel.isTranslating)
+                .accessibilityLabel("Translation model")
+
+                if !viewModel.availableReasoningEfforts.isEmpty {
+                    Picker("Reasoning", selection: Binding(
+                        get: { viewModel.selectedReasoningEffort },
+                        set: { viewModel.selectReasoningEffort($0) }
+                    )) {
+                        Text("Default").tag(AIReasoningEffort?.none)
+                        ForEach(viewModel.availableReasoningEfforts) { effort in
+                            Text(effort.title).tag(Optional(effort))
+                        }
+                    }
+                    .pickerStyle(.menu)
+                    .labelsHidden()
+                    .disabled(viewModel.isTranslating)
+                    .accessibilityLabel("Reasoning level")
+                }
+
+                Spacer()
+
+                if viewModel.isLoadingModels {
+                    ProgressView()
+                        .controlSize(.small)
+                }
+
+                Button(viewModel.isTranslating ? "Stop" : "Translate") {
+                    if viewModel.isTranslating {
+                        viewModel.stop()
+                    } else {
+                        viewModel.translate()
+                    }
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(!viewModel.isTranslating && !viewModel.canTranslate)
+                .keyboardShortcut(.return, modifiers: [])
+                .accessibilityIdentifier("translation.submit")
+            }
+            .padding(.horizontal, 14)
+            .frame(height: 48)
+        }
+        .padding(.top, 12)
+        .task(id: viewModel.focusRequest) {
+            inputFocused = true
+            viewModel.loadModelsIfNeeded()
+        }
+        .accessibilityIdentifier("launcher.translation")
+    }
+
+    private func openAccessibilitySettings() {
+        guard let url = URL(
+            string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
+        ) else {
+            return
+        }
+        NSWorkspace.shared.open(url)
+    }
+
+    @ViewBuilder
+    private func translationPane<Content: View>(
+        title: String,
+        @ViewBuilder content: () -> Content
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(title)
+                .font(.headline)
+                .foregroundStyle(.secondary)
+            content()
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        }
+        .padding(.horizontal, 12)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
 }
 
 private struct CommandResultsListView: View {

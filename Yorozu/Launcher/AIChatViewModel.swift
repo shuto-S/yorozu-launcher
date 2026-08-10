@@ -1636,6 +1636,25 @@ final class AIChatViewModel {
         return "The AI request could not be completed."
     }
 
+    func streamTranslation(
+        input: String,
+        targetLanguage: String,
+        model: AIModel,
+        reasoningEffort: AIReasoningEffort?
+    ) -> AsyncThrowingStream<AIChatStreamEvent, Error> {
+        coordinator.streamTranslation(
+            request: AITranslationRequest(
+                model: model,
+                reasoningEffort: reasoningEffort,
+                prompt: TranslationPromptBuilder.prompt(
+                    input: input,
+                    targetLanguage: targetLanguage
+                ),
+                clientRequestID: UUID().uuidString
+            )
+        )
+    }
+
     static func disabled() -> AIChatViewModel {
         let suiteName = "com.yorozu.app.ai-disabled.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName) ?? .standard
@@ -1644,6 +1663,346 @@ final class AIChatViewModel {
             provider: DisabledAIChatProvider(),
             preferences: AIChatPreferences(defaults: defaults)
         )
+    }
+}
+
+enum TranslationPromptBuilder {
+    static func prompt(input: String, targetLanguage: String) -> String {
+        """
+        Translate the text below to \(targetLanguage). Detect the source language automatically.
+        Preserve the original meaning, tone, line breaks, and formatting as closely as possible.
+        Return only the translation. Do not add explanations, labels, or quotation marks.
+
+        Text to translate:
+        \(input)
+        """
+    }
+}
+
+@MainActor
+final class TranslationPreferences {
+    private let defaults: UserDefaults
+
+    init(defaults: UserDefaults) {
+        self.defaults = defaults
+    }
+
+    var providerID: AIProviderID? {
+        get {
+            defaults.string(forKey: Keys.providerID).map(AIProviderID.init(rawValue:))
+        }
+        set {
+            if let newValue {
+                defaults.set(newValue.rawValue, forKey: Keys.providerID)
+            } else {
+                defaults.removeObject(forKey: Keys.providerID)
+            }
+        }
+    }
+
+    func model(for providerID: AIProviderID) -> AIModel? {
+        defaults.string(forKey: Keys.model(providerID))
+            .map { AIModel(rawValue: $0) }
+    }
+
+    func setModel(_ model: AIModel, for providerID: AIProviderID) {
+        defaults.set(model.rawValue, forKey: Keys.model(providerID))
+    }
+
+    func reasoningEffort(for providerID: AIProviderID) -> AIReasoningEffort? {
+        defaults.string(forKey: Keys.reasoningEffort(providerID))
+            .map { AIReasoningEffort(rawValue: $0) }
+    }
+
+    func setReasoningEffort(
+        _ effort: AIReasoningEffort?,
+        for providerID: AIProviderID
+    ) {
+        let key = Keys.reasoningEffort(providerID)
+        if let effort {
+            defaults.set(effort.rawValue, forKey: key)
+        } else {
+            defaults.removeObject(forKey: key)
+        }
+    }
+
+    private enum Keys {
+        static let providerID = "translation.provider"
+
+        static func model(_ providerID: AIProviderID) -> String {
+            "translation.\(providerID.rawValue).model"
+        }
+
+        static func reasoningEffort(_ providerID: AIProviderID) -> String {
+            "translation.\(providerID.rawValue).reasoningEffort"
+        }
+    }
+}
+
+@MainActor
+@Observable
+final class TranslationViewModel {
+    static let supportedTargetLanguages = [
+        "Japanese", "English", "Chinese (Simplified)", "Korean",
+        "Spanish", "French", "German",
+    ]
+
+    let providerStore: AIChatViewModelStore
+    let preferences: TranslationPreferences
+    var inputText = ""
+    private(set) var outputText = ""
+    var targetLanguage = "Japanese"
+    private(set) var selectedProviderID: AIProviderID?
+    private(set) var selectedModel: AIModel
+    private(set) var selectedReasoningEffort: AIReasoningEffort?
+    private(set) var availableModels: [AIModel]
+    private(set) var isTranslating = false
+    private(set) var isLoadingModels = false
+    var errorMessage: String?
+    var selectionPermissionMessage: String?
+    private(set) var focusRequest = 0
+
+    private var translationTask: Task<Void, Never>?
+    private var prepareTask: Task<Void, Never>?
+
+    init(
+        providerStore: AIChatViewModelStore,
+        preferences: TranslationPreferences
+    ) {
+        self.providerStore = providerStore
+        self.preferences = preferences
+        let initial = Self.initialProvider(
+            from: providerStore,
+            preferences: preferences
+        )
+        selectedProviderID = initial?.providerID
+        let initialModel = initial.flatMap {
+            preferences.model(for: $0.providerID)
+        } ?? initial?.preferences.defaultModel ?? .terra
+        selectedModel = initialModel
+        selectedReasoningEffort = initial.flatMap {
+            preferences.reasoningEffort(for: $0.providerID)
+        } ?? initial?.preferences.defaultReasoningEffort
+        availableModels = initial?.availableModels ?? [initialModel]
+    }
+
+    var providerViewModels: [AIChatViewModel] {
+        providerStore.orderedViewModels.filter {
+            providerStore.providerPreferences.isEnabled($0.providerID)
+                && $0.providerDescriptor.capabilities.contains(.translation)
+        }
+    }
+
+    var hasTranslationProvider: Bool {
+        !providerViewModels.isEmpty
+    }
+
+    var configurationMessage: String? {
+        guard hasTranslationProvider else {
+            return "Enable an AI provider with translation support in Settings."
+        }
+        guard let selectedProvider else {
+            return "Select an AI provider to translate."
+        }
+        switch selectedProvider.credentialStatus {
+        case .notSaved:
+            return "Set up \(selectedProvider.providerDescriptor.displayName) in Settings to translate."
+        case .unavailable:
+            return "\(selectedProvider.providerDescriptor.displayName) is unavailable. Check Settings and try again."
+        case .checking, .saved:
+            return nil
+        }
+    }
+
+    var selectedProvider: AIChatViewModel? {
+        guard let selectedProviderID else { return nil }
+        return providerStore.viewModel(for: selectedProviderID)
+    }
+
+    var availableReasoningEfforts: [AIReasoningEffort] {
+        selectedModel.supportedReasoningEfforts
+    }
+
+    var canTranslate: Bool {
+        !inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && selectedProvider != nil
+            && selectedProvider.map {
+                providerStore.providerPreferences.isEnabled($0.providerID)
+            } == true
+            && selectedProvider?.providerDescriptor.capabilities.contains(.translation) == true
+            && !isTranslating
+    }
+
+    var outputTextIsPresent: Bool { !outputText.isEmpty }
+
+    func clearOutput() {
+        outputText = ""
+        errorMessage = nil
+    }
+
+    func prepareForPresentation(
+        initialText: String? = nil,
+        selectionPermissionUnavailable: Bool = false
+    ) {
+        translationTask?.cancel()
+        prepareTask?.cancel()
+        inputText = initialText ?? ""
+        outputText = ""
+        errorMessage = nil
+        selectionPermissionMessage = selectionPermissionUnavailable
+            ? "Allow Accessibility to read selected text automatically."
+            : nil
+        isTranslating = false
+        focusRequest += 1
+        selectedProvider?.loadCredentialStatus()
+        loadModelsIfNeeded()
+        if !inputText.isEmpty {
+            prepareTask = Task { @MainActor [weak self] in
+                await Task.yield()
+                guard let self, !Task.isCancelled else { return }
+                self.translate()
+            }
+        }
+    }
+
+    func translate() {
+        guard canTranslate,
+              let provider = selectedProvider else { return }
+        translationTask?.cancel()
+        errorMessage = nil
+        outputText = ""
+        isTranslating = true
+        let input = inputText
+        let targetLanguage = targetLanguage
+        let model = selectedModel
+        let reasoningEffort = selectedReasoningEffort
+        translationTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                for try await event in provider.streamTranslation(
+                    input: input,
+                    targetLanguage: targetLanguage,
+                    model: model,
+                    reasoningEffort: reasoningEffort
+                ) {
+                    guard !Task.isCancelled else { return }
+                    if case let .textDelta(delta) = event {
+                        self.outputText.append(delta)
+                    }
+                }
+                self.isTranslating = false
+            } catch is CancellationError {
+                self.isTranslating = false
+            } catch {
+                self.isTranslating = false
+                self.errorMessage = Self.userMessage(for: error)
+            }
+        }
+    }
+
+    func stop() {
+        translationTask?.cancel()
+        translationTask = nil
+        isTranslating = false
+    }
+
+    func selectProvider(_ providerID: AIProviderID) {
+        guard providerStore.providerPreferences.isEnabled(providerID),
+              let provider = providerStore.viewModel(for: providerID),
+              provider.providerDescriptor.capabilities.contains(.translation) else { return }
+        selectedProviderID = providerID
+        preferences.providerID = providerID
+        selectedModel = preferences.model(for: providerID)
+            ?? provider.preferences.defaultModel
+        selectedReasoningEffort = preferences.reasoningEffort(for: providerID)
+            ?? provider.preferences.defaultReasoningEffort
+        availableModels = provider.availableModels
+        provider.loadCredentialStatus()
+        loadModelsIfNeeded()
+    }
+
+    func selectModel(_ model: AIModel) {
+        selectedModel = model
+        selectedReasoningEffort = preferredReasoningEffort(for: model)
+        if let providerID = selectedProviderID {
+            preferences.setModel(model, for: providerID)
+            preferences.setReasoningEffort(selectedReasoningEffort, for: providerID)
+        }
+    }
+
+    func selectReasoningEffort(_ effort: AIReasoningEffort?) {
+        selectedReasoningEffort = effort
+        if let providerID = selectedProviderID {
+            preferences.setReasoningEffort(effort, for: providerID)
+        }
+    }
+
+    func loadModelsIfNeeded() {
+        guard let provider = selectedProvider, !isLoadingModels else { return }
+        if provider.availableModels.count > 1 || provider.availableModels.first?.supportedReasoningEfforts.isEmpty == false {
+            availableModels = provider.availableModels
+            reconcileSelection(with: provider)
+            return
+        }
+        isLoadingModels = true
+        Task { @MainActor [weak self, weak provider] in
+            guard let self, let provider else { return }
+            await provider.loadModelMetadataForSettings()
+            guard self.selectedProviderID == provider.providerID else { return }
+            self.availableModels = provider.availableModels
+            self.reconcileSelection(with: provider)
+            self.isLoadingModels = false
+        }
+    }
+
+    func shutdown() {
+        translationTask?.cancel()
+        prepareTask?.cancel()
+    }
+
+    private func reconcileSelection(with provider: AIChatViewModel) {
+        let preferredModel = preferences.model(for: provider.providerID)
+            ?? provider.preferences.defaultModel
+        selectedModel = availableModels.first(where: { $0.rawValue == preferredModel.rawValue })
+            ?? availableModels.first
+            ?? preferredModel
+        selectedReasoningEffort = preferredReasoningEffort(for: selectedModel)
+    }
+
+    private func preferredReasoningEffort(for model: AIModel) -> AIReasoningEffort? {
+        let preferred = selectedProviderID.flatMap {
+            preferences.reasoningEffort(for: $0)
+        } ?? selectedProvider?.preferences.defaultReasoningEffort
+        return model.supportedReasoningEfforts.first(where: { $0 == preferred })
+            ?? model.defaultReasoningEffort
+            ?? model.supportedReasoningEfforts.first
+    }
+
+    private static func initialProvider(
+        from store: AIChatViewModelStore,
+        preferences: TranslationPreferences
+    ) -> AIChatViewModel? {
+        if let preferredID = preferences.providerID,
+           let preferred = store.viewModel(for: preferredID),
+           store.providerPreferences.isEnabled(preferredID),
+           preferred.providerDescriptor.capabilities.contains(.translation) {
+            return preferred
+        }
+        return store.orderedViewModels.first(where: {
+            store.providerPreferences.isEnabled($0.providerID)
+                && $0.providerDescriptor.capabilities.contains(.translation)
+        }) ?? store.defaultViewModel().flatMap {
+            store.providerPreferences.isEnabled($0.providerID)
+                && $0.providerDescriptor.capabilities.contains(.translation) ? $0 : nil
+        }
+    }
+
+    private static func userMessage(for error: Error) -> String {
+        if let localized = error as? LocalizedError,
+           let description = localized.errorDescription {
+            return description
+        }
+        return "The translation could not be completed."
     }
 }
 

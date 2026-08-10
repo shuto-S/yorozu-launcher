@@ -34,6 +34,56 @@ final class AIChatStorageTests: XCTestCase {
         XCTAssertEqual(restored.defaultProviderID, .openAIAPI)
     }
 
+    @MainActor
+    func testTranslationPreferencesPersistSeparatelyFromAIChatDefaults() {
+        let defaults = UserDefaults(
+            suiteName: "com.yorozu.translation-preferences-tests.\(UUID().uuidString)"
+        )!
+        let chatPreferences = AIChatPreferences(
+            defaults: defaults,
+            providerID: .openAIAPI
+        )
+        let translationPreferences = TranslationPreferences(defaults: defaults)
+        let reasoning = AIReasoningEffort(rawValue: "high")
+
+        chatPreferences.defaultModel = .terra
+        translationPreferences.providerID = .openAIAPI
+        translationPreferences.setModel(.sol, for: .openAIAPI)
+        translationPreferences.setReasoningEffort(reasoning, for: .openAIAPI)
+
+        let restored = TranslationPreferences(defaults: defaults)
+        XCTAssertEqual(restored.providerID, .openAIAPI)
+        XCTAssertEqual(restored.model(for: .openAIAPI), .sol)
+        XCTAssertEqual(restored.reasoningEffort(for: .openAIAPI), reasoning)
+        XCTAssertEqual(chatPreferences.defaultModel, .terra)
+    }
+
+    @MainActor
+    func testTranslationSkipsDisabledDefaultProvider() {
+        let defaults = UserDefaults(
+            suiteName: "com.yorozu.translation-provider-tests.\(UUID().uuidString)"
+        )!
+        let providerPreferences = AIProviderPreferences(defaults: defaults)
+        providerPreferences.setEnabled(false, for: .codex)
+        providerPreferences.setEnabled(true, for: .openAIAPI)
+        let store = AIChatViewModelStore(
+            viewModels: [
+                makeProviderViewModel(providerID: .codex, defaults: defaults),
+                makeProviderViewModel(providerID: .openAIAPI, defaults: defaults),
+            ],
+            providerPreferences: providerPreferences
+        )
+
+        let viewModel = TranslationViewModel(
+            providerStore: store,
+            preferences: TranslationPreferences(defaults: defaults)
+        )
+
+        XCTAssertEqual(viewModel.selectedProviderID, .openAIAPI)
+        XCTAssertTrue(viewModel.providerViewModels.map(\.providerID).contains(.openAIAPI))
+        XCTAssertFalse(viewModel.providerViewModels.map(\.providerID).contains(.codex))
+    }
+
     func testProviderRegistryKeepsMultipleProvidersAndRejectsUnknownID() async throws {
         let registry = AIProviderRegistry(providers: [
             RegistryTestProvider(providerID: .codex),
@@ -614,6 +664,61 @@ final class AIChatStorageTests: XCTestCase {
         XCTAssertNil(disabled["include"])
         XCTAssertNotNil(enabled["tools"])
         XCTAssertNotNil(enabled["include"])
+    }
+
+    func testTranslationResponseBodyIsStatelessAndCarriesReasoning() {
+        let body = OpenAIChatClient.responseBody(
+            for: AIChatSendRequest(
+                conversationID: "",
+                model: .terra,
+                reasoningEffort: AIReasoningEffort(rawValue: "medium"),
+                prompt: "Translate this",
+                attachments: [],
+                enablesWebSearch: false,
+                clientRequestID: "translation-test"
+            )
+        )
+
+        XCTAssertEqual(body["store"] as? Bool, false)
+        XCTAssertNil(body["conversation"])
+        XCTAssertEqual(
+            (body["reasoning"] as? [String: String])?["effort"],
+            "medium"
+        )
+    }
+
+    @MainActor
+    func testTranslationStreamsProviderDeltaAndPreservesSelectedText() async throws {
+        let defaults = UserDefaults(
+            suiteName: "com.yorozu.translation-view-model-tests.\(UUID().uuidString)"
+        )!
+        let providerPreferences = AIProviderPreferences(defaults: defaults)
+        let providerViewModel = makeProviderViewModel(
+            providerID: .codex,
+            defaults: defaults
+        )
+        let store = AIChatViewModelStore(
+            viewModels: [providerViewModel],
+            providerPreferences: providerPreferences
+        )
+        let translationViewModel = TranslationViewModel(
+            providerStore: store,
+            preferences: TranslationPreferences(defaults: defaults)
+        )
+
+        translationViewModel.prepareForPresentation(
+            initialText: "  Hello\nworld  "
+        )
+
+        XCTAssertEqual(translationViewModel.inputText, "  Hello\nworld  ")
+        // `prepareForPresentation` schedules the automatic translation after yielding
+        // to the main actor, so the initial `isTranslating` value may still be false.
+        // Wait for the observable output instead of assuming the task has started.
+        for _ in 0..<100 where translationViewModel.outputText != "Translated" {
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertFalse(translationViewModel.isTranslating)
+        XCTAssertEqual(translationViewModel.outputText, "Translated")
     }
 
     func testSSEDecoderHandlesStreamingEventsAndCitations() throws {
@@ -1782,8 +1887,8 @@ private actor RegistryTestProvider: AIChatProvider {
             description: "Test provider",
             symbolName: "sparkles",
             capabilities: providerID == .codex
-                ? [.streaming, .modelSelection, .reasoningEffort]
-                : [.streaming]
+                ? [.streaming, .modelSelection, .reasoningEffort, .translation]
+                : [.streaming, .translation]
         )
     }
 
@@ -1828,6 +1933,15 @@ private actor RegistryTestProvider: AIChatProvider {
         request: AIChatSendRequest
     ) -> AsyncThrowingStream<AIChatStreamEvent, Error> {
         AsyncThrowingStream { $0.finish() }
+    }
+    nonisolated func streamTranslation(
+        request: AITranslationRequest
+    ) -> AsyncThrowingStream<AIChatStreamEvent, Error> {
+        AsyncThrowingStream { continuation in
+            continuation.yield(.textDelta("Translated"))
+            continuation.yield(.completed)
+            continuation.finish()
+        }
     }
     func stopGeneration(conversationID: String) {}
     func deleteConversationCompletely(conversationID: String) {}

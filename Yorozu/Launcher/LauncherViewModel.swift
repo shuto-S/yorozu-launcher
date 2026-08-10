@@ -199,6 +199,8 @@ final class LauncherViewModel {
     var dismissForLaunch: (() -> Void)?
     var reopenAfterLaunchFailure: (() -> Void)?
     var dismissAndRestorePreviousApplication: (() -> Void)?
+    var selectedTextForTranslation: (() -> String?)?
+    var selectedTextPermissionUnavailableForTranslation: (() -> Bool)?
     var pasteContent: ((
         PasteboardContent,
         @escaping @MainActor (PasteResult) -> Void
@@ -209,6 +211,7 @@ final class LauncherViewModel {
     let urlPreviewService: URLPreviewService
     let shortcutSettings: AppShortcutSettings
     let aiChatViewModelStore: AIChatViewModelStore
+    let translationViewModel: TranslationViewModel
 
     var aiProviderPreferences: AIProviderPreferences {
         aiChatViewModelStore.providerPreferences
@@ -271,6 +274,7 @@ final class LauncherViewModel {
         shortcutSettings: AppShortcutSettings = AppShortcutSettings(),
         aiChatViewModel: AIChatViewModel? = nil,
         aiChatViewModelStore: AIChatViewModelStore? = nil,
+        translationPreferences: TranslationPreferences? = nil,
         launcher: any ApplicationLaunching,
         clipboardImageDecoder: any ClipboardImageDecoding = ClipboardImageDecoder(),
         storageRecoveryNotice: StorageRecoveryNotice? = nil
@@ -282,18 +286,29 @@ final class LauncherViewModel {
         self.clipboardPreferences = clipboardPreferences
         self.urlPreviewService = urlPreviewService
         self.shortcutSettings = shortcutSettings
+        let resolvedAIStore: AIChatViewModelStore
         if let aiChatViewModelStore {
-            self.aiChatViewModelStore = aiChatViewModelStore
+            resolvedAIStore = aiChatViewModelStore
         } else {
             let value = aiChatViewModel ?? .disabled()
             let suite = UserDefaults(
                 suiteName: "com.yorozu.app.ai-provider-fallback.\(UUID().uuidString)"
             ) ?? .standard
-            self.aiChatViewModelStore = AIChatViewModelStore(
+            resolvedAIStore = AIChatViewModelStore(
                 viewModels: [value],
                 providerPreferences: AIProviderPreferences(defaults: suite)
             )
         }
+        self.aiChatViewModelStore = resolvedAIStore
+        let resolvedTranslationPreferences = translationPreferences ?? TranslationPreferences(
+            defaults: UserDefaults(
+                suiteName: "com.yorozu.app.translation-fallback.\(UUID().uuidString)"
+            ) ?? .standard
+        )
+        self.translationViewModel = TranslationViewModel(
+            providerStore: resolvedAIStore,
+            preferences: resolvedTranslationPreferences
+        )
         self.launcher = launcher
         self.clipboardImageDecoder = clipboardImageDecoder
         self.storageRecoveryNotice = storageRecoveryNotice
@@ -441,6 +456,8 @@ final class LauncherViewModel {
         switch route {
         case .root:
             isIndexing ? "Indexing Applications…" : "No Results"
+        case .translation:
+            "Translate"
         case .clipboard:
             clipboardPreferences.isEnabled
                 ? "No Clipboard Items"
@@ -460,6 +477,8 @@ final class LauncherViewModel {
         switch route {
         case .root:
             isIndexing ? "arrow.trianglehead.2.clockwise.rotate.90" : "magnifyingglass"
+        case .translation:
+            "character.bubble"
         case .clipboard:
             "clipboard"
         case .snippets:
@@ -480,6 +499,8 @@ final class LauncherViewModel {
         switch route {
         case .root:
             return "\(indexCount) apps"
+        case .translation:
+            return "Translation"
         case .clipboard:
             return "\(clipboardItemCount) items"
         case .snippets:
@@ -503,6 +524,8 @@ final class LauncherViewModel {
                 LauncherFooterAction(id: .primary, shortcut: "↩", title: "Open"),
                 LauncherFooterAction(id: .actions, shortcut: "⌘K", title: "Actions"),
             ]
+        case .translation:
+            []
         case .clipboard:
             [
                 LauncherFooterAction(id: .primary, shortcut: "↩", title: "Paste"),
@@ -686,11 +709,14 @@ final class LauncherViewModel {
         startupTasks.forEach { $0.cancel() }
         startupTasks.removeAll(keepingCapacity: false)
         aiChatViewModelStore.shutdown()
+        translationViewModel.shutdown()
     }
 
     func prepareForPresentation(
         route: PaletteRoute = .root,
-        origin: PalettePresentationOrigin = .direct
+        origin: PalettePresentationOrigin = .direct,
+        selectedText: String? = nil,
+        selectedTextPermissionUnavailable: Bool = false
     ) {
         dismissActionPanel(restoreSearchFocus: false)
         dismissModal(restoreFocus: false)
@@ -705,6 +731,12 @@ final class LauncherViewModel {
         )
         if route.isAI {
             aiChatViewModel.prepareForPresentation()
+        } else if route == .translation {
+            translationViewModel.prepareForPresentation(
+                initialText: selectedText ?? selectedTextForTranslation?(),
+                selectionPermissionUnavailable: selectedTextPermissionUnavailable
+                    || selectedTextPermissionUnavailableForTranslation?() == true
+            )
         }
         if let feature = FeatureCommand(route: route) {
             recordFeatureUse(feature)
@@ -812,7 +844,23 @@ final class LauncherViewModel {
         transitionRoute(to: feature.route, origin: .root)
         if feature.route.isAI {
             aiChatViewModel.prepareForPresentation()
+        } else if feature.route == .translation {
+            translationViewModel.prepareForPresentation(
+                initialText: selectedTextForTranslation?(),
+                selectionPermissionUnavailable:
+                    selectedTextPermissionUnavailableForTranslation?() == true
+            )
         }
+    }
+
+    func openSettingsFromTranslation() {
+        guard route == .translation else { return }
+        dismissActionPanel(restoreSearchFocus: false)
+        dismissModal(restoreFocus: false)
+        resetClipboardImagePreview()
+        statusMessage = nil
+        focusRequest += 1
+        transitionRoute(to: .settings, origin: presentationOrigin)
     }
 
     func togglePinForSelectedResult() {
@@ -1676,7 +1724,7 @@ final class LauncherViewModel {
                 matches = applications.map {
                     Self.applicationResult($0, query: currentQuery)
                 }
-            case .ai:
+            case .ai, .translation:
                 matches = []
             case .settings:
                 matches = []
@@ -1755,13 +1803,13 @@ final class LauncherViewModel {
                 "route_usable_list",
                 startedAt: startedAt
             )
-        } else if newRoute != .settings, !newRoute.isAI {
+        } else if newRoute != .settings, !newRoute.isAI, newRoute != .translation {
             refreshSearch(preserveSelection: true)
         }
     }
 
     private func shouldResetSelectionOnEntry(_ route: PaletteRoute) -> Bool {
-        route == .clipboard || route == .snippets
+        route == .clipboard || route == .snippets || route == .translation
     }
 
     private func cachedDefaultResults(
@@ -1770,6 +1818,8 @@ final class LauncherViewModel {
         switch route {
         case .root:
             rootDefaultResults
+        case .translation:
+            []
         case .clipboard:
             clipboardDefaultResults
         case .snippets:

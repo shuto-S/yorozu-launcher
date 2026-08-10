@@ -304,6 +304,11 @@ actor AIConversationCoordinator {
     ) -> AsyncThrowingStream<AIChatStreamEvent, Error> {
         provider.streamResponse(request: request)
     }
+    nonisolated func streamTranslation(
+        request: AITranslationRequest
+    ) -> AsyncThrowingStream<AIChatStreamEvent, Error> {
+        provider.streamTranslation(request: request)
+    }
     func stopGeneration(conversationID: String) async {
         await provider.stopGeneration(conversationID: conversationID)
     }

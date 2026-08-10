@@ -3,6 +3,7 @@ import Foundation
 
 enum PaletteRoute: Hashable, Sendable {
     case root
+    case translation
     case clipboard
     case snippets
     case aliases
@@ -13,6 +14,8 @@ enum PaletteRoute: Hashable, Sendable {
         switch self {
         case .root:
             "Search for apps and commands…"
+        case .translation:
+            "Translate"
         case .clipboard:
             "Search Clipboard"
         case .snippets:
@@ -30,6 +33,8 @@ enum PaletteRoute: Hashable, Sendable {
         switch self {
         case .root:
             "Search applications and commands"
+        case .translation:
+            "Translation input"
         case .clipboard:
             "Search clipboard history"
         case .snippets:
@@ -57,6 +62,7 @@ enum PalettePresentationOrigin: Hashable, Sendable {
 }
 
 enum FeatureCommand: Hashable, Sendable {
+    case translation
     case clipboardHistory
     case snippets
     case aliases
@@ -65,6 +71,7 @@ enum FeatureCommand: Hashable, Sendable {
     case settings
 
     static let all: [FeatureCommand] = [
+        .translation,
         .clipboardHistory,
         .snippets,
         .aliases,
@@ -75,6 +82,8 @@ enum FeatureCommand: Hashable, Sendable {
 
     var title: String {
         switch self {
+        case .translation:
+            "Translate"
         case .clipboardHistory:
             "Clipboard History"
         case .snippets:
@@ -92,6 +101,8 @@ enum FeatureCommand: Hashable, Sendable {
 
     var subtitle: String {
         switch self {
+        case .translation:
+            "Translate text with your configured AI provider"
         case .clipboardHistory:
             "Search and paste recently copied content"
         case .snippets:
@@ -109,6 +120,8 @@ enum FeatureCommand: Hashable, Sendable {
 
     var symbolName: String {
         switch self {
+        case .translation:
+            "character.bubble"
         case .clipboardHistory:
             "clipboard"
         case .snippets:
@@ -126,6 +139,8 @@ enum FeatureCommand: Hashable, Sendable {
 
     var route: PaletteRoute {
         switch self {
+        case .translation:
+            .translation
         case .clipboardHistory:
             .clipboard
         case .snippets:
@@ -149,6 +164,8 @@ enum FeatureCommand: Hashable, Sendable {
         switch route {
         case .root:
             return nil
+        case .translation:
+            self = .translation
         case .clipboard:
             self = .clipboardHistory
         case .snippets:
@@ -179,6 +196,7 @@ enum FeatureCommand: Hashable, Sendable {
 
     var rawValue: String {
         switch self {
+        case .translation: "translation"
         case .clipboardHistory: "clipboardHistory"
         case .snippets: "snippets"
         case .aliases: "aliases"

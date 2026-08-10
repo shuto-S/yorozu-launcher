@@ -456,7 +456,7 @@ actor CodexAIProvider: AIChatProvider, CodexAuthenticationManaging {
         capabilities: [
             .authentication, .modelSelection, .streaming, .archive,
             .deletion, .rateLimitStatus, .providerConversationListing,
-            .cancellation, .reasoningEffort,
+            .cancellation, .reasoningEffort, .translation,
         ]
     )
     nonisolated let policies = AIProviderPolicies.providerConversationIndex
@@ -680,6 +680,59 @@ actor CodexAIProvider: AIChatProvider, CodexAuthenticationManaging {
                     await self.stopGeneration(conversationID: request.conversationID)
                     continuation.finish()
                 } catch {
+                    continuation.finish(throwing: error)
+                }
+            }
+            continuation.onTermination = { _ in task.cancel() }
+        }
+    }
+
+    nonisolated func streamTranslation(
+        request: AITranslationRequest
+    ) -> AsyncThrowingStream<AIChatStreamEvent, Error> {
+        AsyncThrowingStream { continuation in
+            let task = Task {
+                var temporaryConversationID: String?
+                do {
+                    temporaryConversationID = try await self.createConversation(
+                        title: "Translation",
+                        model: request.model
+                    )
+                    let chatRequest = AIChatSendRequest(
+                        conversationID: temporaryConversationID!,
+                        model: request.model,
+                        reasoningEffort: request.reasoningEffort,
+                        prompt: request.prompt,
+                        attachments: [],
+                        enablesWebSearch: false,
+                        clientRequestID: request.clientRequestID
+                    )
+                    try await self.performStream(
+                        request: chatRequest,
+                        continuation: continuation
+                    )
+                    if let temporaryConversationID {
+                        _ = try? await self.resolvedClient().request(
+                            method: "thread/delete",
+                            params: .object(["threadId": .string(temporaryConversationID)])
+                        )
+                    }
+                    continuation.finish()
+                } catch is CancellationError {
+                    if let temporaryConversationID {
+                        _ = try? await self.resolvedClient().request(
+                            method: "thread/delete",
+                            params: .object(["threadId": .string(temporaryConversationID)])
+                        )
+                    }
+                    continuation.finish()
+                } catch {
+                    if let temporaryConversationID {
+                        _ = try? await self.resolvedClient().request(
+                            method: "thread/delete",
+                            params: .object(["threadId": .string(temporaryConversationID)])
+                        )
+                    }
                     continuation.finish(throwing: error)
                 }
             }

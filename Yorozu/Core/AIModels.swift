@@ -24,6 +24,7 @@ struct AIProviderCapabilities: OptionSet, Hashable, Sendable {
     static let cancellation = Self(rawValue: 1 << 9)
     static let citations = Self(rawValue: 1 << 10)
     static let reasoningEffort = Self(rawValue: 1 << 11)
+    static let translation = Self(rawValue: 1 << 12)
 }
 
 enum AIConversationListAuthority: Hashable, Sendable {
@@ -613,6 +614,15 @@ struct AIChatSendRequest: Sendable {
     }
 }
 
+/// A stateless request used by feature surfaces such as Translation.
+/// Unlike chat sends, it does not carry a conversation identifier.
+struct AITranslationRequest: Sendable {
+    let model: AIModel
+    let reasoningEffort: AIReasoningEffort?
+    let prompt: String
+    let clientRequestID: String
+}
+
 struct OpenAIRequestDiagnostics: Equatable, Sendable {
     let clientRequestID: String
     let serverRequestID: String?
@@ -743,6 +753,9 @@ protocol AIChatProvider: Sendable {
     func streamResponse(
         request: AIChatSendRequest
     ) -> AsyncThrowingStream<AIChatStreamEvent, Error>
+    func streamTranslation(
+        request: AITranslationRequest
+    ) -> AsyncThrowingStream<AIChatStreamEvent, Error>
     func stopGeneration(conversationID: String) async
     func deleteConversationCompletely(conversationID: String) async throws
     func shutdown() async
@@ -750,6 +763,14 @@ protocol AIChatProvider: Sendable {
 
 extension AIChatProvider {
     var policies: AIProviderPolicies { .localConversationIndex }
+
+    func streamTranslation(
+        request: AITranslationRequest
+    ) -> AsyncThrowingStream<AIChatStreamEvent, Error> {
+        AsyncThrowingStream { continuation in
+            continuation.finish(throwing: AIChatError.unsupportedOperation)
+        }
+    }
 
     func listConversations(
         request: AIConversationListRequest

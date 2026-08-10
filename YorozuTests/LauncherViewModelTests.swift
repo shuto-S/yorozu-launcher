@@ -85,6 +85,33 @@ final class LauncherViewModelTests: XCTestCase {
         }
     }
 
+    func testTranslationCompositionKeysPassThroughToTheInputMethod() {
+        for keyCode: UInt16 in [36, 76, 126, 125, 53, 48] {
+            XCTAssertEqual(
+                keyAction(
+                    keyCode: keyCode,
+                    hasMarkedText: true,
+                    route: .translation
+                ),
+                .passThrough,
+                "Expected translation keyCode \(keyCode) to reach the input method"
+            )
+        }
+
+        XCTAssertEqual(
+            keyAction(keyCode: 36, route: .translation),
+            .passThrough
+        )
+        XCTAssertEqual(
+            keyAction(keyCode: 126, route: .translation),
+            .passThrough
+        )
+        XCTAssertEqual(
+            keyAction(keyCode: 53, route: .translation),
+            .escape
+        )
+    }
+
     func testNonComposingPaletteKeysKeepTheirExistingActions() {
         XCTAssertEqual(
             keyAction(keyCode: 36),
@@ -1008,7 +1035,7 @@ final class LauncherViewModelTests: XCTestCase {
 
         fixture.viewModel.start()
         try await waitUntil {
-            fixture.viewModel.results.count == 6
+            fixture.viewModel.results.count == 7
                 && fixture.viewModel.installedApplications.count == 1
         }
 
@@ -1021,6 +1048,7 @@ final class LauncherViewModelTests: XCTestCase {
                 "Aliases",
                 "Clipboard History",
                 "Settings",
+                "Translate",
             ]
         )
 
@@ -1040,6 +1068,7 @@ final class LauncherViewModelTests: XCTestCase {
                 "Aliases",
                 "Clipboard History",
                 "Settings",
+                "Translate",
             ]
         )
     }
@@ -1048,7 +1077,7 @@ final class LauncherViewModelTests: XCTestCase {
         let fixture = try makeFixture(launcherShouldFail: false)
         fixture.viewModel.start()
         try await waitUntil {
-            fixture.viewModel.results.count == 6
+            fixture.viewModel.results.count == 7
                 && fixture.viewModel.installedApplications.count == 1
         }
         let firstResultID = try XCTUnwrap(fixture.viewModel.results.first?.id)
@@ -1066,6 +1095,37 @@ final class LauncherViewModelTests: XCTestCase {
         fixture.viewModel.prepareForPresentation(route: .root, origin: .direct)
 
         XCTAssertEqual(fixture.viewModel.selectedID, firstResultID)
+    }
+
+    func testTranslationPromptPreservesInputAndRequestsOnlyTranslation() {
+        let prompt = TranslationPromptBuilder.prompt(
+            input: "Hello\\nworld",
+            targetLanguage: "Japanese"
+        )
+
+        XCTAssertTrue(prompt.contains("to Japanese"))
+        XCTAssertTrue(prompt.contains("Hello\\nworld"))
+        XCTAssertTrue(prompt.contains("Return only the translation"))
+        XCTAssertTrue(prompt.contains("Preserve the original meaning, tone, line breaks"))
+    }
+
+    func testTranslationFeatureOpensDedicatedRouteAndResetsInput() async throws {
+        let fixture = try makeFixture(launcherShouldFail: false)
+        fixture.viewModel.start()
+        try await waitUntil {
+            fixture.viewModel.results.contains { $0.title == "Translate" }
+        }
+
+        fixture.viewModel.query = "Translate"
+        try await waitUntil {
+            fixture.viewModel.results.map(\.title) == ["Translate"]
+        }
+
+        fixture.viewModel.performPrimaryAction()
+
+        XCTAssertEqual(fixture.viewModel.route, .translation)
+        XCTAssertTrue(fixture.viewModel.translationViewModel.inputText.isEmpty)
+        XCTAssertTrue(fixture.viewModel.translationViewModel.outputText.isEmpty)
     }
 
     func testRootActionPanelOpensAliasesEditorForSelectedApplication() async throws {

@@ -333,7 +333,7 @@ actor OpenAIAPIProvider: AIChatProvider, OpenAIAPIKeyManaging {
         symbolName: "sparkles",
         capabilities: [
             .authentication, .modelSelection, .streaming, .attachments,
-            .webSearch, .archive, .deletion, .citations,
+            .webSearch, .archive, .deletion, .citations, .translation,
         ]
     )
     nonisolated let policies = AIProviderPolicies.localConversationIndex
@@ -438,6 +438,22 @@ actor OpenAIAPIProvider: AIChatProvider, OpenAIAPIKeyManaging {
             }
             continuation.onTermination = { _ in task.cancel() }
         }
+    }
+
+    nonisolated func streamTranslation(
+        request: AITranslationRequest
+    ) -> AsyncThrowingStream<AIChatStreamEvent, Error> {
+        streamResponse(
+            request: AIChatSendRequest(
+                conversationID: "",
+                model: request.model,
+                reasoningEffort: request.reasoningEffort,
+                prompt: request.prompt,
+                attachments: [],
+                enablesWebSearch: false,
+                clientRequestID: request.clientRequestID
+            )
+        )
     }
 
     func stopGeneration(conversationID: String) async {}
@@ -843,7 +859,6 @@ actor OpenAIChatClient: OpenAIChatServing {
         }
         var body: [String: Any] = [
             "model": request.model.rawValue,
-            "conversation": request.conversationID,
             "input": [
                 [
                     "role": "user",
@@ -851,8 +866,14 @@ actor OpenAIChatClient: OpenAIChatServing {
                 ],
             ],
             "stream": true,
-            "store": true,
+            "store": !request.conversationID.isEmpty,
         ]
+        if !request.conversationID.isEmpty {
+            body["conversation"] = request.conversationID
+        }
+        if let reasoningEffort = request.reasoningEffort {
+            body["reasoning"] = ["effort": reasoningEffort.rawValue]
+        }
         if request.enablesWebSearch {
             body["tools"] = [["type": "web_search"]]
             body["include"] = ["web_search_call.action.sources"]

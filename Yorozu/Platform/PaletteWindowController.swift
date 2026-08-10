@@ -1,4 +1,5 @@
 import AppKit
+import ApplicationServices
 import SwiftUI
 
 struct AccessibilityDisplayOverrides: Equatable {
@@ -93,6 +94,10 @@ enum PaletteKeyEventPolicy {
         }
 
         if route == .settings {
+            return keyCode == 53 ? .escape : .passThrough
+        }
+
+        if route == .translation {
             return keyCode == 53 ? .escape : .passThrough
         }
 
@@ -318,7 +323,22 @@ final class PaletteWindowController: NSWindowController, NSWindowDelegate {
         }
 
         position(window: panel)
-        viewModel.prepareForPresentation(route: route, origin: origin)
+        let selectedText: String?
+        let selectedTextPermissionUnavailable: Bool
+        if route == .translation {
+            selectedText = accessibilitySelectedText(from: previousApplication)
+            selectedTextPermissionUnavailable = previousApplication != nil
+                && !AXIsProcessTrusted()
+        } else {
+            selectedText = nil
+            selectedTextPermissionUnavailable = false
+        }
+        viewModel.prepareForPresentation(
+            route: route,
+            origin: origin,
+            selectedText: selectedText,
+            selectedTextPermissionUnavailable: selectedTextPermissionUnavailable
+        )
         NSApp.activate(ignoringOtherApps: true)
         panel.makeKeyAndOrderFront(nil)
         Task { @MainActor [weak self] in
@@ -511,6 +531,14 @@ final class PaletteWindowController: NSWindowController, NSWindowDelegate {
     }
 
     private func bindViewModel() {
+        viewModel.selectedTextForTranslation = { [weak self] in
+            guard let self else { return nil }
+            return self.accessibilitySelectedText(from: self.previousApplication)
+        }
+        viewModel.selectedTextPermissionUnavailableForTranslation = { [weak self] in
+            guard let self else { return false }
+            return self.previousApplication != nil && !AXIsProcessTrusted()
+        }
         viewModel.dismissForLaunch = { [weak self] in
             self?.hide(restorePreviousApplication: false)
         }
@@ -554,6 +582,39 @@ final class PaletteWindowController: NSWindowController, NSWindowDelegate {
                 }
             )
         }
+    }
+
+    private func accessibilitySelectedText(
+        from application: NSRunningApplication?
+    ) -> String? {
+        guard let application,
+              application.processIdentifier != ProcessInfo.processInfo.processIdentifier,
+              AXIsProcessTrusted() else {
+            return nil
+        }
+        let appElement = AXUIElementCreateApplication(application.processIdentifier)
+        var focusedValue: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(
+            appElement,
+            kAXFocusedUIElementAttribute as CFString,
+            &focusedValue
+        ) == .success,
+        let focusedValue,
+        CFGetTypeID(focusedValue) == AXUIElementGetTypeID() else {
+            return nil
+        }
+        let focusedElement = focusedValue as! AXUIElement
+        var selectedValue: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(
+            focusedElement,
+            kAXSelectedTextAttribute as CFString,
+            &selectedValue
+        ) == .success,
+        let selectedText = selectedValue as? String else {
+            return nil
+        }
+        let trimmed = selectedText.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : selectedText
     }
 
     @objc
@@ -638,6 +699,11 @@ final class PaletteWindowController: NSWindowController, NSWindowDelegate {
         _ event: NSEvent,
         modifiers: NSEvent.ModifierFlags
     ) -> Bool {
+        if viewModel.route == .translation,
+           (event.keyCode == 36 || event.keyCode == 76) {
+            viewModel.translationViewModel.translate()
+            return true
+        }
         switch event.keyCode {
         case 40:
             viewModel.showActionMenu()

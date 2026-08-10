@@ -300,9 +300,12 @@ private actor UITestAIChatProvider: AIChatProvider {
             capabilities: providerID == .codex
                 ? [
                     .authentication, .modelSelection, .reasoningEffort,
-                    .streaming, .archive, .deletion,
+                    .streaming, .archive, .deletion, .translation,
                 ]
-                : [.authentication, .modelSelection, .streaming, .archive, .deletion]
+                : [
+                    .authentication, .modelSelection, .streaming,
+                    .archive, .deletion, .translation,
+                ]
         )
     }
 
@@ -372,6 +375,16 @@ private actor UITestAIChatProvider: AIChatProvider {
     ) -> AsyncThrowingStream<AIChatStreamEvent, Error> {
         UITestOpenAIChatService().streamResponse(apiKey: "ui-test-key", request: request)
     }
+    nonisolated func streamTranslation(
+        request: AITranslationRequest
+    ) -> AsyncThrowingStream<AIChatStreamEvent, Error> {
+        AsyncThrowingStream { continuation in
+            continuation.yield(.responseCreated("ui-translation"))
+            continuation.yield(.textDelta("UI test translation"))
+            continuation.yield(.completed)
+            continuation.finish()
+        }
+    }
     func stopGeneration(conversationID: String) async {}
     func deleteConversationCompletely(conversationID: String) async throws {}
     func shutdown() async {}
@@ -423,6 +436,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private lazy var openAIAIChatPreferences = AIChatPreferences(
         defaults: environment.defaults,
         providerID: .openAIAPI
+    )
+    private lazy var translationPreferences = TranslationPreferences(
+        defaults: environment.defaults
     )
     private lazy var aiCredentials: any OpenAICredentialStoring = {
         let usesLiveAIIntegration = environment.usesLiveAIIntegration
@@ -490,6 +506,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             usesIsolatedStorage: environment.isolatesShortcutSettings
         ),
         aiChatViewModelStore: aiChatViewModelStore,
+        translationPreferences: translationPreferences,
         launcher: environment.launcher,
         storageRecoveryNotice: storeOpenResult.recoveryNotice
     )
