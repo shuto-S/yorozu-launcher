@@ -382,6 +382,11 @@ final class AIChatViewModel {
         }
     }
 
+    func paletteDidBecomeVisible() {
+        guard !isListVisible else { return }
+        scrollToLatestRequest &+= 1
+    }
+
     func shutdown() {
         loadTask?.cancel()
         loadTask = nil

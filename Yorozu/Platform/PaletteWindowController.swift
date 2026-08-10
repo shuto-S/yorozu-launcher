@@ -321,6 +321,10 @@ final class PaletteWindowController: NSWindowController, NSWindowDelegate {
         viewModel.prepareForPresentation(route: route, origin: origin)
         NSApp.activate(ignoringOtherApps: true)
         panel.makeKeyAndOrderFront(nil)
+        Task { @MainActor [weak self] in
+            await Task.yield()
+            self?.viewModel.paletteDidBecomeVisible()
+        }
         LauncherPerformanceTrace.duration(
             "panel_ordered_front",
             startedAt: startedAt

@@ -965,6 +965,34 @@ final class AIChatViewModelTests: XCTestCase {
         )
     }
 
+    func testPaletteDidBecomeVisibleRequestsLatestOnlyForConversation() async {
+        let conversation = makeConversation(title: "Latest conversation")
+        let viewModel = makeViewModel(
+            service: AIChatTestService(),
+            conversations: [conversation]
+        )
+        viewModel.prepareForPresentation()
+        await waitUntil { viewModel.visibleConversations.count == 1 }
+        let requestWhileListIsVisible = viewModel.scrollToLatestRequest
+
+        viewModel.paletteDidBecomeVisible()
+
+        XCTAssertEqual(
+            viewModel.scrollToLatestRequest,
+            requestWhileListIsVisible
+        )
+
+        viewModel.openConversation(id: conversation.id)
+        let requestAfterOpening = viewModel.scrollToLatestRequest
+
+        viewModel.paletteDidBecomeVisible()
+
+        XCTAssertEqual(
+            viewModel.scrollToLatestRequest,
+            requestAfterOpening + 1
+        )
+    }
+
     func testNewChatDoesNotCreateServerConversationUntilFirstSend() async throws {
         let service = AIChatTestService()
         let viewModel = makeViewModel(service: service)

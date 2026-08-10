@@ -1579,6 +1579,11 @@ final class LauncherViewModel {
         urlPreviewService.cancel(resetState: true)
     }
 
+    func paletteDidBecomeVisible() {
+        guard route.isAI else { return }
+        aiChatViewModel.paletteDidBecomeVisible()
+    }
+
     private func beginEditingAlias(for application: LaunchableApplication) {
         aliasEditorMode = .editing(application.id)
         aliasDraft = application.preference.alias ?? ""

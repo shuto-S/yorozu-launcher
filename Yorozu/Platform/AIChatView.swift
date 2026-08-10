@@ -413,11 +413,19 @@ private struct AIConversationMessages: View {
             }
             .onChange(of: viewModel.scrollToLatestRequest) {
                 scrollState.resetToLatest()
-                scheduleAutoScroll(using: proxy, delay: .milliseconds(50))
+                scheduleAutoScroll(
+                    using: proxy,
+                    delay: .milliseconds(20),
+                    retryDelays: [.milliseconds(60), .milliseconds(140)]
+                )
             }
             .onAppear {
                 scrollState.resetToLatest()
-                scheduleAutoScroll(using: proxy, delay: .milliseconds(50))
+                scheduleAutoScroll(
+                    using: proxy,
+                    delay: .milliseconds(20),
+                    retryDelays: [.milliseconds(60), .milliseconds(140)]
+                )
             }
             .onDisappear {
                 autoScrollTask?.cancel()
@@ -428,7 +436,8 @@ private struct AIConversationMessages: View {
 
     private func scheduleAutoScroll(
         using proxy: ScrollViewProxy,
-        delay: Duration = .milliseconds(16)
+        delay: Duration = .milliseconds(16),
+        retryDelays: [Duration] = []
     ) {
         guard scrollState.shouldFollowLatest,
               !scrollState.isUserInteracting else {
@@ -436,22 +445,21 @@ private struct AIConversationMessages: View {
         }
         autoScrollTask?.cancel()
         autoScrollTask = Task { @MainActor in
-            try? await Task.sleep(for: delay)
-            guard !Task.isCancelled else {
-                autoScrollTask = nil
-                return
+            for currentDelay in [delay] + retryDelays {
+                try? await Task.sleep(for: currentDelay)
+                guard !Task.isCancelled,
+                      scrollState.shouldFollowLatest,
+                      !scrollState.isUserInteracting else {
+                    autoScrollTask = nil
+                    return
+                }
+                var transaction = Transaction()
+                transaction.disablesAnimations = true
+                withTransaction(transaction) {
+                    proxy.scrollTo("latest", anchor: .bottom)
+                }
+                scrollState.didScrollToLatest()
             }
-            guard scrollState.shouldFollowLatest,
-                  !scrollState.isUserInteracting else {
-                autoScrollTask = nil
-                return
-            }
-            var transaction = Transaction()
-            transaction.disablesAnimations = true
-            withTransaction(transaction) {
-                proxy.scrollTo("latest", anchor: .bottom)
-            }
-            scrollState.didScrollToLatest()
             autoScrollTask = nil
         }
     }
