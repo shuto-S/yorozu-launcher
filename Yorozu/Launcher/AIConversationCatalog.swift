@@ -162,13 +162,19 @@ actor AIConversationCatalog {
     private func mergingLocalModelIfNeeded(
         _ incoming: AIConversationSummary
     ) -> AIConversationSummary {
-        guard !incoming.isModelAuthoritative,
+        guard (!incoming.isModelAuthoritative || !incoming.isReasoningEffortAuthoritative),
               let existing = conversations.first(where: { $0.id == incoming.id }) else {
             return incoming
         }
         var merged = incoming
-        merged.model = existing.model
-        merged.isModelAuthoritative = existing.isModelAuthoritative
+        if !incoming.isModelAuthoritative {
+            merged.model = existing.model
+            merged.isModelAuthoritative = existing.isModelAuthoritative
+        }
+        if !incoming.isReasoningEffortAuthoritative {
+            merged.reasoningEffort = existing.reasoningEffort
+            merged.isReasoningEffortAuthoritative = existing.isReasoningEffortAuthoritative
+        }
         return merged
     }
 

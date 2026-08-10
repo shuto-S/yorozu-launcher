@@ -23,6 +23,7 @@ struct AIProviderCapabilities: OptionSet, Hashable, Sendable {
     static let providerConversationListing = Self(rawValue: 1 << 8)
     static let cancellation = Self(rawValue: 1 << 9)
     static let citations = Self(rawValue: 1 << 10)
+    static let reasoningEffort = Self(rawValue: 1 << 11)
 }
 
 enum AIConversationListAuthority: Hashable, Sendable {
@@ -99,6 +100,8 @@ struct AIModel: Hashable, Codable, Identifiable, Sendable {
     let title: String
     let detail: String
     let isDefault: Bool
+    let supportedReasoningEfforts: [AIReasoningEffort]
+    let defaultReasoningEffort: AIReasoningEffort?
 
     var id: String { rawValue }
 
@@ -106,7 +109,9 @@ struct AIModel: Hashable, Codable, Identifiable, Sendable {
         rawValue: String,
         title: String? = nil,
         detail: String? = nil,
-        isDefault: Bool? = nil
+        isDefault: Bool? = nil,
+        supportedReasoningEfforts: [AIReasoningEffort] = [],
+        defaultReasoningEffort: AIReasoningEffort? = nil
     ) {
         self.rawValue = rawValue
         self.title = title ?? Self.knownTitle(for: rawValue) ?? rawValue
@@ -114,6 +119,8 @@ struct AIModel: Hashable, Codable, Identifiable, Sendable {
         self.isDefault = isDefault
             ?? Self.openAIModels.first(where: { $0.rawValue == rawValue })?.isDefault
             ?? false
+        self.supportedReasoningEfforts = supportedReasoningEfforts
+        self.defaultReasoningEffort = defaultReasoningEffort
     }
 
     init(from decoder: Decoder) throws {
@@ -128,6 +135,14 @@ struct AIModel: Hashable, Codable, Identifiable, Sendable {
     func encode(to encoder: Encoder) throws {
         var container = encoder.singleValueContainer()
         try container.encode(rawValue)
+    }
+
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.rawValue == rhs.rawValue
+    }
+
+    func hash(into hasher: inout Hasher) {
+        hasher.combine(rawValue)
     }
 
     static let terra = AIModel(
@@ -159,6 +174,59 @@ struct AIModel: Hashable, Codable, Identifiable, Sendable {
     }
 }
 
+struct AIReasoningEffort: Hashable, Codable, Identifiable, Sendable {
+    let rawValue: String
+    let title: String
+    let detail: String
+
+    var id: String { rawValue }
+
+    init(
+        rawValue: String,
+        title: String? = nil,
+        detail: String = ""
+    ) {
+        self.rawValue = rawValue
+        self.title = title ?? Self.title(for: rawValue)
+        self.detail = detail
+    }
+
+    init(from decoder: Decoder) throws {
+        self.init(rawValue: try decoder.singleValueContainer().decode(String.self))
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        try container.encode(rawValue)
+    }
+
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.rawValue == rhs.rawValue
+    }
+
+    func hash(into hasher: inout Hasher) {
+        hasher.combine(rawValue)
+    }
+
+    private static func title(for rawValue: String) -> String {
+        switch rawValue.lowercased() {
+        case "none": "None"
+        case "minimal": "Minimal"
+        case "low": "Low"
+        case "medium": "Medium"
+        case "high": "High"
+        case "xhigh": "Extra High"
+        case "max": "Max"
+        case "ultra": "Ultra"
+        default:
+            rawValue
+                .replacingOccurrences(of: "_", with: " ")
+                .replacingOccurrences(of: "-", with: " ")
+                .capitalized
+        }
+    }
+}
+
 enum AICredentialStatus: Equatable, Sendable {
     case checking
     case saved
@@ -177,6 +245,8 @@ struct AIConversationSummary: Identifiable, Hashable, Sendable {
     var title: String
     var model: AIModel
     var isModelAuthoritative = true
+    var reasoningEffort: AIReasoningEffort? = nil
+    var isReasoningEffortAuthoritative = true
     var isArchived: Bool
     var deletionState: AIConversationDeletionState?
     let createdAt: Date
@@ -518,10 +588,29 @@ struct AIUploadedAttachment: Hashable, Sendable {
 struct AIChatSendRequest: Sendable {
     let conversationID: String
     let model: AIModel
+    let reasoningEffort: AIReasoningEffort?
     let prompt: String
     let attachments: [AIUploadedAttachment]
     let enablesWebSearch: Bool
     let clientRequestID: String
+
+    init(
+        conversationID: String,
+        model: AIModel,
+        reasoningEffort: AIReasoningEffort? = nil,
+        prompt: String,
+        attachments: [AIUploadedAttachment],
+        enablesWebSearch: Bool,
+        clientRequestID: String
+    ) {
+        self.conversationID = conversationID
+        self.model = model
+        self.reasoningEffort = reasoningEffort
+        self.prompt = prompt
+        self.attachments = attachments
+        self.enablesWebSearch = enablesWebSearch
+        self.clientRequestID = clientRequestID
+    }
 }
 
 struct OpenAIRequestDiagnostics: Equatable, Sendable {

@@ -633,15 +633,17 @@ actor LauncherStore {
                         provider_conversation_id,
                         title,
                         model_id,
+                        reasoning_effort,
                         is_archived,
                         deletion_state,
                         created_at,
                         last_message_at,
                         updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(provider_id, provider_conversation_id) DO UPDATE SET
                         title = excluded.title,
                         model_id = excluded.model_id,
+                        reasoning_effort = excluded.reasoning_effort,
                         is_archived = excluded.is_archived,
                         deletion_state = excluded.deletion_state,
                         last_message_at = excluded.last_message_at,
@@ -652,6 +654,7 @@ actor LauncherStore {
                     conversation.providerConversationID,
                     conversation.title,
                     conversation.model.rawValue,
+                    conversation.reasoningEffort?.rawValue,
                     conversation.isArchived,
                     conversation.deletionState?.rawValue,
                     conversation.createdAt.timeIntervalSince1970,
@@ -700,15 +703,17 @@ actor LauncherStore {
                             provider_conversation_id,
                             title,
                             model_id,
+                            reasoning_effort,
                             is_archived,
                             deletion_state,
                             created_at,
                             last_message_at,
                             updated_at
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         ON CONFLICT(provider_id, provider_conversation_id) DO UPDATE SET
                             title = excluded.title,
                             model_id = excluded.model_id,
+                            reasoning_effort = excluded.reasoning_effort,
                             is_archived = excluded.is_archived,
                             deletion_state = excluded.deletion_state,
                             last_message_at = excluded.last_message_at,
@@ -719,6 +724,7 @@ actor LauncherStore {
                         conversation.providerConversationID,
                         conversation.title,
                         conversation.model.rawValue,
+                        conversation.reasoningEffort?.rawValue,
                         conversation.isArchived,
                         conversation.deletionState?.rawValue,
                         conversation.createdAt.timeIntervalSince1970,
@@ -906,6 +912,14 @@ actor LauncherStore {
                     """
             )
         }
+        migrator.registerMigration("v9_ai_reasoning_effort") { database in
+            try database.execute(
+                sql: """
+                    ALTER TABLE ai_conversation_index
+                    ADD COLUMN reasoning_effort TEXT;
+                    """
+            )
+        }
         return migrator
     }
 
@@ -914,6 +928,7 @@ actor LauncherStore {
     ) throws -> AIConversationSummary {
         let rawModel: String = row["model_id"]
         let rawProviderID: String = row["provider_id"]
+        let rawReasoningEffort: String? = row["reasoning_effort"]
         let rawDeletionState: String? = row["deletion_state"]
         let deletionState: AIConversationDeletionState?
         if let rawDeletionState {
@@ -935,6 +950,9 @@ actor LauncherStore {
             providerConversationID: row["provider_conversation_id"],
             title: row["title"],
             model: AIModel(rawValue: rawModel),
+            reasoningEffort: rawReasoningEffort.map {
+                AIReasoningEffort(rawValue: $0)
+            },
             isArchived: row["is_archived"],
             deletionState: deletionState,
             createdAt: Date(timeIntervalSince1970: createdAt),

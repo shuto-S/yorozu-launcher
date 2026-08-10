@@ -147,11 +147,11 @@ private struct AISettingsView: View {
         .accessibilityIdentifier("settings.detail.ai")
         .onAppear {
             normalizeProviderSelection()
-            selectedViewModel?.loadCredentialStatus()
+            refreshSelectedProvider()
         }
         .onChange(of: selectedProviderID) { _, providerID in
-            guard let providerID else { return }
-            launcherViewModel.aiChatViewModel(for: providerID)?.loadCredentialStatus()
+            guard providerID != nil else { return }
+            refreshSelectedProvider()
         }
         .onChange(of: providerIDs) {
             normalizeProviderSelection()
@@ -239,6 +239,15 @@ private struct AISettingsView: View {
         selectedProviderID = launcherViewModel.resolvedAISettingsProviderID(
             preferred: selectedProviderID
         )
+    }
+
+    private func refreshSelectedProvider() {
+        guard let selectedViewModel else { return }
+        selectedViewModel.loadCredentialStatus()
+        guard selectedViewModel.providerID == .codex else { return }
+        Task {
+            await selectedViewModel.loadModelMetadataForSettings()
+        }
     }
 }
 
@@ -366,6 +375,24 @@ private struct AIProviderSettingsDetailView: View {
                         Text(model.title).tag(model)
                     }
                 }
+                .accessibilityLabel("Model")
+            }
+            if viewModel.providerDescriptor.capabilities.contains(.reasoningEffort),
+               !viewModel.defaultModelReasoningEfforts.isEmpty {
+                Picker(
+                    "Reasoning",
+                    selection: viewModel.reasoningPreferenceBinding
+                ) {
+                    Text("Model Default")
+                        .tag(Optional<AIReasoningEffort>.none)
+                    ForEach(viewModel.defaultModelReasoningEfforts) { effort in
+                        Text(effort.title).tag(Optional(effort))
+                    }
+                }
+                .accessibilityLabel("Reasoning")
+                Text("Used when starting a new chat. Model Default follows the selected model’s recommendation.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
             if viewModel.providerDescriptor.capabilities.contains(.webSearch) {
                 Toggle(
@@ -379,6 +406,7 @@ private struct AIProviderSettingsDetailView: View {
     private var showsChatDefaults: Bool {
         let capabilities = viewModel.providerDescriptor.capabilities
         return capabilities.contains(.webSearch)
+            || capabilities.contains(.reasoningEffort)
             || (capabilities.contains(.modelSelection) && !viewModel.availableModels.isEmpty)
     }
 

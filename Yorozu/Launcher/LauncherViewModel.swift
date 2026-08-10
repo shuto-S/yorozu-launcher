@@ -20,6 +20,7 @@ enum LauncherActionID: String, CaseIterable, Identifiable {
     case aiOpenInCodex
     case aiNewChat
     case aiChangeModel
+    case aiChangeReasoning
     case aiModelTerra
     case aiModelSol
     case aiModelLuna
@@ -30,6 +31,16 @@ enum LauncherActionID: String, CaseIterable, Identifiable {
     case aiModel8
     case aiModel9
     case aiModel10
+    case aiReasoning1
+    case aiReasoning2
+    case aiReasoning3
+    case aiReasoning4
+    case aiReasoning5
+    case aiReasoning6
+    case aiReasoning7
+    case aiReasoning8
+    case aiReasoning9
+    case aiReasoning10
     case aiToggleWebSearch
     case aiAttachFiles
     case aiArchive
@@ -1315,7 +1326,7 @@ final class LauncherViewModel {
                 return
             }
             aiChatViewModel.performAction(action)
-            if action == .aiChangeModel {
+            if action == .aiChangeModel || action == .aiChangeReasoning {
                 actionQuery = ""
                 selectedActionID = filteredActionItems.first?.id
             } else {
@@ -1352,9 +1363,13 @@ final class LauncherViewModel {
         case .delete:
             dismissActionPanel()
             requestDeleteSelected()
-        case .aiOpenChat, .aiOpenInCodex, .aiNewChat, .aiChangeModel, .aiModelTerra,
+        case .aiOpenChat, .aiOpenInCodex, .aiNewChat, .aiChangeModel,
+             .aiChangeReasoning, .aiModelTerra,
              .aiModelSol, .aiModelLuna, .aiModel4, .aiModel5, .aiModel6,
              .aiModel7, .aiModel8, .aiModel9, .aiModel10,
+             .aiReasoning1, .aiReasoning2, .aiReasoning3, .aiReasoning4,
+             .aiReasoning5, .aiReasoning6, .aiReasoning7, .aiReasoning8,
+             .aiReasoning9, .aiReasoning10,
              .aiToggleWebSearch, .aiAttachFiles,
              .aiArchive, .aiDelete, .aiToggleArchiveScope,
              .aiCopyLastResponse, .aiStopGenerating:

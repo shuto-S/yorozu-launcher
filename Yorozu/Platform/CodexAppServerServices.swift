@@ -456,7 +456,7 @@ actor CodexAIProvider: AIChatProvider, CodexAuthenticationManaging {
         capabilities: [
             .authentication, .modelSelection, .streaming, .archive,
             .deletion, .rateLimitStatus, .providerConversationListing,
-            .cancellation,
+            .cancellation, .reasoningEffort,
         ]
     )
     nonisolated let policies = AIProviderPolicies.providerConversationIndex
@@ -523,11 +523,28 @@ actor CodexAIProvider: AIChatProvider, CodexAuthenticationManaging {
             models.append(contentsOf: page.compactMap { value in
                 guard let id = value["model"]?.stringValue
                     ?? value["id"]?.stringValue else { return nil }
+                let reasoningEfforts = (value["supportedReasoningEfforts"]?.arrayValue ?? [])
+                    .compactMap { option -> AIReasoningEffort? in
+                        guard let rawValue = option["reasoningEffort"]?.stringValue,
+                              !rawValue.isEmpty else { return nil }
+                        return AIReasoningEffort(
+                            rawValue: rawValue,
+                            detail: option["description"]?.stringValue ?? ""
+                        )
+                    }
+                let defaultReasoningEffort = value["defaultReasoningEffort"]?
+                    .stringValue
+                    .map { rawValue in
+                        reasoningEfforts.first(where: { $0.rawValue == rawValue })
+                            ?? AIReasoningEffort(rawValue: rawValue)
+                    }
                 return AIModel(
                     rawValue: id,
                     title: value["displayName"]?.stringValue ?? id,
                     detail: value["description"]?.stringValue ?? "",
-                    isDefault: value["isDefault"]?.boolValue ?? false
+                    isDefault: value["isDefault"]?.boolValue ?? false,
+                    supportedReasoningEfforts: reasoningEfforts,
+                    defaultReasoningEffort: defaultReasoningEffort
                 )
             })
             cursor = result["nextCursor"]?.stringValue
@@ -792,18 +809,22 @@ actor CodexAIProvider: AIChatProvider, CodexAuthenticationManaging {
                 "sandbox": .string("read-only"),
             ])
         )
+        var turnParameters: [String: CodexJSONValue] = [
+            "threadId": .string(request.conversationID),
+            "model": .string(request.model.rawValue),
+            "input": .array([
+                .object([
+                    "type": .string("text"),
+                    "text": .string(request.prompt),
+                ]),
+            ]),
+        ]
+        if let reasoningEffort = request.reasoningEffort {
+            turnParameters["effort"] = .string(reasoningEffort.rawValue)
+        }
         let result = try await client.request(
             method: "turn/start",
-            params: .object([
-                "threadId": .string(request.conversationID),
-                "model": .string(request.model.rawValue),
-                "input": .array([
-                    .object([
-                        "type": .string("text"),
-                        "text": .string(request.prompt),
-                    ]),
-                ]),
-            ])
+            params: .object(turnParameters)
         )
         guard let turnID = result["turn"]?["id"]?.stringValue else {
             throw AIChatError.protocolError
@@ -913,6 +934,7 @@ actor CodexAIProvider: AIChatProvider, CodexAuthenticationManaging {
             title: String(rawTitle.prefix(60)),
             model: AIModel(rawValue: reportedModelID ?? "codex-default"),
             isModelAuthoritative: reportedModelID != nil,
+            isReasoningEffortAuthoritative: false,
             isArchived: archived,
             deletionState: nil,
             createdAt: createdAt,

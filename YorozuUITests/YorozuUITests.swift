@@ -150,6 +150,13 @@ final class YorozuUITests: XCTestCase {
         )
         XCTAssertTrue(application.staticTexts["Connection"].exists)
         XCTAssertTrue(application.staticTexts["Chat Defaults"].exists)
+        let providerForm = application.scrollViews.element(boundBy: 1)
+        XCTAssertTrue(providerForm.exists)
+        providerForm.swipeUp()
+        XCTAssertTrue(
+            application.popUpButtons["Reasoning"]
+                .waitForExistence(timeout: 2)
+        )
         XCTAssertTrue(application.staticTexts["Data and Billing"].exists)
 
         let openAITab = application.radioButtons["settings.ai.provider.openai_api"]

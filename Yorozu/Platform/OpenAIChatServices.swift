@@ -131,6 +131,16 @@ final class AIChatPreferences: ObservableObject {
             )
         }
     }
+    @Published var defaultReasoningEffort: AIReasoningEffort? {
+        didSet {
+            let key = Keys.defaultReasoningEffort(providerID)
+            if let defaultReasoningEffort {
+                defaults.set(defaultReasoningEffort.rawValue, forKey: key)
+            } else {
+                defaults.removeObject(forKey: key)
+            }
+        }
+    }
 
     private let defaults: UserDefaults
 
@@ -147,6 +157,9 @@ final class AIChatPreferences: ObservableObject {
         defaultModel = (defaults.string(forKey: modelKey) ?? legacyModel)
             .map { AIModel(rawValue: $0) }
             ?? .terra
+        defaultReasoningEffort = defaults
+            .string(forKey: Keys.defaultReasoningEffort(providerID))
+            .map { AIReasoningEffort(rawValue: $0) }
         let webKey = Keys.webSearch(providerID)
         enablesWebSearchByDefault = defaults.object(forKey: webKey) != nil
             ? defaults.bool(forKey: webKey)
@@ -159,6 +172,9 @@ final class AIChatPreferences: ObservableObject {
         }
         static func webSearch(_ providerID: AIProviderID) -> String {
             "ai.\(providerID.rawValue).webSearchByDefault"
+        }
+        static func defaultReasoningEffort(_ providerID: AIProviderID) -> String {
+            "ai.\(providerID.rawValue).defaultReasoningEffort"
         }
     }
 

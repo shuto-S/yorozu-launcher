@@ -297,7 +297,12 @@ private actor UITestAIChatProvider: AIChatProvider {
                 : "AI Chat: OpenAI",
             description: "UI test provider",
             symbolName: providerID == .codex ? "terminal" : "sparkles",
-            capabilities: [.authentication, .modelSelection, .streaming, .archive, .deletion]
+            capabilities: providerID == .codex
+                ? [
+                    .authentication, .modelSelection, .reasoningEffort,
+                    .streaming, .archive, .deletion,
+                ]
+                : [.authentication, .modelSelection, .streaming, .archive, .deletion]
         )
     }
 
@@ -305,7 +310,22 @@ private actor UITestAIChatProvider: AIChatProvider {
     func authenticationState() -> AIAuthenticationState {
         .authenticated(detail: "Test account")
     }
-    func availableModels() -> [AIModel] { AIModel.openAIModels }
+    func availableModels() -> [AIModel] {
+        guard descriptor.id == .codex else { return AIModel.openAIModels }
+        let efforts = ["low", "medium", "high"].map {
+            AIReasoningEffort(rawValue: $0)
+        }
+        return [
+            AIModel(
+                rawValue: "codex-ui-model",
+                title: "Codex UI Model",
+                detail: "UI test model",
+                isDefault: true,
+                supportedReasoningEfforts: efforts,
+                defaultReasoningEffort: efforts[1]
+            ),
+        ]
+    }
     func createConversation(title: String, model: AIModel) async throws -> String {
         try await service.createConversation(apiKey: "ui-test-key", title: title, model: model)
     }

@@ -159,6 +159,11 @@ final class AIChatStorageTests: XCTestCase {
         XCTAssertEqual(authenticationState, .authenticated(detail: "ChatGPT plus"))
         let models = try await provider.availableModels()
         XCTAssertEqual(models.map(\.rawValue), ["codex-test-model"])
+        XCTAssertEqual(models.first?.defaultReasoningEffort?.rawValue, "medium")
+        XCTAssertEqual(
+            models.first?.supportedReasoningEfforts.map(\.rawValue),
+            ["low", "medium", "high"]
+        )
         let conversationID = try await provider.createConversation(
             title: "Test",
             model: try XCTUnwrap(models.first)
@@ -331,6 +336,7 @@ final class AIChatStorageTests: XCTestCase {
         let request = AIChatSendRequest(
             conversationID: "thread-test",
             model: AIModel(rawValue: "codex-test-model"),
+            reasoningEffort: AIReasoningEffort(rawValue: "high"),
             prompt: "Hello",
             attachments: [],
             enablesWebSearch: false,
@@ -355,6 +361,8 @@ final class AIChatStorageTests: XCTestCase {
         let resumeParams = await server.params(for: "thread/resume")
         XCTAssertEqual(resumeParams?["approvalPolicy"]?.stringValue, "never")
         XCTAssertEqual(resumeParams?["sandbox"]?.stringValue, "read-only")
+        let turnParams = await server.params(for: "turn/start")
+        XCTAssertEqual(turnParams?["effort"]?.stringValue, "high")
 
         await server.setCompletesTurns(false)
         let task = Task {
@@ -374,6 +382,7 @@ final class AIChatStorageTests: XCTestCase {
             id: "conv-roundtrip",
             title: "A private title",
             model: .sol,
+            reasoningEffort: AIReasoningEffort(rawValue: "high"),
             isArchived: true,
             deletionState: .failed,
             lastMessageAt: Date(timeIntervalSince1970: 200)
@@ -467,6 +476,7 @@ final class AIChatStorageTests: XCTestCase {
             title: "Local",
             providerID: .codex,
             model: .sol,
+            reasoningEffort: AIReasoningEffort(rawValue: "high"),
             lastMessageAt: Date(timeIntervalSince1970: 100)
         )
         let providerValue = makeConversation(
@@ -475,6 +485,7 @@ final class AIChatStorageTests: XCTestCase {
             providerID: .codex,
             model: AIModel(rawValue: "codex-default"),
             isModelAuthoritative: false,
+            isReasoningEffortAuthoritative: false,
             lastMessageAt: Date(timeIntervalSince1970: 200)
         )
         let catalog = AIConversationCatalog(
@@ -492,7 +503,9 @@ final class AIChatStorageTests: XCTestCase {
         let refreshed = await coordinator.search(query: "", scope: .active)
         XCTAssertEqual(refreshed.first?.title, "Provider")
         XCTAssertEqual(refreshed.first?.model, .sol)
+        XCTAssertEqual(refreshed.first?.reasoningEffort?.rawValue, "high")
         XCTAssertTrue(refreshed.first?.isModelAuthoritative == true)
+        XCTAssertTrue(refreshed.first?.isReasoningEffortAuthoritative == true)
     }
 
     func testProviderRefreshPreservesPersistedModelAfterCatalogReload() async throws {
@@ -913,7 +926,9 @@ final class AIChatStorageTests: XCTestCase {
         title: String,
         providerID: AIProviderID = .openAIAPI,
         model: AIModel = .terra,
+        reasoningEffort: AIReasoningEffort? = nil,
         isModelAuthoritative: Bool = true,
+        isReasoningEffortAuthoritative: Bool = true,
         isArchived: Bool = false,
         deletionState: AIConversationDeletionState? = nil,
         lastMessageAt: Date
@@ -924,6 +939,8 @@ final class AIChatStorageTests: XCTestCase {
             title: title,
             model: model,
             isModelAuthoritative: isModelAuthoritative,
+            reasoningEffort: reasoningEffort,
+            isReasoningEffortAuthoritative: isReasoningEffortAuthoritative,
             isArchived: isArchived,
             deletionState: deletionState,
             createdAt: Date(timeIntervalSince1970: 50),
@@ -935,6 +952,48 @@ final class AIChatStorageTests: XCTestCase {
 
 @MainActor
 final class AIChatViewModelTests: XCTestCase {
+    func testCodexReasoningPreferencePersistsAndSeedsNewChats() async {
+        let suite = "com.yorozu.ai-reasoning-tests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite) ?? .standard
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let preferences = AIChatPreferences(defaults: defaults, providerID: .codex)
+        preferences.defaultReasoningEffort = AIReasoningEffort(rawValue: "high")
+
+        let viewModel = AIChatViewModel(
+            catalog: AIConversationCatalog(providerID: .codex, store: nil),
+            provider: RegistryTestProvider(providerID: .codex),
+            preferences: preferences
+        )
+        await viewModel.testConnection()
+        viewModel.beginNewChat()
+
+        XCTAssertEqual(viewModel.currentReasoningEffort?.rawValue, "high")
+        XCTAssertTrue(viewModel.actionItems.contains { $0.id == .aiChangeReasoning })
+        viewModel.beginChoosingReasoningEffort()
+        XCTAssertEqual(viewModel.actionPanelTitle, "Change Reasoning")
+        viewModel.performAction(.aiReasoning1)
+        XCTAssertEqual(viewModel.currentReasoningEffort?.rawValue, "low")
+        let reloaded = AIChatPreferences(defaults: defaults, providerID: .codex)
+        XCTAssertEqual(reloaded.defaultReasoningEffort?.rawValue, "high")
+    }
+
+    func testCodexReasoningPreferenceSurvivesUntilModelMetadataLoads() {
+        let suite = "com.yorozu.ai-reasoning-pending-tests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite) ?? .standard
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let preferences = AIChatPreferences(defaults: defaults, providerID: .codex)
+        preferences.defaultReasoningEffort = AIReasoningEffort(rawValue: "high")
+        let viewModel = AIChatViewModel(
+            catalog: AIConversationCatalog(providerID: .codex, store: nil),
+            provider: RegistryTestProvider(providerID: .codex),
+            preferences: preferences
+        )
+
+        viewModel.beginNewChat()
+
+        XCTAssertEqual(viewModel.currentReasoningEffort?.rawValue, "high")
+    }
+
     func testCodexConversationActionsOpenThreadInCodex() async {
         let conversation = makeConversation(
             id: "thread-test",
@@ -1590,6 +1649,21 @@ private actor FakeCodexAppServer: CodexAppServerServing {
                         "displayName": .string("Codex Test"),
                         "description": .string("Test model"),
                         "isDefault": .bool(true),
+                        "defaultReasoningEffort": .string("medium"),
+                        "supportedReasoningEfforts": .array([
+                            .object([
+                                "reasoningEffort": .string("low"),
+                                "description": .string("Fast responses"),
+                            ]),
+                            .object([
+                                "reasoningEffort": .string("medium"),
+                                "description": .string("Balanced reasoning"),
+                            ]),
+                            .object([
+                                "reasoningEffort": .string("high"),
+                                "description": .string("Deeper reasoning"),
+                            ]),
+                        ]),
                     ]),
                 ]),
                 "nextCursor": .null,
@@ -1707,7 +1781,9 @@ private actor RegistryTestProvider: AIChatProvider {
             rootCommandTitle: providerID.rawValue,
             description: "Test provider",
             symbolName: "sparkles",
-            capabilities: [.streaming]
+            capabilities: providerID == .codex
+                ? [.streaming, .modelSelection, .reasoningEffort]
+                : [.streaming]
         )
     }
 
@@ -1715,7 +1791,22 @@ private actor RegistryTestProvider: AIChatProvider {
     func authenticationState() -> AIAuthenticationState {
         .authenticated(detail: nil)
     }
-    func availableModels() -> [AIModel] { [.terra] }
+    func availableModels() -> [AIModel] {
+        guard descriptor.id == .codex else { return [.terra] }
+        let efforts = ["low", "medium", "high"].map {
+            AIReasoningEffort(rawValue: $0)
+        }
+        return [
+            AIModel(
+                rawValue: "codex-test-model",
+                title: "Codex Test",
+                detail: "Test model",
+                isDefault: true,
+                supportedReasoningEfforts: efforts,
+                defaultReasoningEffort: efforts[1]
+            ),
+        ]
+    }
     func createConversation(title: String, model: AIModel) -> String { "test" }
     func updateConversation(
         conversationID: String,

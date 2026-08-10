@@ -12,6 +12,11 @@ final class AIChatViewModel {
         .aiModelTerra, .aiModelSol, .aiModelLuna, .aiModel4, .aiModel5,
         .aiModel6, .aiModel7, .aiModel8, .aiModel9, .aiModel10,
     ]
+    private static let reasoningActionIDs: [LauncherActionID] = [
+        .aiReasoning1, .aiReasoning2, .aiReasoning3, .aiReasoning4,
+        .aiReasoning5, .aiReasoning6, .aiReasoning7, .aiReasoning8,
+        .aiReasoning9, .aiReasoning10,
+    ]
 
     var query = "" {
         didSet {
@@ -29,6 +34,7 @@ final class AIChatViewModel {
     var prompt = ""
     private(set) var attachments: [AIChatAttachment] = []
     private(set) var currentModel: AIModel
+    private(set) var currentReasoningEffort: AIReasoningEffort?
     private(set) var enablesWebSearch: Bool
     private(set) var isLoadingConversation = false
     private(set) var isStreaming = false
@@ -40,10 +46,12 @@ final class AIChatViewModel {
     private(set) var nextCursor: String?
     private(set) var storageMessage: String?
     private(set) var availableModels: [AIModel]
+    private var hasLoadedAvailableModels = false
     private(set) var hasAPIKey = false
     private(set) var credentialStatus: AICredentialStatus = .checking
     private(set) var credentialStatusMessage: String?
     private(set) var isChoosingModel = false
+    private(set) var isChoosingReasoningEffort = false
     var errorMessage: String?
     var statusMessage: String?
 
@@ -137,8 +145,23 @@ final class AIChatViewModel {
     var preferencesBinding: Binding<AIModel> {
         Binding(
             get: { self.preferences.defaultModel },
-            set: { self.preferences.defaultModel = $0 }
+            set: { self.setDefaultModel($0) }
         )
+    }
+
+    var reasoningPreferenceBinding: Binding<AIReasoningEffort?> {
+        Binding(
+            get: { self.preferences.defaultReasoningEffort },
+            set: { self.preferences.defaultReasoningEffort = $0 }
+        )
+    }
+
+    var defaultModelReasoningEfforts: [AIReasoningEffort] {
+        resolvedModel(for: preferences.defaultModel)?.supportedReasoningEfforts ?? []
+    }
+
+    var availableReasoningEfforts: [AIReasoningEffort] {
+        resolvedModel(for: currentModel)?.supportedReasoningEfforts ?? []
     }
 
     var webSearchPreferenceBinding: Binding<Bool> {
@@ -161,6 +184,7 @@ final class AIChatViewModel {
         providerDescriptor = provider.descriptor
         self.preferences = preferences
         currentModel = preferences.defaultModel
+        currentReasoningEffort = preferences.defaultReasoningEffort
         availableModels = [preferences.defaultModel]
         enablesWebSearch = preferences.enablesWebSearchByDefault
     }
@@ -210,6 +234,9 @@ final class AIChatViewModel {
     }
 
     var actionPanelTitle: String {
+        if isChoosingReasoningEffort {
+            return "Change Reasoning"
+        }
         if isChoosingModel {
             return "Change Model"
         }
@@ -220,6 +247,18 @@ final class AIChatViewModel {
     }
 
     var actionItems: [LauncherActionItem] {
+        if isChoosingReasoningEffort {
+            return availableReasoningEfforts.prefix(10).enumerated().map { index, effort in
+                LauncherActionItem(
+                    id: Self.reasoningActionIDs[index],
+                    title: effort == currentReasoningEffort
+                        ? "\(effort.title) ✓"
+                        : effort.title,
+                    symbolName: "brain",
+                    shortcutGlyphs: []
+                )
+            }
+        }
         if isChoosingModel {
             return availableModels.prefix(10).enumerated().map { index, model in
                 LauncherActionItem(
@@ -309,6 +348,17 @@ final class AIChatViewModel {
                 shortcutGlyphs: []
             ),
         ]
+        if providerDescriptor.capabilities.contains(.reasoningEffort),
+           !availableReasoningEfforts.isEmpty {
+            items.append(
+                LauncherActionItem(
+                    id: .aiChangeReasoning,
+                    title: "Change Reasoning…",
+                    symbolName: "brain",
+                    shortcutGlyphs: []
+                )
+            )
+        }
         if providerDescriptor.capabilities.contains(.webSearch) {
             items.append(
                 LauncherActionItem(
@@ -392,6 +442,7 @@ final class AIChatViewModel {
         conversationLoadRevision &+= 1
         isLoadingConversation = false
         isChoosingModel = false
+        isChoosingReasoningEffort = false
         errorMessage = nil
         statusMessage = nil
         if isListVisible {
@@ -520,6 +571,10 @@ final class AIChatViewModel {
         prompt = draftByConversation["new"] ?? ""
         attachments = []
         currentModel = preferredAvailableModel()
+        currentReasoningEffort = preferredReasoningEffort(
+            for: currentModel,
+            preferred: preferences.defaultReasoningEffort
+        )
         enablesWebSearch = preferences.enablesWebSearchByDefault
         errorMessage = nil
         statusMessage = nil
@@ -536,7 +591,14 @@ final class AIChatViewModel {
         if let conversation = conversations.first(where: { $0.id == id }) {
             currentModel = availableModels.first {
                 $0.rawValue == conversation.model.rawValue
-            } ?? preferredAvailableModel()
+            } ?? (hasLoadedAvailableModels
+                ? preferredAvailableModel()
+                : conversation.model)
+            currentReasoningEffort = preferredReasoningEffort(
+                for: currentModel,
+                preferred: conversation.reasoningEffort
+                    ?? preferences.defaultReasoningEffort
+            )
         }
         isLoadingConversation = true
         messages = messageCache[id] ?? []
@@ -625,13 +687,15 @@ final class AIChatViewModel {
         destination = .list(.active)
         query = ""
         isChoosingModel = false
+        isChoosingReasoningEffort = false
         focusRequest += 1
         refreshList(preserveSelection: true)
     }
 
     func handleEscape() -> Bool {
-        if isChoosingModel {
+        if isChoosingModel || isChoosingReasoningEffort {
             isChoosingModel = false
+            isChoosingReasoningEffort = false
             return true
         }
         if isStreaming {
@@ -650,6 +714,7 @@ final class AIChatViewModel {
         let originalPrompt = prompt
         let originalAttachments = attachments
         let requestModel = currentModel
+        let requestReasoningEffort = currentReasoningEffort
         let requestEnablesWebSearch = enablesWebSearch
         prompt = ""
         attachments = []
@@ -711,6 +776,7 @@ final class AIChatViewModel {
                 let request = AIChatSendRequest(
                     conversationID: conversationID,
                     model: requestModel,
+                    reasoningEffort: requestReasoningEffort,
                     prompt: originalPrompt,
                     attachments: uploaded,
                     enablesWebSearch: requestEnablesWebSearch,
@@ -766,7 +832,8 @@ final class AIChatViewModel {
                 activeStreamConversationID = nil
                 try await refreshAfterSuccessfulResponse(
                     conversationID: conversationID,
-                    model: requestModel
+                    model: requestModel,
+                    reasoningEffort: requestReasoningEffort
                 )
             } catch is CancellationError {
                 markLastAssistantStopped(conversationID: activeStreamConversationID)
@@ -822,26 +889,42 @@ final class AIChatViewModel {
 
     func beginChoosingModel() {
         isChoosingModel = true
+        isChoosingReasoningEffort = false
+    }
+
+    func beginChoosingReasoningEffort() {
+        guard !availableReasoningEfforts.isEmpty else { return }
+        isChoosingModel = false
+        isChoosingReasoningEffort = true
     }
 
     func cancelActionNavigation() {
         isChoosingModel = false
+        isChoosingReasoningEffort = false
     }
 
     func chooseModel(_ model: AIModel) {
-        currentModel = model
+        let previousEffort = currentReasoningEffort
+        currentModel = resolvedModel(for: model) ?? model
+        currentReasoningEffort = preferredReasoningEffort(
+            for: currentModel,
+            preferred: previousEffort
+        )
         isChoosingModel = false
+        isChoosingReasoningEffort = false
         statusMessage = "\(model.title) will be used for the next message."
         if var conversation = currentConversation {
-            conversation.model = model
+            conversation.model = currentModel
             conversation.isModelAuthoritative = true
+            conversation.reasoningEffort = currentReasoningEffort
+            conversation.isReasoningEffortAuthoritative = true
             conversation.updatedAt = Date()
             Task {
                 do {
                     try await coordinator.updateConversation(
                         conversationID: conversation.id,
                         title: conversation.title,
-                        model: model,
+                        model: currentModel,
                         isArchived: conversation.isArchived
                     )
                     apply(snapshot: await coordinator.save(conversation))
@@ -849,6 +932,21 @@ final class AIChatViewModel {
                     errorMessage = userMessage(for: error)
                 }
             }
+        }
+    }
+
+    func chooseReasoningEffort(_ effort: AIReasoningEffort) {
+        guard availableReasoningEfforts.contains(effort) else { return }
+        currentReasoningEffort = effort
+        isChoosingReasoningEffort = false
+        isChoosingModel = false
+        statusMessage = "\(effort.title) reasoning will be used for the next message."
+        guard var conversation = currentConversation else { return }
+        conversation.reasoningEffort = effort
+        conversation.isReasoningEffortAuthoritative = true
+        conversation.updatedAt = Date()
+        Task {
+            apply(snapshot: await coordinator.save(conversation))
         }
     }
 
@@ -1114,13 +1212,7 @@ final class AIChatViewModel {
 
     func testConnection() async {
         do {
-            availableModels = try await coordinator.availableModels()
-            if !availableModels.contains(currentModel),
-               let fallback = availableModels.first(where: \.isDefault)
-                    ?? availableModels.first {
-                currentModel = fallback
-                preferences.defaultModel = fallback
-            }
+            applyAvailableModels(try await coordinator.availableModels())
             if availableModels.isEmpty {
                 credentialStatusMessage = "Connected, but no models are available."
             } else {
@@ -1131,10 +1223,23 @@ final class AIChatViewModel {
         }
     }
 
+    func loadModelMetadataForSettings() async {
+        do {
+            applyAvailableModels(try await coordinator.availableModels())
+        } catch {
+            // Connection status already owns the user-facing error state in Settings.
+        }
+    }
+
     func performAction(_ action: LauncherActionID) {
         if let index = Self.modelActionIDs.firstIndex(of: action),
            availableModels.indices.contains(index) {
             chooseModel(availableModels[index])
+            return
+        }
+        if let index = Self.reasoningActionIDs.firstIndex(of: action),
+           availableReasoningEfforts.indices.contains(index) {
+            chooseReasoningEffort(availableReasoningEfforts[index])
             return
         }
         switch action {
@@ -1146,9 +1251,15 @@ final class AIChatViewModel {
             beginNewChat()
         case .aiChangeModel:
             beginChoosingModel()
+        case .aiChangeReasoning:
+            beginChoosingReasoningEffort()
         case .aiModelTerra, .aiModelSol, .aiModelLuna,
              .aiModel4, .aiModel5, .aiModel6, .aiModel7,
              .aiModel8, .aiModel9, .aiModel10:
+            break
+        case .aiReasoning1, .aiReasoning2, .aiReasoning3, .aiReasoning4,
+             .aiReasoning5, .aiReasoning6, .aiReasoning7, .aiReasoning8,
+             .aiReasoning9, .aiReasoning10:
             break
         case .aiToggleWebSearch:
             toggleWebSearch()
@@ -1215,6 +1326,63 @@ final class AIChatViewModel {
             ?? preferred
     }
 
+    private func resolvedModel(for model: AIModel) -> AIModel? {
+        availableModels.first(where: { $0.rawValue == model.rawValue })
+    }
+
+    private func applyAvailableModels(_ models: [AIModel]) {
+        availableModels = models
+        hasLoadedAvailableModels = true
+        if let resolved = resolvedModel(for: currentModel) {
+            currentModel = resolved
+        } else if let fallback = availableModels.first(where: \.isDefault)
+            ?? availableModels.first {
+            currentModel = fallback
+            preferences.defaultModel = fallback
+        }
+        currentReasoningEffort = preferredReasoningEffort(
+            for: currentModel,
+            preferred: currentReasoningEffort
+                ?? preferences.defaultReasoningEffort
+        )
+        if let defaultModel = resolvedModel(for: preferences.defaultModel),
+           let preferred = preferences.defaultReasoningEffort,
+           !defaultModel.supportedReasoningEfforts.contains(preferred) {
+            preferences.defaultReasoningEffort = nil
+        }
+    }
+
+    private func preferredReasoningEffort(
+        for model: AIModel,
+        preferred: AIReasoningEffort?
+    ) -> AIReasoningEffort? {
+        let resolved = resolvedModel(for: model) ?? model
+        if resolved.supportedReasoningEfforts.isEmpty {
+            return preferred ?? resolved.defaultReasoningEffort
+        }
+        if let preferred,
+           let supported = resolved.supportedReasoningEfforts.first(
+               where: { $0.rawValue == preferred.rawValue }
+           ) {
+            return supported
+        }
+        if let modelDefault = resolved.defaultReasoningEffort {
+            return resolved.supportedReasoningEfforts.first(
+                where: { $0.rawValue == modelDefault.rawValue }
+            ) ?? modelDefault
+        }
+        return resolved.supportedReasoningEfforts.first
+    }
+
+    private func setDefaultModel(_ model: AIModel) {
+        preferences.defaultModel = model
+        guard let selected = preferences.defaultReasoningEffort,
+              !defaultModelReasoningEfforts.contains(selected) else {
+            return
+        }
+        preferences.defaultReasoningEffort = nil
+    }
+
     private func ensureConversation(
         firstPrompt: String,
         model: AIModel
@@ -1233,6 +1401,7 @@ final class AIChatViewModel {
             providerConversationID: id,
             title: title,
             model: model,
+            reasoningEffort: currentReasoningEffort,
             isArchived: false,
             deletionState: nil,
             createdAt: now,
@@ -1276,7 +1445,8 @@ final class AIChatViewModel {
 
     private func refreshAfterSuccessfulResponse(
         conversationID: String,
-        model: AIModel
+        model: AIModel,
+        reasoningEffort: AIReasoningEffort?
     ) async throws {
         let page = try await coordinator.loadConversation(
             conversationID: conversationID,
@@ -1296,6 +1466,8 @@ final class AIChatViewModel {
         conversation.lastMessageAt = now
         conversation.updatedAt = now
         conversation.model = model
+        conversation.reasoningEffort = reasoningEffort
+        conversation.isReasoningEffortAuthoritative = true
         apply(snapshot: await coordinator.save(conversation))
     }
 

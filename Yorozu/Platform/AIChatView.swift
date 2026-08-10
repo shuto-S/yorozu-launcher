@@ -122,6 +122,10 @@ struct AIChatView: View {
                 onShowModelPicker: {
                     viewModel.beginChoosingModel()
                     onShowActions()
+                },
+                onShowReasoningPicker: {
+                    viewModel.beginChoosingReasoningEffort()
+                    onShowActions()
                 }
             )
                 .padding(.horizontal, 20)
@@ -818,6 +822,7 @@ private struct AIUserMessageLayout: Layout {
 private struct AIComposerView: View {
     @Bindable var viewModel: AIChatViewModel
     let onShowModelPicker: () -> Void
+    let onShowReasoningPicker: () -> Void
     @State private var measuredTextHeight: CGFloat = 28
 
     private var composerTextHeight: CGFloat {
@@ -912,6 +917,26 @@ private struct AIComposerView: View {
                 .buttonStyle(.plain)
                 .help("Change Model")
                 .accessibilityLabel("Change Model, \(viewModel.currentModel.title)")
+
+                if viewModel.providerDescriptor.capabilities.contains(.reasoningEffort),
+                   let effort = viewModel.currentReasoningEffort,
+                   !viewModel.availableReasoningEfforts.isEmpty {
+                    Button(action: onShowReasoningPicker) {
+                        HStack(spacing: 3) {
+                            Image(systemName: "brain")
+                            Text(effort.title)
+                                .lineLimit(1)
+                        }
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 6)
+                        .frame(height: 30)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .help("Change Reasoning")
+                    .accessibilityLabel("Change Reasoning, \(effort.title)")
+                }
 
                 Button {
                     viewModel.isStreaming
