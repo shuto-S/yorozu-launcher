@@ -50,11 +50,13 @@ final class AIChatStorageTests: XCTestCase {
         translationPreferences.providerID = .openAIAPI
         translationPreferences.setModel(.sol, for: .openAIAPI)
         translationPreferences.setReasoningEffort(reasoning, for: .openAIAPI)
+        translationPreferences.targetLanguage = "English"
 
         let restored = TranslationPreferences(defaults: defaults)
         XCTAssertEqual(restored.providerID, .openAIAPI)
         XCTAssertEqual(restored.model(for: .openAIAPI), .sol)
         XCTAssertEqual(restored.reasoningEffort(for: .openAIAPI), reasoning)
+        XCTAssertEqual(restored.targetLanguage, "English")
         XCTAssertEqual(chatPreferences.defaultModel, .terra)
     }
 

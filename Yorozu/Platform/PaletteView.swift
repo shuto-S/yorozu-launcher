@@ -316,14 +316,20 @@ private struct TranslationView: View {
 
                 Spacer()
 
-                Picker("Target language", selection: $viewModel.targetLanguage) {
+                Text("Translate to")
+                    .foregroundStyle(.secondary)
+
+                Picker("Target language", selection: Binding(
+                    get: { viewModel.targetLanguage },
+                    set: { viewModel.selectTargetLanguage($0) }
+                )) {
                     ForEach(TranslationViewModel.supportedTargetLanguages, id: \.self) {
                         Text($0).tag($0)
                     }
                 }
                 .pickerStyle(.menu)
-                .labelsHidden()
                 .accessibilityLabel("Target language")
+                .accessibilityValue(viewModel.targetLanguage)
             }
             .padding(.horizontal, 14)
             .frame(minHeight: 58)

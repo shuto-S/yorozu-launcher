@@ -1714,6 +1714,17 @@ final class TranslationPreferences {
             .map { AIReasoningEffort(rawValue: $0) }
     }
 
+    var targetLanguage: String? {
+        get { defaults.string(forKey: Keys.targetLanguage) }
+        set {
+            if let newValue {
+                defaults.set(newValue, forKey: Keys.targetLanguage)
+            } else {
+                defaults.removeObject(forKey: Keys.targetLanguage)
+            }
+        }
+    }
+
     func setReasoningEffort(
         _ effort: AIReasoningEffort?,
         for providerID: AIProviderID
@@ -1728,6 +1739,7 @@ final class TranslationPreferences {
 
     private enum Keys {
         static let providerID = "translation.provider"
+        static let targetLanguage = "translation.targetLanguage"
 
         static func model(_ providerID: AIProviderID) -> String {
             "translation.\(providerID.rawValue).model"
@@ -1744,14 +1756,19 @@ final class TranslationPreferences {
 final class TranslationViewModel {
     static let supportedTargetLanguages = [
         "Japanese", "English", "Chinese (Simplified)", "Korean",
-        "Spanish", "French", "German",
+        "Spanish", "French", "German", "Italian", "Portuguese (Brazil)",
+        "Russian", "Arabic", "Hindi",
     ]
 
     let providerStore: AIChatViewModelStore
     let preferences: TranslationPreferences
     var inputText = ""
     private(set) var outputText = ""
-    var targetLanguage = "Japanese"
+    var targetLanguage: String {
+        didSet {
+            preferences.targetLanguage = targetLanguage
+        }
+    }
     private(set) var selectedProviderID: AIProviderID?
     private(set) var selectedModel: AIModel
     private(set) var selectedReasoningEffort: AIReasoningEffort?
@@ -1784,6 +1801,10 @@ final class TranslationViewModel {
             preferences.reasoningEffort(for: $0.providerID)
         } ?? initial?.preferences.defaultReasoningEffort
         availableModels = initial?.availableModels ?? [initialModel]
+        let preferredTargetLanguage = preferences.targetLanguage
+        targetLanguage = preferredTargetLanguage.flatMap {
+            Self.supportedTargetLanguages.contains($0) ? $0 : nil
+        } ?? Self.supportedTargetLanguages[0]
     }
 
     var providerViewModels: [AIChatViewModel] {
@@ -1838,6 +1859,13 @@ final class TranslationViewModel {
     func clearOutput() {
         outputText = ""
         errorMessage = nil
+    }
+
+    func selectTargetLanguage(_ language: String) {
+        guard Self.supportedTargetLanguages.contains(language),
+              language != targetLanguage else { return }
+        targetLanguage = language
+        clearOutput()
     }
 
     func prepareForPresentation(
