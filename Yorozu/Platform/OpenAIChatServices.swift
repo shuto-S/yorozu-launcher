@@ -317,9 +317,10 @@ actor OpenAIAPIProvider: AIChatProvider, OpenAIAPIKeyManaging {
         symbolName: "sparkles",
         capabilities: [
             .authentication, .modelSelection, .streaming, .attachments,
-            .webSearch, .archive, .deletion,
+            .webSearch, .archive, .deletion, .citations,
         ]
     )
+    nonisolated let policies = AIProviderPolicies.localConversationIndex
 
     private let service: any OpenAIChatServing
     private let credentials: any OpenAICredentialStoring
@@ -462,6 +463,12 @@ actor DisabledAIChatProvider: AIChatProvider {
         description: "AI is unavailable",
         symbolName: "sparkles",
         capabilities: []
+    )
+    nonisolated let policies = AIProviderPolicies(
+        conversationListAuthority: .unavailable,
+        messageAuthority: .provider,
+        supportsServerSideSearch: false,
+        requiresExplicitConversationCreation: true
     )
 
     func availability() -> AIProviderAvailability {

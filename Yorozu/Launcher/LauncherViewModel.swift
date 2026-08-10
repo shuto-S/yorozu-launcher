@@ -214,6 +214,16 @@ final class LauncherViewModel {
         aiChatViewModelStore.viewModel(for: providerID)
     }
 
+    var aiProviderViewModels: [AIChatViewModel] {
+        aiChatViewModelStore.orderedViewModels
+    }
+
+    func resolvedAISettingsProviderID(
+        preferred providerID: AIProviderID?
+    ) -> AIProviderID? {
+        aiChatViewModelStore.resolvedProviderID(preferred: providerID)
+    }
+
     private let catalog: ApplicationCatalog
     private let featureCatalog: FeatureCommandCatalog
     private let clipboardCatalog: ClipboardCatalog

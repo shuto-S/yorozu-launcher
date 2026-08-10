@@ -25,6 +25,7 @@ final class AIChatViewModel {
     var selectedListID: String?
     private(set) var messages: [AIChatMessage] = []
     private(set) var messageContentRevision = 0
+    private(set) var scrollToLatestRequest = 0
     var prompt = ""
     private(set) var attachments: [AIChatAttachment] = []
     private(set) var currentModel: AIModel
@@ -113,12 +114,13 @@ final class AIChatViewModel {
     let providerID: AIProviderID
     let providerDescriptor: AIProviderDescriptor
 
-    private let catalog: AIConversationCatalog
     private let provider: any AIChatProvider
+    private let coordinator: AIConversationCoordinator
     private var hasLoadedCatalog = false
     private var loadTask: Task<Void, Never>?
     private var streamTask: Task<Void, Never>?
     private var authenticationTask: Task<Void, Never>?
+    private var credentialStatusTask: Task<Void, Never>?
     private var listSearchTask: Task<Void, Never>?
     private var listSearchRevision = 0
     private var conversationLoadRevision = 0
@@ -149,8 +151,8 @@ final class AIChatViewModel {
         provider: any AIChatProvider,
         preferences: AIChatPreferences
     ) {
-        self.catalog = catalog
         self.provider = provider
+        coordinator = AIConversationCoordinator(catalog: catalog, provider: provider)
         providerID = provider.descriptor.id
         providerDescriptor = provider.descriptor
         self.preferences = preferences
@@ -370,9 +372,13 @@ final class AIChatViewModel {
             focusRequest += 1
         } else {
             composerFocusRequest += 1
+            scrollToLatestRequest &+= 1
         }
-        Task {
+        loadTask = Task { [weak self] in
+            guard let self else { return }
             await loadCatalogIfNeeded()
+            guard !Task.isCancelled else { return }
+            loadTask = nil
         }
     }
 
@@ -384,12 +390,17 @@ final class AIChatViewModel {
         streamTask = nil
         authenticationTask?.cancel()
         authenticationTask = nil
+        credentialStatusTask?.cancel()
+        credentialStatusTask = nil
         listSearchTask?.cancel()
         listSearchTask = nil
-        Task { await provider.shutdown() }
+        Task { await coordinator.shutdown() }
     }
 
-    func refreshList(preserveSelection: Bool = true) {
+    func refreshList(
+        preserveSelection: Bool = true,
+        refreshProvider: Bool = true
+    ) {
         listSearchTask?.cancel()
         listSearchRevision &+= 1
         let revision = listSearchRevision
@@ -397,7 +408,7 @@ final class AIChatViewModel {
         let scope = listScope
         let searchQuery = query
         listSearchTask = Task {
-            let values = await catalog.search(query: searchQuery, scope: scope)
+            let values = await coordinator.search(query: searchQuery, scope: scope)
             guard !Task.isCancelled,
                   revision == listSearchRevision,
                   isListVisible,
@@ -414,6 +425,33 @@ final class AIChatViewModel {
                 selectedListID = Self.newChatSelectionID
             } else {
                 selectedListID = values.first?.id
+            }
+
+            guard refreshProvider,
+                  coordinator.policies.conversationListAuthority == .provider else {
+                return
+            }
+            if !searchQuery.isEmpty {
+                try? await Task.sleep(for: .milliseconds(200))
+            }
+            do {
+                let snapshot = try await coordinator.refreshIndex(
+                    query: searchQuery,
+                    scope: scope
+                )
+                guard !Task.isCancelled,
+                      revision == listSearchRevision,
+                      isListVisible,
+                      listScope == scope,
+                      query == searchQuery else {
+                    return
+                }
+                apply(snapshot: snapshot, refreshProvider: false)
+            } catch is CancellationError {
+                return
+            } catch {
+                guard revision == listSearchRevision else { return }
+                errorMessage = "Couldn’t refresh \(providerDescriptor.displayName) chats."
             }
         }
     }
@@ -465,10 +503,13 @@ final class AIChatViewModel {
         errorMessage = nil
         statusMessage = nil
         if let conversation = conversations.first(where: { $0.id == id }) {
-            currentModel = conversation.model
+            currentModel = availableModels.first {
+                $0.rawValue == conversation.model.rawValue
+            } ?? preferredAvailableModel()
         }
         isLoadingConversation = true
         messages = messageCache[id] ?? []
+        scrollToLatestRequest &+= 1
         nextCursor = nil
         hasMoreMessages = false
         loadTask?.cancel()
@@ -481,7 +522,7 @@ final class AIChatViewModel {
                 }
             }
             do {
-                let page = try await provider.loadConversation(
+                let page = try await coordinator.loadConversation(
                     conversationID: id,
                     limit: 100,
                     after: nil
@@ -520,7 +561,7 @@ final class AIChatViewModel {
                 }
             }
             do {
-                let page = try await provider.loadConversation(
+                let page = try await coordinator.loadConversation(
                     conversationID: id,
                     limit: 100,
                     after: nextCursor
@@ -648,7 +689,7 @@ final class AIChatViewModel {
                 let clock = ContinuousClock()
                 var lastPublishedAt = clock.now
                 didStartGenerationRequest = true
-                streamEvents: for try await event in provider.streamResponse(request: request) {
+                streamEvents: for try await event in coordinator.streamResponse(request: request) {
                     try Task.checkCancellation()
                     switch event {
                     case .responseCreated:
@@ -734,7 +775,7 @@ final class AIChatViewModel {
         streamTask?.cancel()
         streamTask = nil
         if let conversationID {
-            Task { await provider.stopGeneration(conversationID: conversationID) }
+            Task { await coordinator.stopGeneration(conversationID: conversationID) }
         }
     }
 
@@ -765,13 +806,13 @@ final class AIChatViewModel {
             conversation.updatedAt = Date()
             Task {
                 do {
-                    try await provider.updateConversation(
+                    try await coordinator.updateConversation(
                         conversationID: conversation.id,
                         title: conversation.title,
                         model: model,
                         isArchived: conversation.isArchived
                     )
-                    apply(snapshot: await catalog.save(conversation))
+                    apply(snapshot: await coordinator.save(conversation))
                 } catch {
                     errorMessage = userMessage(for: error)
                 }
@@ -839,7 +880,7 @@ final class AIChatViewModel {
         let targetArchiveState = !conversation.isArchived
         Task {
             do {
-                try await provider.setConversationArchived(
+                try await coordinator.setConversationArchived(
                     conversationID: conversation.id,
                     title: conversation.title,
                     model: conversation.model,
@@ -847,7 +888,7 @@ final class AIChatViewModel {
                 )
                 conversation.isArchived = targetArchiveState
                 conversation.updatedAt = Date()
-                apply(snapshot: await catalog.save(conversation))
+                apply(snapshot: await coordinator.save(conversation))
                 destination = .list(targetArchiveState ? .active : .archived)
                 refreshList(preserveSelection: false)
                 statusMessage = targetArchiveState ? "Chat archived." : "Chat unarchived."
@@ -876,12 +917,12 @@ final class AIChatViewModel {
         conversation.deletionState = .pending
         conversation.updatedAt = Date()
         Task {
-            apply(snapshot: await catalog.save(conversation))
+            apply(snapshot: await coordinator.save(conversation))
             do {
-                try await provider.deleteConversationCompletely(
+                try await coordinator.deleteConversationCompletely(
                     conversationID: conversation.id
                 )
-                apply(snapshot: await catalog.remove(id: conversation.id))
+                apply(snapshot: await coordinator.remove(id: conversation.id))
                 destination = .list(.active)
                 refreshList(preserveSelection: false)
                 statusMessage = "Chat deleted."
@@ -889,7 +930,7 @@ final class AIChatViewModel {
             } catch {
                 conversation.deletionState = .failed
                 conversation.updatedAt = Date()
-                apply(snapshot: await catalog.save(conversation))
+                apply(snapshot: await coordinator.save(conversation))
                 destination = .list(.archived)
                 refreshList(preserveSelection: false)
                 errorMessage = AIChatError.deletionFailed.localizedDescription
@@ -900,10 +941,15 @@ final class AIChatViewModel {
     }
 
     func loadCredentialStatus() {
+        credentialStatusTask?.cancel()
         credentialStatus = .checking
         observeAuthenticationUpdatesIfNeeded()
-        Task {
-            apply(authenticationState: await provider.authenticationState())
+        credentialStatusTask = Task { [weak self] in
+            guard let self else { return }
+            let state = await provider.authenticationState()
+            guard !Task.isCancelled else { return }
+            apply(authenticationState: state)
+            credentialStatusTask = nil
         }
     }
 
@@ -1036,7 +1082,7 @@ final class AIChatViewModel {
 
     func testConnection() async {
         do {
-            availableModels = try await provider.availableModels()
+            availableModels = try await coordinator.availableModels()
             if !availableModels.contains(currentModel),
                let fallback = availableModels.first(where: \.isDefault)
                     ?? availableModels.first {
@@ -1093,7 +1139,7 @@ final class AIChatViewModel {
         let isInitialLoad = !hasLoadedCatalog
         if isInitialLoad {
             hasLoadedCatalog = true
-            apply(snapshot: await catalog.load())
+            apply(snapshot: await coordinator.loadIndex(), refreshProvider: false)
         }
         loadCredentialStatus()
         Task { await testConnection() }
@@ -1116,7 +1162,7 @@ final class AIChatViewModel {
             return id
         }
         let title = AIConversationSummary.title(from: firstPrompt)
-        let id = try await provider.createConversation(
+        let id = try await coordinator.createConversation(
             title: title,
             model: model
         )
@@ -1132,7 +1178,7 @@ final class AIChatViewModel {
             lastMessageAt: now,
             updatedAt: now
         )
-        apply(snapshot: await catalog.save(conversation))
+        apply(snapshot: await coordinator.save(conversation))
         destination = .conversation(id)
         draftByConversation.removeValue(forKey: "new")
         return id
@@ -1144,7 +1190,7 @@ final class AIChatViewModel {
         var uploaded: [AIUploadedAttachment] = []
         for attachment in attachments {
             uploaded.append(
-                try await provider.uploadAttachment(attachment)
+                try await coordinator.uploadAttachment(attachment)
             )
         }
         return uploaded
@@ -1153,7 +1199,7 @@ final class AIChatViewModel {
     private func reconcileAfterStreamFailure(
         conversationID: String
     ) async {
-        guard let page = try? await provider.loadConversation(
+        guard let page = try? await coordinator.loadConversation(
             conversationID: conversationID,
             limit: 100,
             after: nil
@@ -1171,7 +1217,7 @@ final class AIChatViewModel {
         conversationID: String,
         model: AIModel
     ) async throws {
-        let page = try await provider.loadConversation(
+        let page = try await coordinator.loadConversation(
             conversationID: conversationID,
             limit: 100,
             after: nil
@@ -1189,7 +1235,7 @@ final class AIChatViewModel {
         conversation.lastMessageAt = now
         conversation.updatedAt = now
         conversation.model = model
-        apply(snapshot: await catalog.save(conversation))
+        apply(snapshot: await coordinator.save(conversation))
     }
 
     private func append(
@@ -1341,11 +1387,12 @@ final class AIChatViewModel {
     }
 
     private func apply(
-        snapshot: FeatureSnapshot<AIConversationSummary>
+        snapshot: FeatureSnapshot<AIConversationSummary>,
+        refreshProvider: Bool = false
     ) {
         conversations = snapshot.values
         storageMessage = snapshot.message
-        refreshList(preserveSelection: true)
+        refreshList(preserveSelection: true, refreshProvider: refreshProvider)
     }
 
     private func userMessage(for error: Error) -> String {
@@ -1374,12 +1421,14 @@ private extension AIModel {
 @MainActor
 final class AIChatViewModelStore {
     private var viewModels: [AIProviderID: AIChatViewModel]
+    private let providerOrder: [AIProviderID]
     let providerPreferences: AIProviderPreferences
 
     init(
         viewModels: [AIChatViewModel],
         providerPreferences: AIProviderPreferences
     ) {
+        providerOrder = viewModels.map(\.providerID)
         self.viewModels = Dictionary(
             uniqueKeysWithValues: viewModels.map { ($0.providerID, $0) }
         )
@@ -1390,9 +1439,24 @@ final class AIChatViewModelStore {
         viewModels[providerID]
     }
 
+    var orderedViewModels: [AIChatViewModel] {
+        providerOrder.compactMap { viewModels[$0] }
+    }
+
+    func resolvedProviderID(preferred providerID: AIProviderID?) -> AIProviderID? {
+        if let providerID, viewModels[providerID] != nil {
+            return providerID
+        }
+        if let defaultProviderID = providerPreferences.defaultProviderID,
+           viewModels[defaultProviderID] != nil {
+            return defaultProviderID
+        }
+        return providerOrder.first(where: { viewModels[$0] != nil })
+    }
+
     func defaultViewModel() -> AIChatViewModel? {
         providerPreferences.defaultProviderID.flatMap { viewModels[$0] }
-            ?? viewModels.values.first
+            ?? orderedViewModels.first
     }
 
     func shutdown() {

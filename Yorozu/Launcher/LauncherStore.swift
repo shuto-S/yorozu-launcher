@@ -678,6 +678,58 @@ actor LauncherStore {
         }
     }
 
+    func replaceAIConversationIndex(
+        providerID: AIProviderID,
+        scope: AIChatListScope,
+        conversations: [AIConversationSummary]
+    ) throws {
+        try ensureOpen()
+        try databaseQueue.write { database in
+            try database.execute(
+                sql: """
+                    DELETE FROM ai_conversation_index
+                    WHERE provider_id = ? AND is_archived = ?
+                    """,
+                arguments: [providerID.rawValue, scope == .archived]
+            )
+            for conversation in conversations {
+                try database.execute(
+                    sql: """
+                        INSERT INTO ai_conversation_index (
+                            provider_id,
+                            provider_conversation_id,
+                            title,
+                            model_id,
+                            is_archived,
+                            deletion_state,
+                            created_at,
+                            last_message_at,
+                            updated_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ON CONFLICT(provider_id, provider_conversation_id) DO UPDATE SET
+                            title = excluded.title,
+                            model_id = excluded.model_id,
+                            is_archived = excluded.is_archived,
+                            deletion_state = excluded.deletion_state,
+                            last_message_at = excluded.last_message_at,
+                            updated_at = excluded.updated_at
+                        """,
+                    arguments: [
+                        conversation.providerID.rawValue,
+                        conversation.providerConversationID,
+                        conversation.title,
+                        conversation.model.rawValue,
+                        conversation.isArchived,
+                        conversation.deletionState?.rawValue,
+                        conversation.createdAt.timeIntervalSince1970,
+                        conversation.lastMessageAt.timeIntervalSince1970,
+                        conversation.updatedAt.timeIntervalSince1970,
+                    ]
+                )
+            }
+        }
+    }
+
     private func ensureOpen() throws {
         guard !isClosed else {
             throw LauncherStoreError.storeClosed

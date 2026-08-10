@@ -300,7 +300,7 @@ private struct AIConversationList: View {
 
 private struct AIConversationMessages: View {
     @Bindable var viewModel: AIChatViewModel
-    @State private var isAtLatest = true
+    @State private var scrollState = AIConversationScrollState()
     @State private var autoScrollTask: Task<Void, Never>?
 
     var body: some View {
@@ -350,7 +350,17 @@ private struct AIConversationMessages: View {
                     - geometry.contentOffset.y
                 return distanceFromBottom <= 24
             } action: { _, atLatest in
-                isAtLatest = atLatest
+                scrollState.updateGeometry(isAtLatest: atLatest)
+            }
+            .onScrollPhaseChange { _, phase in
+                switch phase {
+                case .tracking, .interacting, .decelerating:
+                    scrollState.userInteractionDidBegin()
+                    autoScrollTask?.cancel()
+                    autoScrollTask = nil
+                case .idle, .animating:
+                    scrollState.userInteractionDidEnd()
+                }
             }
             .safeAreaInset(edge: .top, spacing: 0) {
                 if let message = viewModel.errorMessage {
@@ -374,10 +384,10 @@ private struct AIConversationMessages: View {
                 }
             }
             .overlay(alignment: .bottom) {
-                if !isAtLatest, !viewModel.messages.isEmpty {
+                if !scrollState.isAtLatest, !viewModel.messages.isEmpty {
                     Button {
+                        scrollState.resetToLatest()
                         proxy.scrollTo("latest", anchor: .bottom)
-                        isAtLatest = true
                     } label: {
                         Image(systemName: "arrow.down")
                             .font(.caption.weight(.semibold))
@@ -401,6 +411,14 @@ private struct AIConversationMessages: View {
                 guard streaming else { return }
                 scheduleAutoScroll(using: proxy)
             }
+            .onChange(of: viewModel.scrollToLatestRequest) {
+                scrollState.resetToLatest()
+                scheduleAutoScroll(using: proxy, delay: .milliseconds(50))
+            }
+            .onAppear {
+                scrollState.resetToLatest()
+                scheduleAutoScroll(using: proxy, delay: .milliseconds(50))
+            }
             .onDisappear {
                 autoScrollTask?.cancel()
                 autoScrollTask = nil
@@ -408,11 +426,23 @@ private struct AIConversationMessages: View {
         }
     }
 
-    private func scheduleAutoScroll(using proxy: ScrollViewProxy) {
-        guard isAtLatest, autoScrollTask == nil else { return }
+    private func scheduleAutoScroll(
+        using proxy: ScrollViewProxy,
+        delay: Duration = .milliseconds(16)
+    ) {
+        guard scrollState.shouldFollowLatest,
+              !scrollState.isUserInteracting else {
+            return
+        }
+        autoScrollTask?.cancel()
         autoScrollTask = Task { @MainActor in
-            try? await Task.sleep(for: .milliseconds(50))
+            try? await Task.sleep(for: delay)
             guard !Task.isCancelled else {
+                autoScrollTask = nil
+                return
+            }
+            guard scrollState.shouldFollowLatest,
+                  !scrollState.isUserInteracting else {
                 autoScrollTask = nil
                 return
             }
@@ -421,10 +451,47 @@ private struct AIConversationMessages: View {
             withTransaction(transaction) {
                 proxy.scrollTo("latest", anchor: .bottom)
             }
+            scrollState.didScrollToLatest()
             autoScrollTask = nil
         }
     }
 
+}
+
+struct AIConversationScrollState: Equatable {
+    private(set) var isAtLatest = true
+    private(set) var shouldFollowLatest = true
+    private(set) var isUserInteracting = false
+
+    mutating func updateGeometry(isAtLatest: Bool) {
+        self.isAtLatest = isAtLatest
+        if isAtLatest {
+            shouldFollowLatest = true
+        } else if isUserInteracting {
+            shouldFollowLatest = false
+        }
+    }
+
+    mutating func userInteractionDidBegin() {
+        isUserInteracting = true
+        if !isAtLatest {
+            shouldFollowLatest = false
+        }
+    }
+
+    mutating func userInteractionDidEnd() {
+        isUserInteracting = false
+    }
+
+    mutating func resetToLatest() {
+        isAtLatest = true
+        shouldFollowLatest = true
+        isUserInteracting = false
+    }
+
+    mutating func didScrollToLatest() {
+        isAtLatest = true
+    }
 }
 
 private struct AIChatFloatingMessage: View {
@@ -529,19 +596,18 @@ private struct AIMessageView: View {
     private var messageText: some View {
         if message.isStreaming {
             Text(message.text.isEmpty ? "Thinking…" : message.text)
-                .textSelection(.enabled)
-        } else if let attributed = try? AttributedString(
-            markdown: AIChatCitationFormatter.markdown(
-                text: message.text,
-                citations: message.citations
-            ),
-            options: .init(interpretedSyntax: .full)
-        ) {
-            Text(attributed)
+                .font(.body)
+                .lineSpacing(message.role == .assistant ? 4 : 2)
+                .fixedSize(horizontal: false, vertical: true)
                 .textSelection(.enabled)
         } else {
-            Text(message.text)
-                .textSelection(.enabled)
+            AIFormattedMessageText(
+                blocks: AIChatMessageFormatter.blocks(
+                    text: message.text,
+                    citations: message.citations
+                ),
+                lineSpacing: message.role == .assistant ? 4 : 2
+            )
         }
     }
 
@@ -592,6 +658,102 @@ private struct AIMessageView: View {
         .foregroundStyle(.secondary)
         .help("Copy Message")
         .accessibilityLabel("Copy Message")
+    }
+}
+
+private struct AIFormattedMessageText: View {
+    let blocks: [AIChatMessageBlock]
+    let lineSpacing: CGFloat
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 9) {
+            ForEach(blocks.indices, id: \.self) { index in
+                blockView(blocks[index])
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .textSelection(.enabled)
+    }
+
+    @ViewBuilder
+    private func blockView(_ block: AIChatMessageBlock) -> some View {
+        switch block {
+        case let .paragraph(text):
+            inlineText(text)
+                .font(.body)
+                .lineSpacing(lineSpacing)
+
+        case let .heading(level, text):
+            inlineText(text)
+                .font(level == 1 ? .title3.weight(.semibold) : .headline)
+                .lineSpacing(lineSpacing)
+
+        case let .unorderedListItem(text):
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Text("•")
+                    .frame(width: 12, alignment: .trailing)
+                inlineText(text)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .font(.body)
+            .lineSpacing(lineSpacing)
+
+        case let .orderedListItem(number, text):
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Text("\(number).")
+                    .frame(minWidth: 20, alignment: .trailing)
+                inlineText(text)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .font(.body)
+            .lineSpacing(lineSpacing)
+
+        case let .quote(text):
+            HStack(alignment: .top, spacing: 9) {
+                Rectangle()
+                    .fill(Color(nsColor: .separatorColor))
+                    .frame(width: 2)
+                inlineText(text)
+                    .font(.body)
+                    .foregroundStyle(.secondary)
+                    .lineSpacing(lineSpacing)
+            }
+
+        case let .code(language, content):
+            VStack(alignment: .leading, spacing: 6) {
+                if let language {
+                    Text(language)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                ScrollView(.horizontal) {
+                    Text(content)
+                        .font(.system(.body, design: .monospaced))
+                        .fixedSize(horizontal: true, vertical: false)
+                }
+                .scrollIndicators(.automatic)
+            }
+            .padding(10)
+            .background(
+                Color(nsColor: .controlBackgroundColor),
+                in: RoundedRectangle(cornerRadius: 8, style: .continuous)
+            )
+            .overlay {
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .stroke(Color(nsColor: .separatorColor), lineWidth: 1)
+            }
+
+        case .separator:
+            Divider()
+        }
+    }
+
+    private func inlineText(_ source: String) -> Text {
+        let attributed = try? AttributedString(
+            markdown: source,
+            options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)
+        )
+        return Text(attributed ?? AttributedString(source))
     }
 }
 

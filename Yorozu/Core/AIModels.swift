@@ -20,6 +20,41 @@ struct AIProviderCapabilities: OptionSet, Hashable, Sendable {
     static let archive = Self(rawValue: 1 << 5)
     static let deletion = Self(rawValue: 1 << 6)
     static let rateLimitStatus = Self(rawValue: 1 << 7)
+    static let providerConversationListing = Self(rawValue: 1 << 8)
+    static let cancellation = Self(rawValue: 1 << 9)
+    static let citations = Self(rawValue: 1 << 10)
+}
+
+enum AIConversationListAuthority: Hashable, Sendable {
+    case localIndex
+    case provider
+    case unavailable
+}
+
+enum AIMessageAuthority: Hashable, Sendable {
+    case provider
+    case local
+}
+
+struct AIProviderPolicies: Hashable, Sendable {
+    let conversationListAuthority: AIConversationListAuthority
+    let messageAuthority: AIMessageAuthority
+    let supportsServerSideSearch: Bool
+    let requiresExplicitConversationCreation: Bool
+
+    static let localConversationIndex = AIProviderPolicies(
+        conversationListAuthority: .localIndex,
+        messageAuthority: .provider,
+        supportsServerSideSearch: false,
+        requiresExplicitConversationCreation: true
+    )
+
+    static let providerConversationIndex = AIProviderPolicies(
+        conversationListAuthority: .provider,
+        messageAuthority: .provider,
+        supportsServerSideSearch: true,
+        requiresExplicitConversationCreation: true
+    )
 }
 
 struct AIProviderDescriptor: Hashable, Sendable, Identifiable {
@@ -230,6 +265,195 @@ enum AIChatCitationFormatter {
     }
 }
 
+enum AIChatMessageBlock: Equatable, Sendable {
+    case paragraph(String)
+    case heading(level: Int, text: String)
+    case unorderedListItem(String)
+    case orderedListItem(number: String, text: String)
+    case quote(String)
+    case code(language: String?, content: String)
+    case separator
+}
+
+enum AIChatMessageFormatter {
+    static func blocks(
+        text: String,
+        citations: [AIChatCitation]
+    ) -> [AIChatMessageBlock] {
+        blocks(
+            from: AIChatCitationFormatter.markdown(
+                text: text,
+                citations: citations
+            )
+        )
+    }
+
+    static func blocks(from markdown: String) -> [AIChatMessageBlock] {
+        let normalized = markdown
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+        let lines = normalized.split(
+            separator: "\n",
+            omittingEmptySubsequences: false
+        ).map(String.init)
+        var result: [AIChatMessageBlock] = []
+        var paragraphLines: [String] = []
+        var codeLines: [String] = []
+        var codeLanguage: String?
+        var fenceMarker: String?
+
+        func flushParagraph() {
+            guard !paragraphLines.isEmpty else { return }
+            result.append(.paragraph(paragraphLines.joined(separator: "\n")))
+            paragraphLines.removeAll(keepingCapacity: true)
+        }
+
+        func flushCode() {
+            result.append(
+                .code(
+                    language: codeLanguage,
+                    content: codeLines.joined(separator: "\n")
+                )
+            )
+            codeLines.removeAll(keepingCapacity: true)
+            codeLanguage = nil
+            fenceMarker = nil
+        }
+
+        for line in lines {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+
+            if let fenceMarker {
+                if trimmed.hasPrefix(fenceMarker) {
+                    flushCode()
+                } else {
+                    codeLines.append(line)
+                }
+                continue
+            }
+
+            if let openingFence = fenceDelimiter(in: trimmed) {
+                flushParagraph()
+                fenceMarker = openingFence.marker
+                codeLanguage = openingFence.language
+                continue
+            }
+
+            if trimmed.isEmpty {
+                flushParagraph()
+                continue
+            }
+
+            if isSeparator(trimmed) {
+                flushParagraph()
+                result.append(.separator)
+                continue
+            }
+
+            if let heading = heading(in: trimmed) {
+                flushParagraph()
+                result.append(.heading(level: heading.level, text: heading.text))
+                continue
+            }
+
+            if let item = unorderedListItem(in: trimmed) {
+                flushParagraph()
+                result.append(.unorderedListItem(item))
+                continue
+            }
+
+            if let item = orderedListItem(in: trimmed) {
+                flushParagraph()
+                result.append(
+                    .orderedListItem(number: item.number, text: item.text)
+                )
+                continue
+            }
+
+            if trimmed.hasPrefix(">") {
+                flushParagraph()
+                let quote = trimmed.dropFirst()
+                    .trimmingCharacters(in: .whitespaces)
+                result.append(.quote(quote))
+                continue
+            }
+
+            paragraphLines.append(line)
+        }
+
+        flushParagraph()
+        if fenceMarker != nil {
+            flushCode()
+        }
+        return result
+    }
+
+    private static func fenceDelimiter(
+        in line: String
+    ) -> (marker: String, language: String?)? {
+        let marker: String
+        if line.hasPrefix("```") {
+            marker = "```"
+        } else if line.hasPrefix("~~~") {
+            marker = "~~~"
+        } else {
+            return nil
+        }
+        let language = line.dropFirst(marker.count)
+            .trimmingCharacters(in: .whitespaces)
+        return (marker, language.isEmpty ? nil : language)
+    }
+
+    private static func heading(in line: String) -> (level: Int, text: String)? {
+        let markerCount = line.prefix(while: { $0 == "#" }).count
+        guard (1...6).contains(markerCount),
+              line.dropFirst(markerCount).first?.isWhitespace == true else {
+            return nil
+        }
+        return (
+            markerCount,
+            line.dropFirst(markerCount).trimmingCharacters(in: .whitespaces)
+        )
+    }
+
+    private static func unorderedListItem(in line: String) -> String? {
+        guard line.hasPrefix("- ")
+                || line.hasPrefix("* ")
+                || line.hasPrefix("+ ") else {
+            return nil
+        }
+        return line.dropFirst(2).trimmingCharacters(in: .whitespaces)
+    }
+
+    private static func orderedListItem(
+        in line: String
+    ) -> (number: String, text: String)? {
+        let characters = Array(line)
+        var digitEnd = 0
+        while digitEnd < characters.count, characters[digitEnd].isNumber {
+            digitEnd += 1
+        }
+        guard digitEnd > 0,
+              digitEnd + 1 < characters.count,
+              characters[digitEnd] == "." || characters[digitEnd] == ")",
+              characters[digitEnd + 1].isWhitespace else {
+            return nil
+        }
+        let number = String(characters[..<digitEnd])
+        let textStart = digitEnd + 2
+        let text = String(characters[textStart...])
+            .trimmingCharacters(in: .whitespaces)
+        return (number, text)
+    }
+
+    private static func isSeparator(_ line: String) -> Bool {
+        guard line.count >= 3 else { return false }
+        return line.allSatisfy { $0 == "-" }
+            || line.allSatisfy { $0 == "*" }
+            || line.allSatisfy { $0 == "_" }
+    }
+}
+
 enum AIChatMessageRole: String, Codable, Sendable {
     case user
     case assistant
@@ -262,6 +486,18 @@ struct AIConversationPage: Sendable {
     let messages: [AIChatMessage]
     let nextCursor: String?
     let hasMore: Bool
+}
+
+struct AIConversationListRequest: Sendable {
+    let scope: AIChatListScope
+    let query: String
+    let cursor: String?
+    let limit: Int
+}
+
+struct AIConversationListPage: Sendable {
+    let conversations: [AIConversationSummary]
+    let nextCursor: String?
 }
 
 enum AIChatStreamEvent: Sendable {
@@ -317,7 +553,9 @@ enum AIChatError: LocalizedError, Equatable {
     case unsupportedCodexVersion
     case loginCanceled
     case appServerTerminated
+    case appServerTimedOut
     case protocolError
+    case unsupportedOperation
 
     var errorDescription: String? {
         switch self {
@@ -342,23 +580,23 @@ enum AIChatError: LocalizedError, Equatable {
         case .rateLimited:
             "OpenAI is receiving too many requests. Wait a moment and try again."
         case .serverUnavailable:
-            "OpenAI is temporarily unavailable. Try again in a moment."
+            "The AI service is temporarily unavailable. Try again in a moment."
         case .requestTimedOut:
             "The OpenAI request timed out. Check your connection and try again."
         case let .apiFailure(code):
             if let code {
-                "OpenAI could not complete this request (\(code))."
+                "The AI provider could not complete this request (\(code))."
             } else {
-                "OpenAI could not complete this request."
+                "The AI provider could not complete this request."
             }
         case .streamProtocolError:
-            "Yorozu could not read the OpenAI response stream."
+            "Yorozu could not read the AI response stream."
         case let .streamTransportError(code):
-            "The OpenAI response stream ended unexpectedly (\(code))."
+            "The AI response stream ended unexpectedly (\(code))."
         case let .requestFailed(statusCode):
-            "OpenAI returned an error (\(statusCode))."
+            "The AI provider returned an error (\(statusCode))."
         case .invalidResponse:
-            "OpenAI returned an invalid response."
+            "The AI provider returned an invalid response."
         case .conversationUnavailable:
             "This conversation is no longer available."
         case .deletionFailed:
@@ -373,18 +611,26 @@ enum AIChatError: LocalizedError, Equatable {
             "ChatGPT sign-in was canceled."
         case .appServerTerminated:
             "Codex stopped unexpectedly. Try again."
+        case .appServerTimedOut:
+            "Codex did not respond. Try again."
         case .protocolError:
             "Yorozu could not read the Codex app-server response."
+        case .unsupportedOperation:
+            "This AI provider does not support that operation."
         }
     }
 }
 
 protocol AIChatProvider: Sendable {
     var descriptor: AIProviderDescriptor { get }
+    var policies: AIProviderPolicies { get }
 
     func availability() async -> AIProviderAvailability
     func authenticationState() async -> AIAuthenticationState
     func availableModels() async throws -> [AIModel]
+    func listConversations(
+        request: AIConversationListRequest
+    ) async throws -> AIConversationListPage
     func createConversation(title: String, model: AIModel) async throws -> String
     func updateConversation(
         conversationID: String,
@@ -413,6 +659,14 @@ protocol AIChatProvider: Sendable {
 }
 
 extension AIChatProvider {
+    var policies: AIProviderPolicies { .localConversationIndex }
+
+    func listConversations(
+        request: AIConversationListRequest
+    ) async throws -> AIConversationListPage {
+        throw AIChatError.unsupportedOperation
+    }
+
     func setConversationArchived(
         conversationID: String,
         title: String,

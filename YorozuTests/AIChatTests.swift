@@ -60,6 +60,62 @@ final class AIChatStorageTests: XCTestCase {
         }
     }
 
+    @MainActor
+    func testViewModelStorePreservesProviderRegistrationOrderForSettings() {
+        let defaults = UserDefaults(
+            suiteName: "com.yorozu.provider-store-tests.\(UUID().uuidString)"
+        )!
+        let providerPreferences = AIProviderPreferences(defaults: defaults)
+        providerPreferences.setEnabled(true, for: .openAIAPI)
+        providerPreferences.setDefault(.openAIAPI)
+
+        let openAI = makeProviderViewModel(
+            providerID: .openAIAPI,
+            defaults: defaults
+        )
+        let codex = makeProviderViewModel(
+            providerID: .codex,
+            defaults: defaults
+        )
+        let store = AIChatViewModelStore(
+            viewModels: [openAI, codex],
+            providerPreferences: providerPreferences
+        )
+
+        XCTAssertEqual(
+            store.orderedViewModels.map(\.providerID),
+            [.openAIAPI, .codex]
+        )
+        XCTAssertEqual(store.resolvedProviderID(preferred: nil), .openAIAPI)
+        XCTAssertEqual(store.resolvedProviderID(preferred: .codex), .codex)
+        XCTAssertTrue(store.defaultViewModel() === openAI)
+    }
+
+    @MainActor
+    func testSettingsProviderSelectionFallsBackToFirstRegisteredProvider() {
+        let defaults = UserDefaults(
+            suiteName: "com.yorozu.provider-store-tests.\(UUID().uuidString)"
+        )!
+        let providerPreferences = AIProviderPreferences(defaults: defaults)
+        let openAI = makeProviderViewModel(
+            providerID: .openAIAPI,
+            defaults: defaults
+        )
+        let store = AIChatViewModelStore(
+            viewModels: [openAI],
+            providerPreferences: providerPreferences
+        )
+
+        XCTAssertEqual(store.resolvedProviderID(preferred: nil), .openAIAPI)
+        XCTAssertEqual(
+            store.resolvedProviderID(
+                preferred: AIProviderID(rawValue: "unregistered")
+            ),
+            .openAIAPI
+        )
+        XCTAssertTrue(store.defaultViewModel() === openAI)
+    }
+
     func testConversationIndexSeparatesIdenticalProviderConversationIDs() async throws {
         let fixture = try makeStore()
         let openAI = makeConversation(
@@ -129,9 +185,110 @@ final class AIChatStorageTests: XCTestCase {
             methods,
             [
                 "account/read", "model/list", "thread/start",
-                "thread/archive", "thread/unarchive", "thread/delete",
+                "thread/name/set", "thread/archive", "thread/unarchive", "thread/delete",
             ]
         )
+    }
+
+    func testCodexAppServerClientStartsOneProcessForConcurrentInitialRequests() async throws {
+        let fixture = try makeCodexAppServerFixture(mode: .responding)
+        let client = CodexAppServerClient(
+            executableURL: fixture.executableURL,
+            requestTimeout: .seconds(2)
+        )
+
+        async let account = client.request(
+            method: "account/read",
+            params: .object([:])
+        )
+        async let models = client.request(
+            method: "model/list",
+            params: .object([:])
+        )
+        _ = try await (account, models)
+        await client.stop()
+
+        let launches = try String(contentsOf: fixture.launchCountURL, encoding: .utf8)
+            .split(whereSeparator: \Character.isNewline)
+        XCTAssertEqual(launches.count, 1)
+        try? FileManager.default.removeItem(at: fixture.directoryURL)
+    }
+
+    func testCodexAppServerClientTimesOutAndStopsUnresponsiveProcess() async throws {
+        let fixture = try makeCodexAppServerFixture(mode: .unresponsive)
+        let client = CodexAppServerClient(
+            executableURL: fixture.executableURL,
+            requestTimeout: .milliseconds(100)
+        )
+
+        do {
+            _ = try await client.request(
+                method: "account/read",
+                params: .object([:])
+            )
+            XCTFail("Expected the unresponsive app-server to time out")
+        } catch {
+            XCTAssertEqual(error as? AIChatError, .appServerTimedOut)
+        }
+        await client.stop()
+        try? FileManager.default.removeItem(at: fixture.directoryURL)
+    }
+
+    func testCancelingFirstRequestDoesNotTerminateSharedCodexStartup() async throws {
+        let fixture = try makeCodexAppServerFixture(mode: .responding)
+        let client = CodexAppServerClient(
+            executableURL: fixture.executableURL,
+            requestTimeout: .seconds(2)
+        )
+        let firstRequest = Task {
+            try await client.request(method: "account/read", params: .object([:]))
+        }
+        try await Task.sleep(for: .milliseconds(20))
+        let secondRequest = Task {
+            try await client.request(method: "model/list", params: .object([:]))
+        }
+        firstRequest.cancel()
+
+        _ = try await secondRequest.value
+        do {
+            _ = try await firstRequest.value
+            XCTFail("Expected the canceled request to stop before account/read")
+        } catch is CancellationError {
+            // Expected: shared initialization stays alive for the second request.
+        }
+        await client.stop()
+
+        let launches = try String(contentsOf: fixture.launchCountURL, encoding: .utf8)
+            .split(whereSeparator: \Character.isNewline)
+        XCTAssertEqual(launches.count, 1)
+        try? FileManager.default.removeItem(at: fixture.directoryURL)
+    }
+
+    func testCodexProviderListsOnlyUserFacingThreadSourcesAndMapsMetadata() async throws {
+        let server = FakeCodexAppServer()
+        let provider = CodexAIProvider(clientFactory: { server })
+
+        let page = try await provider.listConversations(
+            request: AIConversationListRequest(
+                scope: .active,
+                query: "swift",
+                cursor: "next-page",
+                limit: 50
+            )
+        )
+
+        XCTAssertEqual(page.conversations.map(\.id), ["thread-listed"])
+        XCTAssertEqual(page.conversations.first?.title, "Listed thread")
+        XCTAssertEqual(page.nextCursor, nil)
+        let params = await server.params(for: "thread/list")
+        XCTAssertEqual(
+            params?["sourceKinds"]?.arrayValue?.compactMap(\.stringValue),
+            ["cli", "vscode", "appServer"]
+        )
+        XCTAssertEqual(params?["archived"]?.boolValue, false)
+        XCTAssertEqual(params?["searchTerm"]?.stringValue, "swift")
+        XCTAssertEqual(params?["cursor"]?.stringValue, "next-page")
+        XCTAssertEqual(params?["sortKey"]?.stringValue, "recency_at")
     }
 
     func testCodexLoginCancelUsesReturnedLoginID() async throws {
@@ -171,6 +328,14 @@ final class AIChatStorageTests: XCTestCase {
         }
         XCTAssertEqual(events, ["created", "Hello", "completed"])
 
+        let methods = await server.recordedMethods()
+        let resumeIndex = try XCTUnwrap(methods.firstIndex(of: "thread/resume"))
+        let turnIndex = try XCTUnwrap(methods.firstIndex(of: "turn/start"))
+        XCTAssertLessThan(resumeIndex, turnIndex)
+        let resumeParams = await server.params(for: "thread/resume")
+        XCTAssertEqual(resumeParams?["approvalPolicy"]?.stringValue, "never")
+        XCTAssertEqual(resumeParams?["sandbox"]?.stringValue, "read-only")
+
         await server.setCompletesTurns(false)
         let task = Task {
             for try await _ in provider.streamResponse(request: request) {}
@@ -179,8 +344,8 @@ final class AIChatStorageTests: XCTestCase {
         await provider.stopGeneration(conversationID: "thread-test")
         task.cancel()
         _ = try? await task.value
-        let methods = await server.recordedMethods()
-        XCTAssertTrue(methods.contains("turn/interrupt"))
+        let methodsAfterInterrupt = await server.recordedMethods()
+        XCTAssertTrue(methodsAfterInterrupt.contains("turn/interrupt"))
     }
 
     func testConversationIndexRoundTripsOnlyListMetadata() async throws {
@@ -236,6 +401,70 @@ final class AIChatStorageTests: XCTestCase {
 
         XCTAssertEqual(title.count, 60)
         XCTAssertEqual(title, String(repeating: "a", count: 60))
+    }
+
+    func testProviderAuthoritativeCoordinatorReplacesOnlyCompletedScope() async throws {
+        let staleActive = makeConversation(
+            id: "stale-active",
+            title: "Stale",
+            providerID: .codex,
+            lastMessageAt: Date(timeIntervalSince1970: 100)
+        )
+        let archived = makeConversation(
+            id: "archived",
+            title: "Archived",
+            providerID: .codex,
+            isArchived: true,
+            lastMessageAt: Date(timeIntervalSince1970: 90)
+        )
+        let fresh = makeConversation(
+            id: "fresh-active",
+            title: "Fresh",
+            providerID: .codex,
+            lastMessageAt: Date(timeIntervalSince1970: 200)
+        )
+        let catalog = AIConversationCatalog(
+            providerID: .codex,
+            store: nil,
+            initialConversations: [staleActive, archived]
+        )
+        let provider = ConversationListTestProvider(values: [fresh])
+        let coordinator = AIConversationCoordinator(catalog: catalog, provider: provider)
+
+        let cached = await coordinator.loadIndex()
+        XCTAssertEqual(Set(cached.values.map(\.id)), ["stale-active", "archived"])
+        _ = try await coordinator.refreshIndex(query: "", scope: .active)
+
+        let active = await coordinator.search(query: "", scope: .active)
+        let archivedValues = await coordinator.search(query: "", scope: .archived)
+        XCTAssertEqual(active.map(\.id), ["fresh-active"])
+        XCTAssertEqual(archivedValues.map(\.id), ["archived"])
+    }
+
+    func testProviderRefreshFailureDoesNotPruneCachedConversations() async {
+        let cachedConversation = makeConversation(
+            id: "cached",
+            title: "Cached",
+            providerID: .codex,
+            lastMessageAt: Date(timeIntervalSince1970: 100)
+        )
+        let catalog = AIConversationCatalog(
+            providerID: .codex,
+            store: nil,
+            initialConversations: [cachedConversation]
+        )
+        let coordinator = AIConversationCoordinator(
+            catalog: catalog,
+            provider: ConversationListTestProvider(values: [], shouldFail: true)
+        )
+
+        do {
+            _ = try await coordinator.refreshIndex(query: "", scope: .active)
+            XCTFail("Expected provider refresh to fail")
+        } catch {}
+
+        let values = await coordinator.search(query: "", scope: .active)
+        XCTAssertEqual(values.map(\.id), ["cached"])
     }
 
     func testWebSearchToolIsIncludedOnlyWhenExplicitlyEnabled() {
@@ -397,6 +626,123 @@ final class AIChatStorageTests: XCTestCase {
         )
     }
 
+    func testMessageFormatterPreservesPlainTextSoftLineBreaks() {
+        let blocks = AIChatMessageFormatter.blocks(
+            text: "First line\nSecond line\n\nNext paragraph",
+            citations: []
+        )
+
+        XCTAssertEqual(
+            blocks,
+            [
+                .paragraph("First line\nSecond line"),
+                .paragraph("Next paragraph"),
+            ]
+        )
+    }
+
+    func testMessageFormatterSeparatesListAndCodeBlockStructure() {
+        let source = """
+        Intro
+        - First item
+        - Second item
+
+        ```swift
+        let value = 1
+        print(value)
+        ```
+        Done
+        """
+
+        let blocks = AIChatMessageFormatter.blocks(
+            text: source,
+            citations: []
+        )
+
+        XCTAssertEqual(
+            blocks,
+            [
+                .paragraph("Intro"),
+                .unorderedListItem("First item"),
+                .unorderedListItem("Second item"),
+                .code(
+                    language: "swift",
+                    content: "let value = 1\nprint(value)"
+                ),
+                .paragraph("Done"),
+            ]
+        )
+    }
+
+    func testMessageFormatterAddsCitationsBeforePreservingLineBreaks() {
+        let citation = AIChatCitation(
+            id: "citation-1",
+            title: "Example",
+            url: URL(string: "https://example.com/source")!,
+            startIndex: 0,
+            endIndex: 5
+        )
+
+        let blocks = AIChatMessageFormatter.blocks(
+            text: "Hello\nworld",
+            citations: [citation]
+        )
+
+        XCTAssertEqual(
+            blocks,
+            [
+                .paragraph(
+                    "Hello [[1]](<https://example.com/source>)\nworld"
+                ),
+            ]
+        )
+    }
+
+    func testStreamingContentGrowthKeepsFollowingLatest() {
+        var state = AIConversationScrollState()
+
+        state.updateGeometry(isAtLatest: false)
+
+        XCTAssertFalse(state.isAtLatest)
+        XCTAssertTrue(state.shouldFollowLatest)
+    }
+
+    func testUserScrollAwayStopsFollowingUntilLatestIsVisibleAgain() {
+        var state = AIConversationScrollState()
+
+        state.userInteractionDidBegin()
+        state.updateGeometry(isAtLatest: false)
+        state.userInteractionDidEnd()
+
+        XCTAssertFalse(state.shouldFollowLatest)
+        XCTAssertFalse(state.isUserInteracting)
+
+        state.updateGeometry(isAtLatest: true)
+
+        XCTAssertTrue(state.isAtLatest)
+        XCTAssertTrue(state.shouldFollowLatest)
+    }
+
+    func testScrollPhaseCanBeginAfterGeometryLeavesLatest() {
+        var state = AIConversationScrollState()
+
+        state.updateGeometry(isAtLatest: false)
+        state.userInteractionDidBegin()
+
+        XCTAssertFalse(state.shouldFollowLatest)
+        XCTAssertTrue(state.isUserInteracting)
+    }
+
+    func testResetToLatestRestoresFollowingAfterReopeningConversation() {
+        var state = AIConversationScrollState()
+        state.userInteractionDidBegin()
+        state.updateGeometry(isAtLatest: false)
+
+        state.resetToLatest()
+
+        XCTAssertEqual(state, AIConversationScrollState())
+    }
+
     private func makeRequest(enablesWebSearch: Bool) -> AIChatSendRequest {
         AIChatSendRequest(
             conversationID: "conversation-test",
@@ -423,6 +769,21 @@ final class AIChatStorageTests: XCTestCase {
             try? FileManager.default.removeItem(at: directory)
         }
         return (store, directory)
+    }
+
+    @MainActor
+    private func makeProviderViewModel(
+        providerID: AIProviderID,
+        defaults: UserDefaults
+    ) -> AIChatViewModel {
+        AIChatViewModel(
+            catalog: AIConversationCatalog(providerID: providerID, store: nil),
+            provider: RegistryTestProvider(providerID: providerID),
+            preferences: AIChatPreferences(
+                defaults: defaults,
+                providerID: providerID
+            )
+        )
     }
 
     private func makeConversation(
@@ -459,6 +820,25 @@ final class AIChatViewModelTests: XCTestCase {
 
         XCTAssertEqual(viewModel.destination, .newChat)
         XCTAssertEqual(viewModel.prompt, "Provider-specific draft")
+    }
+
+    func testPrepareForPresentationRequestsLatestWhenConversationIsVisible() async {
+        let conversation = makeConversation(title: "Latest conversation")
+        let viewModel = makeViewModel(
+            service: AIChatTestService(),
+            conversations: [conversation]
+        )
+        viewModel.prepareForPresentation()
+        await waitUntil { viewModel.visibleConversations.count == 1 }
+        viewModel.openConversation(id: conversation.id)
+        let requestAfterOpening = viewModel.scrollToLatestRequest
+
+        viewModel.prepareForPresentation()
+
+        XCTAssertEqual(
+            viewModel.scrollToLatestRequest,
+            requestAfterOpening + 1
+        )
     }
 
     func testNewChatDoesNotCreateServerConversationUntilFirstSend() async throws {
@@ -874,6 +1254,72 @@ private actor AIChatTestService: OpenAIChatServing {
     }
 }
 
+private enum CodexAppServerFixtureMode {
+    case responding
+    case unresponsive
+}
+
+private struct CodexAppServerFixture {
+    let directoryURL: URL
+    let executableURL: URL
+    let launchCountURL: URL
+}
+
+private func makeCodexAppServerFixture(
+    mode: CodexAppServerFixtureMode
+) throws -> CodexAppServerFixture {
+    let directoryURL = FileManager.default.temporaryDirectory
+        .appendingPathComponent("yorozu-codex-fixture-\(UUID().uuidString)", isDirectory: true)
+    try FileManager.default.createDirectory(
+        at: directoryURL,
+        withIntermediateDirectories: true
+    )
+    let executableURL = directoryURL.appendingPathComponent("codex-fixture")
+    let launchCountURL = directoryURL.appendingPathComponent("launch-count")
+    let responseBody: String
+    switch mode {
+    case .responding:
+        responseBody = #"""
+        case "$line" in
+          *\"method\":\"initialize\"*)
+            sleep 0.15
+            printf '{"id":%s,"result":{}}\n' "$id"
+            ;;
+          *account*read*)
+            printf '{"id":%s,"result":{"account":null}}\n' "$id"
+            ;;
+          *model*list*)
+            printf '{"id":%s,"result":{"data":[],"nextCursor":null}}\n' "$id"
+            ;;
+          *)
+            printf '{"id":%s,"result":{}}\n' "$id"
+            ;;
+        esac
+        """#
+    case .unresponsive:
+        responseBody = ":"
+    }
+    let script = """
+    #!/bin/sh
+    printf '1\\n' >> '\(launchCountURL.path)'
+    while IFS= read -r line; do
+      id=$(printf '%s' "$line" | sed -n 's/.*"id":\\([0-9][0-9]*\\).*/\\1/p')
+      [ -n "$id" ] || continue
+      \(responseBody)
+    done
+    """
+    try script.write(to: executableURL, atomically: true, encoding: .utf8)
+    try FileManager.default.setAttributes(
+        [.posixPermissions: 0o755],
+        ofItemAtPath: executableURL.path
+    )
+    return CodexAppServerFixture(
+        directoryURL: directoryURL,
+        executableURL: executableURL,
+        launchCountURL: launchCountURL
+    )
+}
+
 private actor FakeCodexAppServer: CodexAppServerServing {
     private var methods: [String] = []
     private var parameters: [String: CodexJSONValue] = [:]
@@ -913,6 +1359,20 @@ private actor FakeCodexAppServer: CodexAppServerServing {
         case "thread/start":
             return .object([
                 "thread": .object(["id": .string("thread-test")]),
+            ])
+        case "thread/list":
+            return .object([
+                "data": .array([
+                    .object([
+                        "id": .string("thread-listed"),
+                        "name": .string("Listed thread"),
+                        "preview": .string("Fallback preview"),
+                        "model": .string("codex-test-model"),
+                        "createdAt": .number(100),
+                        "updatedAt": .number(200),
+                    ]),
+                ]),
+                "nextCursor": .null,
             ])
         case "turn/start":
             if completesTurns {
@@ -1029,6 +1489,60 @@ private actor RegistryTestProvider: AIChatProvider {
     }
     func uploadAttachment(_ attachment: AIChatAttachment) throws -> AIUploadedAttachment {
         throw AIChatError.invalidAttachment
+    }
+    nonisolated func streamResponse(
+        request: AIChatSendRequest
+    ) -> AsyncThrowingStream<AIChatStreamEvent, Error> {
+        AsyncThrowingStream { $0.finish() }
+    }
+    func stopGeneration(conversationID: String) {}
+    func deleteConversationCompletely(conversationID: String) {}
+    func shutdown() {}
+}
+
+private actor ConversationListTestProvider: AIChatProvider {
+    nonisolated let descriptor = AIProviderDescriptor(
+        id: .codex,
+        displayName: "List Test",
+        rootCommandTitle: "List Test",
+        description: "Provider-authoritative list test",
+        symbolName: "terminal",
+        capabilities: [.providerConversationListing]
+    )
+    nonisolated let policies = AIProviderPolicies.providerConversationIndex
+    private let values: [AIConversationSummary]
+    private let shouldFail: Bool
+
+    init(values: [AIConversationSummary], shouldFail: Bool = false) {
+        self.values = values
+        self.shouldFail = shouldFail
+    }
+
+    func availability() -> AIProviderAvailability { .available }
+    func authenticationState() -> AIAuthenticationState { .authenticated(detail: nil) }
+    func availableModels() -> [AIModel] { [.terra] }
+    func listConversations(
+        request: AIConversationListRequest
+    ) throws -> AIConversationListPage {
+        if shouldFail { throw AIChatError.providerUnavailable }
+        return AIConversationListPage(conversations: values, nextCursor: nil)
+    }
+    func createConversation(title: String, model: AIModel) -> String { "test" }
+    func updateConversation(
+        conversationID: String,
+        title: String,
+        model: AIModel,
+        isArchived: Bool
+    ) {}
+    func loadConversation(
+        conversationID: String,
+        limit: Int,
+        after: String?
+    ) -> AIConversationPage {
+        AIConversationPage(messages: [], nextCursor: nil, hasMore: false)
+    }
+    func uploadAttachment(_ attachment: AIChatAttachment) throws -> AIUploadedAttachment {
+        throw AIChatError.unsupportedOperation
     }
     nonisolated func streamResponse(
         request: AIChatSendRequest

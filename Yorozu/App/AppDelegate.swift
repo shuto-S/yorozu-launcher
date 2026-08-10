@@ -194,7 +194,13 @@ private actor UITestOpenAIChatService: OpenAIChatServing {
                 AIChatMessage(
                     id: "message-ui-assistant-1",
                     role: .assistant,
-                    text: "Keep the launch path local, cache searchable snapshots in memory, and move network or database work away from selection changes.",
+                    text: """
+                    Keep the launch path local.
+                    Cache searchable snapshots in memory.
+
+                    - Move network work away from selection changes.
+                    - Keep database work off the launch path.
+                    """,
                     citations: [],
                     attachments: [],
                     isStreaming: false

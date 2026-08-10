@@ -54,6 +54,11 @@ enum CodexJSONValue: Codable, Sendable, Equatable {
         return value
     }
 
+    var numberValue: Double? {
+        guard case let .number(value) = self else { return nil }
+        return value
+    }
+
     var arrayValue: [CodexJSONValue]? {
         guard case let .array(value) = self else { return nil }
         return value
@@ -84,19 +89,28 @@ actor CodexAppServerClient: CodexAppServerServing {
     }
 
     private let executableURL: URL
+    private let requestTimeout: Duration
     private var process: Process?
+    private var processGeneration: UUID?
     private var inputHandle: FileHandle?
-    private var outputTask: Task<Void, Never>?
-    private var errorDrainTask: Task<Void, Never>?
+    private var outputHandle: FileHandle?
+    private var errorHandle: FileHandle?
+    private var outputBuffer = Data()
     private var nextRequestID = 1
     private var pending: [Int: CheckedContinuation<CodexJSONValue, Error>] = [:]
+    private var requestTimeoutTasks: [Int: Task<Void, Never>] = [:]
+    private var startupWaiters: [CheckedContinuation<Void, Error>] = []
     private var notificationContinuations:
         [UUID: AsyncStream<CodexAppServerNotification>.Continuation] = [:]
     private var isInitialized = false
-    private var isStopping = false
+    private var isStarting = false
 
-    init(executableURL: URL) {
+    init(
+        executableURL: URL,
+        requestTimeout: Duration = .seconds(10)
+    ) {
         self.executableURL = executableURL
+        self.requestTimeout = requestTimeout
     }
 
     func request(
@@ -104,6 +118,7 @@ actor CodexAppServerClient: CodexAppServerServing {
         params: CodexJSONValue = .object([:])
     ) async throws -> CodexJSONValue {
         try await startIfNeeded()
+        try Task.checkCancellation()
         return try await sendRequest(method: method, params: params)
     }
 
@@ -118,18 +133,10 @@ actor CodexAppServerClient: CodexAppServerServing {
     }
 
     func stop() async {
-        isStopping = true
-        outputTask?.cancel()
-        errorDrainTask?.cancel()
-        outputTask = nil
-        errorDrainTask = nil
-        if process?.isRunning == true {
-            process?.terminate()
-        }
-        process = nil
-        inputHandle = nil
-        isInitialized = false
+        isStarting = false
+        finishStartupWaiters(with: .failure(AIChatError.appServerTerminated))
         finishPending(with: AIChatError.appServerTerminated)
+        resetProcess(terminate: true)
         for continuation in notificationContinuations.values {
             continuation.finish()
         }
@@ -138,21 +145,50 @@ actor CodexAppServerClient: CodexAppServerServing {
 
     private func startIfNeeded() async throws {
         if process?.isRunning == true, isInitialized { return }
+        if isStarting {
+            try await withCheckedThrowingContinuation { continuation in
+                startupWaiters.append(continuation)
+            }
+            return
+        }
         guard FileManager.default.isExecutableFile(atPath: executableURL.path) else {
             throw AIChatError.codexNotInstalled
         }
 
+        isStarting = true
+        do {
+            try await launchAndInitialize()
+            isStarting = false
+            finishStartupWaiters(with: .success(()))
+        } catch {
+            isStarting = false
+            finishStartupWaiters(with: .failure(error))
+            finishPending(with: error)
+            resetProcess(terminate: true)
+            throw error
+        }
+    }
+
+    private func launchAndInitialize() async throws {
+        resetProcess(terminate: true)
         let process = Process()
         let input = Pipe()
         let output = Pipe()
         let error = Pipe()
+        let generation = UUID()
         process.executableURL = executableURL
         process.arguments = ["app-server", "--listen", "stdio://"]
         process.standardInput = input
         process.standardOutput = output
         process.standardError = error
-        process.terminationHandler = { [weak self] _ in
-            Task { await self?.processDidTerminate() }
+        process.terminationHandler = { [weak self] process in
+            let processIdentifier = process.processIdentifier
+            Task {
+                await self?.processDidTerminate(
+                    generation: generation,
+                    processIdentifier: processIdentifier
+                )
+            }
         }
         do {
             try process.run()
@@ -160,28 +196,24 @@ actor CodexAppServerClient: CodexAppServerServing {
             throw AIChatError.codexNotInstalled
         }
         self.process = process
+        processGeneration = generation
         inputHandle = input.fileHandleForWriting
-        isStopping = false
 
         let outputHandle = output.fileHandleForReading
-        outputTask = Task.detached(priority: .userInitiated) { [weak self] in
-            do {
-                for try await line in outputHandle.bytes.lines {
-                    guard !Task.isCancelled else { break }
-                    await self?.receive(line: line)
-                }
-            } catch {
-                await self?.streamDidFail()
+        self.outputHandle = outputHandle
+        outputBuffer.removeAll(keepingCapacity: true)
+        outputHandle.readabilityHandler = { [weak self] handle in
+            let data = handle.availableData
+            Task {
+                await self?.receive(data: data, generation: generation)
             }
         }
         let errorHandle = error.fileHandleForReading
-        errorDrainTask = Task.detached(priority: .utility) {
-            do {
-                for try await _ in errorHandle.bytes {
-                    guard !Task.isCancelled else { break }
-                }
-            } catch {
-                // stderr is intentionally drained without retention or logging.
+        self.errorHandle = errorHandle
+        errorHandle.readabilityHandler = { handle in
+            // stderr is intentionally drained without retention or logging.
+            if handle.availableData.isEmpty {
+                handle.readabilityHandler = nil
             }
         }
 
@@ -194,7 +226,8 @@ actor CodexAppServerClient: CodexAppServerServing {
                     "version": .string("0.1.0"),
                 ]),
                 "capabilities": .object(["experimentalApi": .bool(false)]),
-            ])
+            ]),
+            cancelsWithTask: false
         )
         try write(
             .object([
@@ -207,27 +240,49 @@ actor CodexAppServerClient: CodexAppServerServing {
 
     private func sendRequest(
         method: String,
-        params: CodexJSONValue
+        params: CodexJSONValue,
+        cancelsWithTask: Bool = true
     ) async throws -> CodexJSONValue {
         let id = nextRequestID
         nextRequestID &+= 1
+        if !cancelsWithTask {
+            return try await waitForResponse(id: id, method: method, params: params)
+        }
         return try await withTaskCancellationHandler {
-            try await withCheckedThrowingContinuation { continuation in
-                pending[id] = continuation
-                do {
-                    try write(
-                        .object([
-                            "id": .number(Double(id)),
-                            "method": .string(method),
-                            "params": params,
-                        ])
-                    )
-                } catch {
-                    pending.removeValue(forKey: id)?.resume(throwing: error)
-                }
-            }
+            try await waitForResponse(id: id, method: method, params: params)
         } onCancel: {
             Task { await self.cancelRequest(id) }
+        }
+    }
+
+    private func waitForResponse(
+        id: Int,
+        method: String,
+        params: CodexJSONValue
+    ) async throws -> CodexJSONValue {
+        try await withCheckedThrowingContinuation { continuation in
+            pending[id] = continuation
+            let timeout = requestTimeout
+            requestTimeoutTasks[id] = Task { [weak self] in
+                do {
+                    try await Task.sleep(for: timeout)
+                } catch {
+                    return
+                }
+                await self?.requestDidTimeOut(id)
+            }
+            do {
+                try write(
+                    .object([
+                        "id": .number(Double(id)),
+                        "method": .string(method),
+                        "params": params,
+                    ])
+                )
+            } catch {
+                requestTimeoutTasks.removeValue(forKey: id)?.cancel()
+                pending.removeValue(forKey: id)?.resume(throwing: error)
+            }
         }
     }
 
@@ -238,13 +293,36 @@ actor CodexAppServerClient: CodexAppServerServing {
         try inputHandle.write(contentsOf: data)
     }
 
-    private func receive(line: String) {
+    private func receive(data: Data, generation: UUID) {
+        guard processGeneration == generation else { return }
+        guard !data.isEmpty else {
+            streamDidFail(generation: generation)
+            return
+        }
+        outputBuffer.append(data)
+        while let newline = outputBuffer.firstIndex(of: 0x0A) {
+            var lineData = outputBuffer[..<newline]
+            if lineData.last == 0x0D {
+                lineData = lineData.dropLast()
+            }
+            outputBuffer.removeSubrange(...newline)
+            guard let line = String(data: lineData, encoding: .utf8) else {
+                streamDidFail(generation: generation)
+                return
+            }
+            receive(line: line, generation: generation)
+        }
+    }
+
+    private func receive(line: String, generation: UUID) {
+        guard processGeneration == generation else { return }
         guard let data = line.data(using: .utf8),
               let envelope = try? JSONDecoder().decode(ResponseEnvelope.self, from: data) else {
             finishPending(with: AIChatError.protocolError)
             return
         }
         if let id = envelope.id {
+            requestTimeoutTasks.removeValue(forKey: id)?.cancel()
             guard let continuation = pending.removeValue(forKey: id) else { return }
             if envelope.error != nil {
                 continuation.resume(throwing: AIChatError.protocolError)
@@ -264,35 +342,82 @@ actor CodexAppServerClient: CodexAppServerServing {
     }
 
     private func cancelRequest(_ id: Int) {
+        requestTimeoutTasks.removeValue(forKey: id)?.cancel()
         pending.removeValue(forKey: id)?.resume(throwing: CancellationError())
+    }
+
+    private func requestDidTimeOut(_ id: Int) {
+        guard let continuation = pending.removeValue(forKey: id) else { return }
+        requestTimeoutTasks.removeValue(forKey: id)
+        continuation.resume(throwing: AIChatError.appServerTimedOut)
+        finishPending(with: AIChatError.appServerTimedOut)
+        resetProcess(terminate: true)
     }
 
     private func removeNotificationContinuation(_ id: UUID) {
         notificationContinuations.removeValue(forKey: id)
     }
 
-    private func processDidTerminate() {
-        guard !isStopping else { return }
-        process = nil
-        inputHandle = nil
-        isInitialized = false
-        finishPending(with: AIChatError.appServerTerminated)
-        for continuation in notificationContinuations.values {
-            continuation.finish()
+    private func processDidTerminate(
+        generation: UUID,
+        processIdentifier: Int32
+    ) {
+        guard processGeneration == generation,
+              process?.processIdentifier == processIdentifier else {
+            return
         }
-        notificationContinuations.removeAll()
+        resetProcess(terminate: false)
+        finishPending(with: AIChatError.appServerTerminated)
     }
 
-    private func streamDidFail() {
-        guard !isStopping else { return }
+    private func streamDidFail(generation: UUID) {
+        guard processGeneration == generation else { return }
         finishPending(with: AIChatError.appServerTerminated)
+        resetProcess(terminate: true)
     }
 
     private func finishPending(with error: Error) {
         let values = pending.values
         pending.removeAll()
+        let timeoutTasks = requestTimeoutTasks.values
+        requestTimeoutTasks.removeAll()
+        for task in timeoutTasks {
+            task.cancel()
+        }
         for continuation in values {
             continuation.resume(throwing: error)
+        }
+    }
+
+    private func finishStartupWaiters(with result: Result<Void, Error>) {
+        let waiters = startupWaiters
+        startupWaiters.removeAll()
+        for continuation in waiters {
+            switch result {
+            case .success:
+                continuation.resume()
+            case let .failure(error):
+                continuation.resume(throwing: error)
+            }
+        }
+    }
+
+    private func resetProcess(terminate: Bool) {
+        let currentProcess = process
+        process = nil
+        processGeneration = nil
+        isInitialized = false
+        outputHandle?.readabilityHandler = nil
+        errorHandle?.readabilityHandler = nil
+        try? inputHandle?.close()
+        try? outputHandle?.close()
+        try? errorHandle?.close()
+        inputHandle = nil
+        outputHandle = nil
+        errorHandle = nil
+        outputBuffer.removeAll(keepingCapacity: true)
+        if terminate, currentProcess?.isRunning == true {
+            currentProcess?.terminate()
         }
     }
 }
@@ -330,9 +455,11 @@ actor CodexAIProvider: AIChatProvider, CodexAuthenticationManaging {
         symbolName: "terminal",
         capabilities: [
             .authentication, .modelSelection, .streaming, .archive,
-            .deletion, .rateLimitStatus,
+            .deletion, .rateLimitStatus, .providerConversationListing,
+            .cancellation,
         ]
     )
+    nonisolated let policies = AIProviderPolicies.providerConversationIndex
 
     private var configuredExecutablePath: String
     private let clientFactory: (@Sendable () throws -> any CodexAppServerServing)?
@@ -366,8 +493,14 @@ actor CodexAIProvider: AIChatProvider, CodexAuthenticationManaging {
             guard account != .null else { return .authenticationRequired }
             let plan = account["planType"]?.stringValue
             return .authenticated(detail: plan.map { "ChatGPT \($0)" })
-        } catch let error as AIChatError where error == .codexNotInstalled {
-            return .failed(message: error.localizedDescription)
+        } catch let error as AIChatError {
+            switch error {
+            case .codexNotInstalled, .appServerTimedOut,
+                 .appServerTerminated, .protocolError:
+                return .failed(message: error.localizedDescription)
+            default:
+                return .failed(message: "Codex authentication status is unavailable.")
+            }
         } catch {
             return .failed(message: "Codex authentication status is unavailable.")
         }
@@ -402,6 +535,42 @@ actor CodexAIProvider: AIChatProvider, CodexAuthenticationManaging {
         return models
     }
 
+    func listConversations(
+        request: AIConversationListRequest
+    ) async throws -> AIConversationListPage {
+        var params: [String: CodexJSONValue] = [
+            "sourceKinds": .array([
+                .string("cli"),
+                .string("vscode"),
+                .string("appServer"),
+            ]),
+            "archived": .bool(request.scope == .archived),
+            "limit": .number(Double(request.limit)),
+            "sortKey": .string("recency_at"),
+            "sortDirection": .string("desc"),
+            "useStateDbOnly": .bool(false),
+        ]
+        if let cursor = request.cursor {
+            params["cursor"] = .string(cursor)
+        }
+        let query = request.query.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !query.isEmpty {
+            params["searchTerm"] = .string(query)
+        }
+        let result = try await resolvedClient().request(
+            method: "thread/list",
+            params: .object(params)
+        )
+        let now = Date()
+        let conversations = (result["data"]?.arrayValue ?? []).compactMap {
+            Self.conversationSummary(from: $0, archived: request.scope == .archived, now: now)
+        }
+        return AIConversationListPage(
+            conversations: conversations,
+            nextCursor: result["nextCursor"]?.stringValue
+        )
+    }
+
     func createConversation(title: String, model: AIModel) async throws -> String {
         let result = try await resolvedClient().request(
             method: "thread/start",
@@ -419,6 +588,16 @@ actor CodexAIProvider: AIChatProvider, CodexAuthenticationManaging {
         guard let id = result["thread"]?["id"]?.stringValue else {
             throw AIChatError.protocolError
         }
+        // A thread already exists at this point. Treat naming as best effort so
+        // an older app-server cannot turn a usable thread into an apparent
+        // creation failure and leave it unreachable from the current session.
+        _ = try? await resolvedClient().request(
+            method: "thread/name/set",
+            params: .object([
+                "threadId": .string(id),
+                "name": .string(title),
+            ])
+        )
         return id
     }
 
@@ -427,7 +606,15 @@ actor CodexAIProvider: AIChatProvider, CodexAuthenticationManaging {
         title: String,
         model: AIModel,
         isArchived: Bool
-    ) async throws {}
+    ) async throws {
+        _ = try await resolvedClient().request(
+            method: "thread/name/set",
+            params: .object([
+                "threadId": .string(conversationID),
+                "name": .string(title),
+            ])
+        )
+    }
 
     func setConversationArchived(
         conversationID: String,
@@ -597,9 +784,13 @@ actor CodexAIProvider: AIChatProvider, CodexAuthenticationManaging {
     ) async throws {
         let client = try resolvedClient()
         let notifications = await client.notifications()
-        _ = try? await client.request(
+        _ = try await client.request(
             method: "thread/resume",
-            params: .object(["threadId": .string(request.conversationID)])
+            params: .object([
+                "threadId": .string(request.conversationID),
+                "approvalPolicy": .string("never"),
+                "sandbox": .string("read-only"),
+            ])
         )
         let result = try await client.request(
             method: "turn/start",
@@ -693,5 +884,47 @@ actor CodexAIProvider: AIChatProvider, CodexAuthenticationManaging {
                 )
             }
         }
+    }
+
+    private nonisolated static func conversationSummary(
+        from value: CodexJSONValue,
+        archived: Bool,
+        now: Date
+    ) -> AIConversationSummary? {
+        guard let id = value["id"]?.stringValue, !id.isEmpty else { return nil }
+        let name = value["name"]?.stringValue?.trimmingCharacters(
+            in: .whitespacesAndNewlines
+        )
+        let preview = value["preview"]?.stringValue?.trimmingCharacters(
+            in: .whitespacesAndNewlines
+        )
+        let rawTitle = [name, preview]
+            .compactMap { $0 }
+            .first(where: { !$0.isEmpty })
+            ?? "Untitled Chat"
+        let createdAt = date(from: value["createdAt"]) ?? now
+        let updatedAt = date(from: value["updatedAt"])
+            ?? date(from: value["recencyAt"])
+            ?? createdAt
+        let modelID = value["model"]?.stringValue ?? "codex-default"
+        return AIConversationSummary(
+            providerID: .codex,
+            providerConversationID: id,
+            title: String(rawTitle.prefix(60)),
+            model: AIModel(rawValue: modelID),
+            isArchived: archived,
+            deletionState: nil,
+            createdAt: createdAt,
+            lastMessageAt: updatedAt,
+            updatedAt: updatedAt
+        )
+    }
+
+    private nonisolated static func date(from value: CodexJSONValue?) -> Date? {
+        if let seconds = value?.numberValue {
+            return Date(timeIntervalSince1970: seconds)
+        }
+        guard let rawValue = value?.stringValue else { return nil }
+        return ISO8601DateFormatter().date(from: rawValue)
     }
 }

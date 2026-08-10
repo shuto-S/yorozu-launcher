@@ -115,6 +115,55 @@ final class YorozuUITests: XCTestCase {
     }
 
     @MainActor
+    func testAISettingsUsesProviderTabsInsideExistingPanel() {
+        continueAfterFailure = false
+        let application = XCUIApplication()
+        application.launchArguments = [
+            "--ui-testing-settings",
+            "--ui-testing-sticky",
+            "--ui-testing-light",
+            "--ui-testing-high-contrast",
+            "--ui-testing-reduce-transparency",
+            "--ui-testing-reduce-motion",
+        ]
+        application.launch()
+
+        let settings = application.descendants(matching: .any)["launcher.settings"]
+        XCTAssertTrue(settings.waitForExistence(timeout: 5))
+
+        let aiDestination = application
+            .descendants(matching: .any)["settings.destination.ai"]
+        XCTAssertTrue(aiDestination.waitForExistence(timeout: 2))
+        aiDestination.click()
+
+        XCTAssertTrue(
+            application.popUpButtons["Default Provider"]
+                .waitForExistence(timeout: 2)
+        )
+        XCTAssertTrue(
+            application.radioGroups["Provider"]
+                .waitForExistence(timeout: 2)
+        )
+        XCTAssertTrue(
+            application.switches["Enable Codex"]
+                .waitForExistence(timeout: 2)
+        )
+        XCTAssertTrue(application.staticTexts["Connection"].exists)
+        XCTAssertTrue(application.staticTexts["Chat Defaults"].exists)
+        XCTAssertTrue(application.staticTexts["Data and Billing"].exists)
+
+        let openAITab = application.radioButtons["settings.ai.provider.openai_api"]
+        XCTAssertTrue(openAITab.waitForExistence(timeout: 2))
+        openAITab.click()
+        XCTAssertTrue(
+            application.switches["Enable OpenAI API"]
+                .waitForExistence(timeout: 2)
+        )
+        XCTAssertTrue(application.buttons["Test Connection"].exists)
+        XCTAssertEqual(application.dialogs.count, 1)
+    }
+
+    @MainActor
     func testRootSettingsRouteReturnsToRootOnEscape() {
         continueAfterFailure = false
         let application = XCUIApplication()

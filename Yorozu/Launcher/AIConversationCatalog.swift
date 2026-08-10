@@ -111,6 +111,42 @@ actor AIConversationCatalog {
         }
     }
 
+    func replace(
+        _ values: [AIConversationSummary],
+        scope: AIChatListScope
+    ) async -> FeatureSnapshot<AIConversationSummary> {
+        let scopedValues = values.filter {
+            $0.providerID == providerID
+                && (scope == .archived ? $0.isArchived : !$0.isArchived)
+        }
+        let incomingIDs = Set(scopedValues.map(\.id))
+        let retained = conversations.filter {
+            (scope == .archived ? !$0.isArchived : $0.isArchived)
+                && !incomingIDs.contains($0.id)
+        }
+        conversations = retained + scopedValues
+        sort()
+        guard let store else {
+            return snapshot(
+                storageAvailable: false,
+                message: "Chat history changes are available until Yorozu quits."
+            )
+        }
+        do {
+            try await store.replaceAIConversationIndex(
+                providerID: providerID,
+                scope: scope,
+                conversations: scopedValues
+            )
+            return snapshot()
+        } catch {
+            return snapshot(
+                storageAvailable: false,
+                message: "Chat history changes could not be saved."
+            )
+        }
+    }
+
     private func sort() {
         conversations.sort {
             if $0.lastMessageAt != $1.lastMessageAt {
@@ -130,4 +166,133 @@ actor AIConversationCatalog {
             message: message
         )
     }
+}
+
+actor AIConversationCoordinator {
+    nonisolated let descriptor: AIProviderDescriptor
+    nonisolated let policies: AIProviderPolicies
+
+    private let catalog: AIConversationCatalog
+    nonisolated private let provider: any AIChatProvider
+
+    init(catalog: AIConversationCatalog, provider: any AIChatProvider) {
+        self.catalog = catalog
+        self.provider = provider
+        descriptor = provider.descriptor
+        policies = provider.policies
+    }
+
+    func loadIndex() async -> FeatureSnapshot<AIConversationSummary> {
+        await catalog.load()
+    }
+
+    func search(query: String, scope: AIChatListScope) async -> [AIConversationSummary] {
+        await catalog.search(query: query, scope: scope)
+    }
+
+    func refreshIndex(
+        query: String,
+        scope: AIChatListScope
+    ) async throws -> FeatureSnapshot<AIConversationSummary> {
+        guard policies.conversationListAuthority == .provider else {
+            return await catalog.load()
+        }
+
+        var cursor: String?
+        var seenCursors: Set<String> = []
+        var values: [AIConversationSummary] = []
+        repeat {
+            try Task.checkCancellation()
+            let page = try await provider.listConversations(
+                request: AIConversationListRequest(
+                    scope: scope,
+                    query: query,
+                    cursor: cursor,
+                    limit: 50
+                )
+            )
+            values.append(contentsOf: page.conversations)
+            if let nextCursor = page.nextCursor,
+               !seenCursors.insert(nextCursor).inserted {
+                throw AIChatError.protocolError
+            }
+            cursor = page.nextCursor
+        } while cursor != nil
+
+        if query.launcherNormalized.isEmpty {
+            return await catalog.replace(values, scope: scope)
+        }
+        var snapshot = await catalog.load()
+        for value in values {
+            snapshot = await catalog.save(value)
+        }
+        return snapshot
+    }
+
+    func availability() async -> AIProviderAvailability { await provider.availability() }
+    func authenticationState() async -> AIAuthenticationState {
+        await provider.authenticationState()
+    }
+    func availableModels() async throws -> [AIModel] { try await provider.availableModels() }
+    func createConversation(title: String, model: AIModel) async throws -> String {
+        try await provider.createConversation(title: title, model: model)
+    }
+    func updateConversation(
+        conversationID: String,
+        title: String,
+        model: AIModel,
+        isArchived: Bool
+    ) async throws {
+        try await provider.updateConversation(
+            conversationID: conversationID,
+            title: title,
+            model: model,
+            isArchived: isArchived
+        )
+    }
+    func setConversationArchived(
+        conversationID: String,
+        title: String,
+        model: AIModel,
+        isArchived: Bool
+    ) async throws {
+        try await provider.setConversationArchived(
+            conversationID: conversationID,
+            title: title,
+            model: model,
+            isArchived: isArchived
+        )
+    }
+    func loadConversation(
+        conversationID: String,
+        limit: Int,
+        after: String?
+    ) async throws -> AIConversationPage {
+        try await provider.loadConversation(
+            conversationID: conversationID,
+            limit: limit,
+            after: after
+        )
+    }
+    func uploadAttachment(_ attachment: AIChatAttachment) async throws -> AIUploadedAttachment {
+        try await provider.uploadAttachment(attachment)
+    }
+    nonisolated func streamResponse(
+        request: AIChatSendRequest
+    ) -> AsyncThrowingStream<AIChatStreamEvent, Error> {
+        provider.streamResponse(request: request)
+    }
+    func stopGeneration(conversationID: String) async {
+        await provider.stopGeneration(conversationID: conversationID)
+    }
+    func deleteConversationCompletely(conversationID: String) async throws {
+        try await provider.deleteConversationCompletely(conversationID: conversationID)
+    }
+    func save(_ conversation: AIConversationSummary) async -> FeatureSnapshot<AIConversationSummary> {
+        await catalog.save(conversation)
+    }
+    func remove(id: String) async -> FeatureSnapshot<AIConversationSummary> {
+        await catalog.remove(id: id)
+    }
+    func shutdown() async { await provider.shutdown() }
 }

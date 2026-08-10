@@ -109,72 +109,71 @@ struct SettingsView: View {
 private struct AISettingsView: View {
     var launcherViewModel: LauncherViewModel
     @ObservedObject private var providerPreferences: AIProviderPreferences
-    @State private var selectedProviderID: AIProviderID = .codex
+    @State private var selectedProviderID: AIProviderID?
 
     init(launcherViewModel: LauncherViewModel) {
         self.launcherViewModel = launcherViewModel
         providerPreferences = launcherViewModel.aiProviderPreferences
+        _selectedProviderID = State(
+            initialValue: launcherViewModel.resolvedAISettingsProviderID(
+                preferred: launcherViewModel.aiProviderPreferences.defaultProviderID
+            )
+        )
     }
 
     var body: some View {
-        Form {
-            Section("Default Provider") {
-                Picker("Provider", selection: defaultProviderBinding) {
-                    ForEach(enabledProviderIDs) { providerID in
-                        Text(providerName(providerID)).tag(Optional(providerID))
-                    }
-                    if enabledProviderIDs.isEmpty {
-                        Text("None").tag(Optional<AIProviderID>.none)
-                    }
-                }
-                Text("The AI shortcut opens this provider when no provider is specified.")
-                    .foregroundStyle(.secondary)
-            }
+        VStack(spacing: 0) {
+            defaultProviderHeader
+            Divider().accessibilityHidden(true)
+            providerTabs
+            Divider().accessibilityHidden(true)
 
-            Section("Providers") {
-                providerRow(
-                    id: .codex,
-                    description: "Uses your ChatGPT plan through Codex",
-                    symbol: "terminal"
+            if let selectedViewModel {
+                AIProviderSettingsDetailView(
+                    launcherViewModel: launcherViewModel,
+                    providerPreferences: providerPreferences,
+                    viewModel: selectedViewModel
                 )
-                providerRow(
-                    id: .openAIAPI,
-                    description: "Uses API credits and usage-based billing",
-                    symbol: "sparkles"
+            } else {
+                ContentUnavailableView(
+                    "No AI Providers Available",
+                    systemImage: "sparkles",
+                    description: Text("Add an AI provider to configure AI Chat.")
                 )
-            }
-
-            Section("Provider Settings") {
-                Picker("Provider", selection: $selectedProviderID) {
-                    Text("Codex").tag(AIProviderID.codex)
-                    Text("OpenAI API").tag(AIProviderID.openAIAPI)
-                }
-                .pickerStyle(.segmented)
-            }
-
-            if let viewModel = launcherViewModel.aiChatViewModel(for: selectedProviderID) {
-                providerDetail(viewModel)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
-        .formStyle(.grouped)
-        .scrollContentBackground(.hidden)
         .background(Color.clear)
         .accessibilityIdentifier("settings.detail.ai")
         .onAppear {
-            launcherViewModel.aiChatViewModel(for: selectedProviderID)?
-                .loadCredentialStatus()
+            normalizeProviderSelection()
+            selectedViewModel?.loadCredentialStatus()
         }
         .onChange(of: selectedProviderID) { _, providerID in
+            guard let providerID else { return }
             launcherViewModel.aiChatViewModel(for: providerID)?.loadCredentialStatus()
+        }
+        .onChange(of: providerIDs) {
+            normalizeProviderSelection()
         }
     }
 
-    private var enabledProviderIDs: [AIProviderID] {
-        providerPreferences.enabledProviderIDs.sorted {
-            if $0 == .codex { return true }
-            if $1 == .codex { return false }
-            return $0.rawValue < $1.rawValue
+    private var providerViewModels: [AIChatViewModel] {
+        launcherViewModel.aiProviderViewModels
+    }
+
+    private var providerIDs: [AIProviderID] {
+        providerViewModels.map(\.providerID)
+    }
+
+    private var enabledProviderViewModels: [AIChatViewModel] {
+        providerViewModels.filter {
+            providerPreferences.isEnabled($0.providerID)
         }
+    }
+
+    private var selectedViewModel: AIChatViewModel? {
+        selectedProviderID.flatMap(launcherViewModel.aiChatViewModel(for:))
     }
 
     private var defaultProviderBinding: Binding<AIProviderID?> {
@@ -184,42 +183,143 @@ private struct AISettingsView: View {
         )
     }
 
-    private func providerRow(
-        id: AIProviderID,
-        description: String,
-        symbol: String
-    ) -> some View {
-        HStack(spacing: 10) {
-            Image(systemName: symbol)
-                .frame(width: 24)
-                .foregroundStyle(.secondary)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(providerName(id))
+    private var defaultProviderHeader: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 16) {
+                Text("Default Provider")
                     .font(.headline)
-                Text(description)
-                    .foregroundStyle(.secondary)
+                Spacer()
+                Picker("Default Provider", selection: defaultProviderBinding) {
+                    ForEach(enabledProviderViewModels, id: \.providerID) { viewModel in
+                        Text(viewModel.providerDescriptor.displayName)
+                            .tag(Optional(viewModel.providerID))
+                    }
+                    if enabledProviderViewModels.isEmpty {
+                        Text("None").tag(Optional<AIProviderID>.none)
+                    }
+                }
+                .labelsHidden()
+                .frame(width: 180)
+                .accessibilityIdentifier("settings.ai.default-provider")
             }
-            Spacer()
-            Toggle(
-                "Enabled",
-                isOn: Binding(
-                    get: { providerPreferences.isEnabled(id) },
-                    set: { providerPreferences.setEnabled($0, for: id) }
-                )
-            )
-            .labelsHidden()
+            Text("The AI shortcut opens this provider when no provider is specified.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
         }
-        .contentShape(Rectangle())
-        .onTapGesture { selectedProviderID = id }
+        .padding(.horizontal, 18)
+        .padding(.vertical, 12)
     }
 
     @ViewBuilder
-    private func providerDetail(_ viewModel: AIChatViewModel) -> some View {
+    private var providerTabs: some View {
+        if providerViewModels.isEmpty {
+            EmptyView()
+        } else {
+            Picker("Provider", selection: $selectedProviderID) {
+                ForEach(providerViewModels, id: \.providerID) { viewModel in
+                    Label(
+                        viewModel.providerDescriptor.displayName,
+                        systemImage: viewModel.providerDescriptor.symbolName
+                    )
+                    .tag(Optional(viewModel.providerID))
+                    .accessibilityIdentifier(
+                        "settings.ai.provider.\(viewModel.providerID.rawValue)"
+                    )
+                }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .padding(.horizontal, 18)
+            .padding(.vertical, 10)
+            .accessibilityIdentifier("settings.ai.provider-tabs")
+        }
+    }
+
+    private func normalizeProviderSelection() {
+        selectedProviderID = launcherViewModel.resolvedAISettingsProviderID(
+            preferred: selectedProviderID
+        )
+    }
+}
+
+private struct AIProviderSettingsDetailView: View {
+    var launcherViewModel: LauncherViewModel
+    @ObservedObject var providerPreferences: AIProviderPreferences
+    @Bindable var viewModel: AIChatViewModel
+
+    var body: some View {
+        VStack(spacing: 0) {
+            providerHeader
+            Divider()
+                .accessibilityHidden(true)
+            Form {
+                connectionSection
+                if showsChatDefaults {
+                    chatDefaultsSection
+                }
+                Section("Data and Billing") {
+                    Text(dataAndBillingDescription)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .formStyle(.grouped)
+            .scrollContentBackground(.hidden)
+        }
+        .background(Color.clear)
+        .accessibilityIdentifier(
+            "settings.ai.provider-detail.\(viewModel.providerID.rawValue)"
+        )
+    }
+
+    private var providerHeader: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .top, spacing: 12) {
+                Image(systemName: viewModel.providerDescriptor.symbolName)
+                    .imageScale(.large)
+                    .frame(width: 28)
+                    .foregroundStyle(.secondary)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(viewModel.providerDescriptor.displayName)
+                        .font(.headline)
+                    Text(viewModel.providerDescriptor.description)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer(minLength: 12)
+                VStack(alignment: .trailing, spacing: 8) {
+                    if providerPreferences.defaultProviderID == viewModel.providerID {
+                        Label("Default", systemImage: "checkmark.circle.fill")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    Toggle("Enabled", isOn: enabledBinding)
+                        .toggleStyle(.switch)
+                        .fixedSize()
+                        .accessibilityLabel(
+                            "Enable \(viewModel.providerDescriptor.displayName)"
+                        )
+                        .accessibilityIdentifier(
+                            "settings.ai.enabled.\(viewModel.providerID.rawValue)"
+                        )
+                }
+            }
+            if !providerPreferences.isEnabled(viewModel.providerID) {
+                Text("Enable this provider to show it in Root Search and use it from the AI shortcut.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(.horizontal, 18)
+        .padding(.vertical, 12)
+    }
+
+    private var connectionSection: some View {
         Section {
             HStack(alignment: .top, spacing: 10) {
                 Image(systemName: viewModel.credentialStatusSymbolName)
                     .foregroundStyle(
-                        viewModel.credentialStatus == .saved ? AnyShapeStyle(.tint) : AnyShapeStyle(.secondary)
+                        viewModel.credentialStatus == .saved
+                            ? AnyShapeStyle(.tint)
+                            : AnyShapeStyle(.secondary)
                     )
                     .imageScale(.large)
                 VStack(alignment: .leading, spacing: 2) {
@@ -232,47 +332,18 @@ private struct AISettingsView: View {
                 if viewModel.credentialStatus == .checking {
                     ProgressView().controlSize(.small)
                 } else {
-                    Button("Refresh Status") { viewModel.loadCredentialStatus() }
-                        .buttonStyle(.link)
+                    Button("Refresh Status") {
+                        viewModel.loadCredentialStatus()
+                    }
+                    .buttonStyle(.link)
                 }
             }
 
-            if selectedProviderID == .codex {
-                LabeledContent("Codex Executable") {
-                    Text(
-                        providerPreferences.codexExecutablePath.isEmpty
-                            ? "Detected automatically"
-                            : providerPreferences.codexExecutablePath
-                    )
-                    .lineLimit(1)
-                }
-                HStack {
-                    Button(
-                        providerPreferences.codexExecutablePath.isEmpty
-                            ? "Set Executable Path…"
-                            : "Change Executable Path…"
-                    ) {
-                        launcherViewModel.presentCodexExecutablePathModal()
-                    }
-                    Button("Sign In with ChatGPT") { viewModel.signInWithChatGPT() }
-                    Button("Sign Out", role: .destructive) {
-                        launcherViewModel.requestCodexSignOut()
-                    }
-                        .disabled(viewModel.credentialStatus != .saved)
-                }
-            } else {
-                HStack {
-                    Button(viewModel.hasAPIKey ? "Replace API Key…" : "Set API Key…") {
-                        launcherViewModel.presentOpenAIAPIKeyModal()
-                    }
-                    Button("Test Connection") { Task { await viewModel.testConnection() } }
-                        .disabled(!viewModel.hasAPIKey)
-                    Button("Remove Key", role: .destructive) {
-                        launcherViewModel.requestOpenAIAPIKeyRemoval()
-                    }
-                        .disabled(!viewModel.hasAPIKey)
-                }
-            }
+            AIProviderConnectionSettingsView(
+                launcherViewModel: launcherViewModel,
+                providerPreferences: providerPreferences,
+                viewModel: viewModel
+            )
 
             if let message = viewModel.credentialStatusMessage {
                 Text(message)
@@ -280,54 +351,165 @@ private struct AISettingsView: View {
                     .accessibilityIdentifier("settings.ai.credential-message")
             }
         } header: {
-            Text(providerName(selectedProviderID))
+            Text("Connection")
         } footer: {
-            if selectedProviderID == .codex {
-                Text(
-                    "Yorozu communicates with the installed Codex app-server. "
-                        + "Codex manages ChatGPT authentication; Yorozu never reads or stores its tokens."
-                )
-            } else {
-                Text(
-                    "Your API key is stored in macOS Keychain. Yorozu never writes it to its database or logs."
-                )
-            }
+            Text(connectionDescription)
         }
+    }
 
-        if !viewModel.availableModels.isEmpty {
-            Section("Defaults") {
+    private var chatDefaultsSection: some View {
+        Section("Chat Defaults") {
+            if viewModel.providerDescriptor.capabilities.contains(.modelSelection),
+               !viewModel.availableModels.isEmpty {
                 Picker("Model", selection: viewModel.preferencesBinding) {
                     ForEach(viewModel.availableModels) { model in
                         Text(model.title).tag(model)
                     }
                 }
-                if viewModel.providerDescriptor.capabilities.contains(.webSearch) {
-                    Toggle(
-                        "Enable Web Search for New Chats",
-                        isOn: viewModel.webSearchPreferenceBinding
-                    )
-                }
             }
-        }
-
-        Section {
-            if selectedProviderID == .codex {
-                Text(
-                    "Codex usage follows your ChatGPT plan. Yorozu stores only chat titles and the Codex thread IDs it creates."
-                )
-            } else {
-                Text(
-                    "OpenAI API usage is billed to your API Platform account. Conversation messages and uploaded files are stored by OpenAI."
+            if viewModel.providerDescriptor.capabilities.contains(.webSearch) {
+                Toggle(
+                    "Enable Web Search for New Chats",
+                    isOn: viewModel.webSearchPreferenceBinding
                 )
             }
-        } header: {
-            Text("Data and Billing")
         }
-        .foregroundStyle(.secondary)
     }
 
-    private func providerName(_ id: AIProviderID) -> String {
-        id == .codex ? "Codex" : "OpenAI API"
+    private var showsChatDefaults: Bool {
+        let capabilities = viewModel.providerDescriptor.capabilities
+        return capabilities.contains(.webSearch)
+            || (capabilities.contains(.modelSelection) && !viewModel.availableModels.isEmpty)
+    }
+
+    private var enabledBinding: Binding<Bool> {
+        Binding(
+            get: { providerPreferences.isEnabled(viewModel.providerID) },
+            set: { providerPreferences.setEnabled($0, for: viewModel.providerID) }
+        )
+    }
+
+    private var connectionDescription: String {
+        switch viewModel.providerID {
+        case .codex:
+            "Yorozu communicates with the installed Codex app-server. Codex manages ChatGPT authentication; Yorozu never reads or stores its tokens."
+        case .openAIAPI:
+            "Your API key is stored in macOS Keychain. Yorozu never writes it to its database or logs."
+        default:
+            "Authentication is managed by \(viewModel.providerDescriptor.displayName)."
+        }
+    }
+
+    private var dataAndBillingDescription: String {
+        switch viewModel.providerID {
+        case .codex:
+            "Codex usage follows your ChatGPT plan. Yorozu stores only chat titles and the Codex thread IDs it indexes."
+        case .openAIAPI:
+            "OpenAI API usage is billed to your API Platform account. Conversation messages and uploaded files are stored by OpenAI."
+        default:
+            "Usage, data retention, and billing are managed by \(viewModel.providerDescriptor.displayName)."
+        }
+    }
+}
+
+private struct AIProviderConnectionSettingsView: View {
+    var launcherViewModel: LauncherViewModel
+    @ObservedObject var providerPreferences: AIProviderPreferences
+    @Bindable var viewModel: AIChatViewModel
+
+    @ViewBuilder
+    var body: some View {
+        switch viewModel.providerID {
+        case .codex:
+            LabeledContent("Codex Executable") {
+                Text(
+                    providerPreferences.codexExecutablePath.isEmpty
+                        ? "Detected automatically"
+                        : providerPreferences.codexExecutablePath
+                )
+                .lineLimit(1)
+            }
+            ViewThatFits(in: .horizontal) {
+                codexActions
+                codexActionsVertical
+            }
+        case .openAIAPI:
+            ViewThatFits(in: .horizontal) {
+                openAIActions
+                openAIActionsVertical
+            }
+        default:
+            EmptyView()
+        }
+    }
+
+    private var codexActions: some View {
+        HStack {
+            codexExecutableButton
+            Button("Sign In with ChatGPT") { viewModel.signInWithChatGPT() }
+            codexSignOutButton
+        }
+    }
+
+    private var codexActionsVertical: some View {
+        VStack(alignment: .leading) {
+            codexExecutableButton
+            Button("Sign In with ChatGPT") { viewModel.signInWithChatGPT() }
+            codexSignOutButton
+        }
+    }
+
+    private var codexExecutableButton: some View {
+        Button(
+            providerPreferences.codexExecutablePath.isEmpty
+                ? "Set Executable Path…"
+                : "Change Executable Path…"
+        ) {
+            launcherViewModel.presentCodexExecutablePathModal()
+        }
+    }
+
+    private var codexSignOutButton: some View {
+        Button("Sign Out", role: .destructive) {
+            launcherViewModel.requestCodexSignOut()
+        }
+        .disabled(viewModel.credentialStatus != .saved)
+    }
+
+    private var openAIActions: some View {
+        HStack {
+            openAIKeyButton
+            openAITestButton
+            openAIRemoveButton
+        }
+    }
+
+    private var openAIActionsVertical: some View {
+        VStack(alignment: .leading) {
+            openAIKeyButton
+            openAITestButton
+            openAIRemoveButton
+        }
+    }
+
+    private var openAIKeyButton: some View {
+        Button(viewModel.hasAPIKey ? "Replace API Key…" : "Set API Key…") {
+            launcherViewModel.presentOpenAIAPIKeyModal()
+        }
+    }
+
+    private var openAITestButton: some View {
+        Button("Test Connection") {
+            Task { await viewModel.testConnection() }
+        }
+        .disabled(!viewModel.hasAPIKey)
+    }
+
+    private var openAIRemoveButton: some View {
+        Button("Remove Key", role: .destructive) {
+            launcherViewModel.requestOpenAIAPIKeyRemoval()
+        }
+        .disabled(!viewModel.hasAPIKey)
     }
 }
 
