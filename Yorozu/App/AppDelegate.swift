@@ -315,6 +315,7 @@ private actor UITestAIChatProvider: AIChatProvider {
         let efforts = ["low", "medium", "high"].map {
             AIReasoningEffort(rawValue: $0)
         }
+        let lowEffort = AIReasoningEffort(rawValue: "low")
         return [
             AIModel(
                 rawValue: "codex-ui-model",
@@ -323,6 +324,14 @@ private actor UITestAIChatProvider: AIChatProvider {
                 isDefault: true,
                 supportedReasoningEfforts: efforts,
                 defaultReasoningEffort: efforts[1]
+            ),
+            AIModel(
+                rawValue: "codex-ui-fast",
+                title: "Codex UI Fast",
+                detail: "Fast UI test model",
+                isDefault: false,
+                supportedReasoningEfforts: [lowEffort],
+                defaultReasoningEffort: lowEffort
             ),
         ]
     }

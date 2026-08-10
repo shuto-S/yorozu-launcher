@@ -153,10 +153,22 @@ final class YorozuUITests: XCTestCase {
         let providerForm = application.scrollViews.element(boundBy: 1)
         XCTAssertTrue(providerForm.exists)
         providerForm.swipeUp()
-        XCTAssertTrue(
-            application.popUpButtons["Reasoning"]
-                .waitForExistence(timeout: 2)
-        )
+        let reasoningPicker = application.popUpButtons["Reasoning"]
+        XCTAssertTrue(reasoningPicker.waitForExistence(timeout: 2))
+        reasoningPicker.click()
+        let highReasoning = application.menuItems["High"]
+        XCTAssertTrue(highReasoning.waitForExistence(timeout: 2))
+        highReasoning.click()
+        XCTAssertEqual(reasoningPicker.value as? String, "High")
+
+        let modelPicker = application.popUpButtons["Model"]
+        XCTAssertTrue(modelPicker.waitForExistence(timeout: 2))
+        modelPicker.click()
+        let fastModel = application.menuItems["Codex UI Fast"]
+        XCTAssertTrue(fastModel.waitForExistence(timeout: 2))
+        fastModel.click()
+        XCTAssertEqual(modelPicker.value as? String, "Codex UI Fast")
+        XCTAssertEqual(reasoningPicker.value as? String, "Model Default")
         XCTAssertTrue(application.staticTexts["Data and Billing"].exists)
 
         let openAITab = application.radioButtons["settings.ai.provider.openai_api"]

@@ -132,7 +132,8 @@ private struct AISettingsView: View {
                 AIProviderSettingsDetailView(
                     launcherViewModel: launcherViewModel,
                     providerPreferences: providerPreferences,
-                    viewModel: selectedViewModel
+                    viewModel: selectedViewModel,
+                    chatPreferences: selectedViewModel.preferences
                 )
             } else {
                 ContentUnavailableView(
@@ -255,6 +256,7 @@ private struct AIProviderSettingsDetailView: View {
     var launcherViewModel: LauncherViewModel
     @ObservedObject var providerPreferences: AIProviderPreferences
     @Bindable var viewModel: AIChatViewModel
+    @ObservedObject var chatPreferences: AIChatPreferences
 
     var body: some View {
         VStack(spacing: 0) {
