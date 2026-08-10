@@ -416,6 +416,57 @@ final class YorozuUITests: XCTestCase {
     }
 
     @MainActor
+    func testActionPanelKeyboardSelectionKeepsEveryActionVisible() {
+        continueAfterFailure = false
+        let application = XCUIApplication()
+        application.launchArguments = ["--ui-testing", "--ui-testing-sticky"]
+        application.launch()
+
+        let rootSearch = application.searchFields["launcher.search"]
+        XCTAssertTrue(rootSearch.waitForExistence(timeout: 5))
+        rootSearch.typeText("AI Chat")
+
+        let aiRow = application
+            .descendants(matching: .any)["launcher.row.feature:aiChat.codex"]
+        XCTAssertTrue(aiRow.waitForExistence(timeout: 2))
+        aiRow.click()
+        application.typeKey(.return, modifierFlags: [])
+
+        let conversationRow = application
+            .descendants(matching: .any)["ai.chat-row.conversation-ui-test"]
+        XCTAssertTrue(conversationRow.waitForExistence(timeout: 2))
+        conversationRow.doubleClick()
+        XCTAssertTrue(
+            application.descendants(matching: .any)["ai.composer"]
+                .waitForExistence(timeout: 2)
+        )
+
+        application.typeKey("k", modifierFlags: .command)
+        let actionPanel = application.descendants(matching: .any)["launcher.action-panel"]
+        let actionSearch = application.textFields["launcher.action-search"]
+        XCTAssertTrue(actionPanel.waitForExistence(timeout: 2))
+        XCTAssertTrue(actionSearch.waitForExistence(timeout: 2))
+
+        for _ in 0..<10 {
+            application.typeKey(.downArrow, modifierFlags: [])
+            assertSelectedActionIsVisible(
+                in: application,
+                inside: actionPanel,
+                above: actionSearch
+            )
+        }
+
+        for _ in 0..<10 {
+            application.typeKey(.upArrow, modifierFlags: [])
+            assertSelectedActionIsVisible(
+                in: application,
+                inside: actionPanel,
+                above: actionSearch
+            )
+        }
+    }
+
+    @MainActor
     private func assertSelectedRootRowIsVisible(
         in application: XCUIApplication,
         below searchField: XCUIElement,
@@ -450,6 +501,41 @@ final class YorozuUITests: XCTestCase {
         XCTAssertLessThanOrEqual(
             selectedFrame.maxY,
             footer.frame.minY + 1,
+            file: file,
+            line: line
+        )
+    }
+
+    @MainActor
+    private func assertSelectedActionIsVisible(
+        in application: XCUIApplication,
+        inside actionPanel: XCUIElement,
+        above actionSearch: XCUIElement,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        let actions = application.buttons.matching(
+            NSPredicate(
+                format: "identifier BEGINSWITH %@",
+                "launcher.action."
+            )
+        )
+        guard let selectedAction = actions.allElementsBoundByIndex.first(
+            where: \.isSelected
+        ) else {
+            XCTFail("The selected action is not visible.", file: file, line: line)
+            return
+        }
+
+        XCTAssertGreaterThanOrEqual(
+            selectedAction.frame.minY,
+            actionPanel.frame.minY - 1,
+            file: file,
+            line: line
+        )
+        XCTAssertLessThanOrEqual(
+            selectedAction.frame.maxY,
+            actionSearch.frame.minY + 1,
             file: file,
             line: line
         )

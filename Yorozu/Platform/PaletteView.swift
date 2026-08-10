@@ -551,8 +551,14 @@ private final class ResultVisibilityTracker {
     var ids: Set<CommandResultID> = []
 }
 
+@MainActor
+private final class ActionVisibilityTracker {
+    var ids: Set<LauncherActionID> = []
+}
+
 private struct ActionPanelView: View {
     @Bindable var viewModel: LauncherViewModel
+    @State private var visibleActions = ActionVisibilityTracker()
     @FocusState private var isSearchFocused: Bool
 
     var body: some View {
@@ -565,24 +571,56 @@ private struct ActionPanelView: View {
                 .padding(.top, 12)
                 .padding(.bottom, 8)
 
-            ScrollView {
-                LazyVStack(spacing: 2) {
-                    ForEach(viewModel.filteredActionItems) { action in
-                        actionRow(action)
-                    }
+            ScrollViewReader { proxy in
+                ScrollView {
+                    LazyVStack(spacing: 2) {
+                        ForEach(viewModel.filteredActionItems) { action in
+                            actionRow(action)
+                                .id(action.id)
+                                .onScrollVisibilityChange(threshold: 0.999) { isVisible in
+                                    if isVisible {
+                                        visibleActions.ids.insert(action.id)
+                                    } else {
+                                        visibleActions.ids.remove(action.id)
+                                    }
+                                }
+                        }
 
-                    if viewModel.filteredActionItems.isEmpty {
-                        Text("No actions found")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 24)
+                        if viewModel.filteredActionItems.isEmpty {
+                            Text("No actions found")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 24)
+                        }
+                    }
+                    .padding(.horizontal, 8)
+                    .padding(.bottom, 8)
+                }
+                .scrollIndicators(.never)
+                .onChange(of: viewModel.selectedActionID) { previousID, selectedID in
+                    guard let selectedID,
+                          !visibleActions.ids.contains(selectedID) else {
+                        return
+                    }
+                    proxy.scrollTo(
+                        selectedID,
+                        anchor: selectionScrollAnchor(
+                            from: previousID,
+                            to: selectedID
+                        )
+                    )
+                }
+                .onChange(of: viewModel.filteredActionItems.map(\.id)) { _, _ in
+                    visibleActions.ids.removeAll()
+                    guard let selectedID = viewModel.selectedActionID else { return }
+                    Task { @MainActor in
+                        await Task.yield()
+                        guard selectedID == viewModel.selectedActionID else { return }
+                        proxy.scrollTo(selectedID, anchor: .center)
                     }
                 }
-                .padding(.horizontal, 8)
-                .padding(.bottom, 8)
             }
-            .scrollIndicators(.never)
 
             Divider()
 
@@ -654,11 +692,33 @@ private struct ActionPanelView: View {
         }
         .buttonStyle(.plain)
         .accessibilityIdentifier("launcher.action.\(action.id.rawValue)")
+        .accessibilityAddTraits(
+            viewModel.selectedActionID == action.id ? .isSelected : []
+        )
         .onHover { isHovering in
             if isHovering {
                 viewModel.selectAction(action.id)
             }
         }
+    }
+
+    private func selectionScrollAnchor(
+        from previousID: LauncherActionID?,
+        to selectedID: LauncherActionID
+    ) -> UnitPoint {
+        let actionIDs = viewModel.filteredActionItems.map(\.id)
+        guard let previousID,
+              let previousIndex = actionIDs.firstIndex(of: previousID),
+              let selectedIndex = actionIDs.firstIndex(of: selectedID) else {
+            return .center
+        }
+        if selectedIndex > previousIndex {
+            return .bottom
+        }
+        if selectedIndex < previousIndex {
+            return .top
+        }
+        return .center
     }
 }
 
