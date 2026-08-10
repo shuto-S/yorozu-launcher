@@ -564,22 +564,22 @@ private struct AIMessageView: View {
     }
 
     private var userMessage: some View {
-        VStack(alignment: .trailing, spacing: 5) {
-            VStack(alignment: .leading, spacing: 8) {
-                messageText
-                attachmentChips
-            }
-            .padding(.horizontal, 13)
-            .padding(.vertical, 10)
-            .background(
-                Color(nsColor: .controlBackgroundColor),
-                in: RoundedRectangle(cornerRadius: 14, style: .continuous)
-            )
-            .frame(maxWidth: 520, alignment: .trailing)
+        AIUserMessageLayout(maximumWidthFraction: 0.8) {
+            VStack(alignment: .trailing, spacing: 5) {
+                VStack(alignment: .leading, spacing: 8) {
+                    messageText
+                    attachmentChips
+                }
+                .padding(.horizontal, 13)
+                .padding(.vertical, 10)
+                .background(
+                    Color(nsColor: .controlBackgroundColor),
+                    in: RoundedRectangle(cornerRadius: 14, style: .continuous)
+                )
 
-            copyButton
+                copyButton
+            }
         }
-        .frame(maxWidth: .infinity, alignment: .trailing)
     }
 
     private var assistantMessage: some View {
@@ -606,7 +606,8 @@ private struct AIMessageView: View {
                     text: message.text,
                     citations: message.citations
                 ),
-                lineSpacing: message.role == .assistant ? 4 : 2
+                lineSpacing: message.role == .assistant ? 4 : 2,
+                expandsHorizontally: message.role != .user
             )
         }
     }
@@ -664,14 +665,24 @@ private struct AIMessageView: View {
 private struct AIFormattedMessageText: View {
     let blocks: [AIChatMessageBlock]
     let lineSpacing: CGFloat
+    let expandsHorizontally: Bool
 
+    @ViewBuilder
     var body: some View {
+        if expandsHorizontally {
+            blockList
+                .frame(maxWidth: .infinity, alignment: .leading)
+        } else {
+            blockList
+        }
+    }
+
+    private var blockList: some View {
         VStack(alignment: .leading, spacing: 9) {
             ForEach(blocks.indices, id: \.self) { index in
                 blockView(blocks[index])
             }
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
         .textSelection(.enabled)
     }
 
@@ -754,6 +765,45 @@ private struct AIFormattedMessageText: View {
             options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)
         )
         return Text(attributed ?? AttributedString(source))
+    }
+}
+
+private struct AIUserMessageLayout: Layout {
+    let maximumWidthFraction: CGFloat
+
+    func sizeThatFits(
+        proposal: ProposedViewSize,
+        subviews: Subviews,
+        cache: inout ()
+    ) -> CGSize {
+        guard let subview = subviews.first else { return .zero }
+        let maximumWidth = proposal.width.map {
+            $0 * min(max(maximumWidthFraction, 0), 1)
+        }
+        let size = subview.sizeThatFits(
+            ProposedViewSize(width: maximumWidth, height: proposal.height)
+        )
+        return CGSize(
+            width: proposal.width ?? size.width,
+            height: size.height
+        )
+    }
+
+    func placeSubviews(
+        in bounds: CGRect,
+        proposal: ProposedViewSize,
+        subviews: Subviews,
+        cache: inout ()
+    ) {
+        guard let subview = subviews.first else { return }
+        let maximumWidth = bounds.width * min(max(maximumWidthFraction, 0), 1)
+        let size = subview.sizeThatFits(
+            ProposedViewSize(width: maximumWidth, height: bounds.height)
+        )
+        subview.place(
+            at: CGPoint(x: bounds.maxX - size.width, y: bounds.minY),
+            proposal: ProposedViewSize(size)
+        )
     }
 }
 
