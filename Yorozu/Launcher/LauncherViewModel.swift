@@ -17,6 +17,7 @@ enum LauncherActionID: String, CaseIterable, Identifiable {
     case duplicateSnippet
     case delete
     case aiOpenChat
+    case aiOpenInCodex
     case aiNewChat
     case aiChangeModel
     case aiModelTerra
@@ -1351,7 +1352,7 @@ final class LauncherViewModel {
         case .delete:
             dismissActionPanel()
             requestDeleteSelected()
-        case .aiOpenChat, .aiNewChat, .aiChangeModel, .aiModelTerra,
+        case .aiOpenChat, .aiOpenInCodex, .aiNewChat, .aiChangeModel, .aiModelTerra,
              .aiModelSol, .aiModelLuna, .aiModel4, .aiModel5, .aiModel6,
              .aiModel7, .aiModel8, .aiModel9, .aiModel10,
              .aiToggleWebSearch, .aiAttachFiles,

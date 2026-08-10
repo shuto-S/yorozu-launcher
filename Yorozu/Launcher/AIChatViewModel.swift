@@ -116,6 +116,8 @@ final class AIChatViewModel {
 
     private let provider: any AIChatProvider
     private let coordinator: AIConversationCoordinator
+    @ObservationIgnored
+    private let openExternalURL: (URL) -> Bool
     private var hasLoadedCatalog = false
     private var loadTask: Task<Void, Never>?
     private var streamTask: Task<Void, Never>?
@@ -149,10 +151,12 @@ final class AIChatViewModel {
     init(
         catalog: AIConversationCatalog,
         provider: any AIChatProvider,
-        preferences: AIChatPreferences
+        preferences: AIChatPreferences,
+        openExternalURL: @escaping (URL) -> Bool = { NSWorkspace.shared.open($0) }
     ) {
         self.provider = provider
         coordinator = AIConversationCoordinator(catalog: catalog, provider: provider)
+        self.openExternalURL = openExternalURL
         providerID = provider.descriptor.id
         providerDescriptor = provider.descriptor
         self.preferences = preferences
@@ -243,6 +247,17 @@ final class AIChatViewModel {
                 ),
             ]
             if let selectedConversation {
+                if providerID == .codex {
+                    items.insert(
+                        LauncherActionItem(
+                            id: .aiOpenInCodex,
+                            title: "Open in Codex",
+                            symbolName: "arrow.up.forward.app",
+                            shortcutGlyphs: []
+                        ),
+                        at: 1
+                    )
+                }
                 items.append(
                     LauncherActionItem(
                         id: .aiArchive,
@@ -315,6 +330,17 @@ final class AIChatViewModel {
             )
         }
         if let currentConversation {
+            if providerID == .codex {
+                items.insert(
+                    LauncherActionItem(
+                        id: .aiOpenInCodex,
+                        title: "Open in Codex",
+                        symbolName: "arrow.up.forward.app",
+                        shortcutGlyphs: []
+                    ),
+                    at: 0
+                )
+            }
             items.append(
                 LauncherActionItem(
                     id: .aiArchive,
@@ -1114,6 +1140,8 @@ final class AIChatViewModel {
         switch action {
         case .aiOpenChat:
             performPrimaryAction()
+        case .aiOpenInCodex:
+            openSelectedConversationInCodex()
         case .aiNewChat:
             beginNewChat()
         case .aiChangeModel:
@@ -1139,6 +1167,33 @@ final class AIChatViewModel {
         default:
             break
         }
+    }
+
+    private func openSelectedConversationInCodex() {
+        guard providerID == .codex else { return }
+        let conversation = isListVisible ? selectedConversation : currentConversation
+        guard let conversation,
+              let url = Self.codexThreadURL(
+                providerConversationID: conversation.providerConversationID
+              ) else {
+            errorMessage = "This chat can’t be opened in Codex."
+            return
+        }
+        guard openExternalURL(url) else {
+            errorMessage = "Codex couldn’t open this chat."
+            return
+        }
+        errorMessage = nil
+    }
+
+    private static func codexThreadURL(providerConversationID: String) -> URL? {
+        let threadID = providerConversationID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !threadID.isEmpty else { return nil }
+        var components = URLComponents()
+        components.scheme = "codex"
+        components.host = "threads"
+        components.path = "/\(threadID)"
+        return components.url
     }
 
     private func loadCatalogIfNeeded() async {

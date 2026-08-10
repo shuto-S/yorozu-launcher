@@ -935,6 +935,66 @@ final class AIChatStorageTests: XCTestCase {
 
 @MainActor
 final class AIChatViewModelTests: XCTestCase {
+    func testCodexConversationActionsOpenThreadInCodex() async {
+        let conversation = makeConversation(
+            id: "thread-test",
+            title: "Open in Codex",
+            providerID: .codex
+        )
+        var openedURL: URL?
+        let viewModel = makeCodexViewModel(
+            conversations: [conversation],
+            openExternalURL: {
+                openedURL = $0
+                return true
+            }
+        )
+        viewModel.prepareForPresentation()
+        await waitUntil { viewModel.visibleConversations.count == 1 }
+        viewModel.selectListItem(conversation.id)
+
+        XCTAssertTrue(viewModel.actionItems.contains { $0.id == .aiOpenInCodex })
+        viewModel.performAction(.aiOpenInCodex)
+        XCTAssertEqual(openedURL?.absoluteString, "codex://threads/thread-test")
+
+        viewModel.openConversation(id: conversation.id)
+        XCTAssertTrue(viewModel.actionItems.contains { $0.id == .aiOpenInCodex })
+    }
+
+    func testOpenAIConversationDoesNotOfferOpenInCodex() async {
+        let conversation = makeConversation(title: "OpenAI chat")
+        let viewModel = makeViewModel(
+            service: AIChatTestService(),
+            conversations: [conversation]
+        )
+        viewModel.prepareForPresentation()
+        await waitUntil { viewModel.visibleConversations.count == 1 }
+        viewModel.selectListItem(conversation.id)
+
+        XCTAssertFalse(viewModel.actionItems.contains { $0.id == .aiOpenInCodex })
+        viewModel.openConversation(id: conversation.id)
+        XCTAssertFalse(viewModel.actionItems.contains { $0.id == .aiOpenInCodex })
+    }
+
+    func testOpenInCodexFailureShowsRecoverableError() async {
+        let conversation = makeConversation(
+            id: "thread-test",
+            title: "Unavailable Codex",
+            providerID: .codex
+        )
+        let viewModel = makeCodexViewModel(
+            conversations: [conversation],
+            openExternalURL: { _ in false }
+        )
+        viewModel.prepareForPresentation()
+        await waitUntil { viewModel.visibleConversations.count == 1 }
+        viewModel.selectListItem(conversation.id)
+
+        viewModel.performAction(.aiOpenInCodex)
+
+        XCTAssertEqual(viewModel.errorMessage, "Codex couldn’t open this chat.")
+    }
+
     func testPrepareForPresentationPreservesProviderDestinationAndDraft() async {
         let viewModel = makeViewModel(service: AIChatTestService())
         viewModel.beginNewChat()
@@ -1222,10 +1282,35 @@ final class AIChatViewModelTests: XCTestCase {
         )
     }
 
-    private func makeConversation(title: String) -> AIConversationSummary {
+    private func makeCodexViewModel(
+        conversations: [AIConversationSummary],
+        openExternalURL: @escaping (URL) -> Bool
+    ) -> AIChatViewModel {
+        let suite = "com.yorozu.ai-codex-tests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite) ?? .standard
+        return AIChatViewModel(
+            catalog: AIConversationCatalog(
+                providerID: .codex,
+                store: nil,
+                initialConversations: conversations
+            ),
+            provider: RegistryTestProvider(providerID: .codex),
+            preferences: AIChatPreferences(
+                defaults: defaults,
+                providerID: .codex
+            ),
+            openExternalURL: openExternalURL
+        )
+    }
+
+    private func makeConversation(
+        id: String = "conversation-\(UUID().uuidString)",
+        title: String,
+        providerID: AIProviderID = .openAIAPI
+    ) -> AIConversationSummary {
         AIConversationSummary(
-            providerID: .openAIAPI,
-            providerConversationID: "conversation-\(UUID().uuidString)",
+            providerID: providerID,
+            providerConversationID: id,
             title: title,
             model: .terra,
             isArchived: false,
