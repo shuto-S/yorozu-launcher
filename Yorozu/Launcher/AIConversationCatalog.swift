@@ -69,6 +69,7 @@ actor AIConversationCatalog {
     func save(
         _ conversation: AIConversationSummary
     ) async -> FeatureSnapshot<AIConversationSummary> {
+        let conversation = mergingLocalModelIfNeeded(conversation)
         if let index = conversations.firstIndex(where: { $0.id == conversation.id }) {
             conversations[index] = conversation
         } else {
@@ -115,10 +116,12 @@ actor AIConversationCatalog {
         _ values: [AIConversationSummary],
         scope: AIChatListScope
     ) async -> FeatureSnapshot<AIConversationSummary> {
-        let scopedValues = values.filter {
-            $0.providerID == providerID
-                && (scope == .archived ? $0.isArchived : !$0.isArchived)
-        }
+        let scopedValues = values
+            .filter {
+                $0.providerID == providerID
+                    && (scope == .archived ? $0.isArchived : !$0.isArchived)
+            }
+            .map(mergingLocalModelIfNeeded)
         let incomingIDs = Set(scopedValues.map(\.id))
         let retained = conversations.filter {
             (scope == .archived ? !$0.isArchived : $0.isArchived)
@@ -154,6 +157,19 @@ actor AIConversationCatalog {
             }
             return $0.id < $1.id
         }
+    }
+
+    private func mergingLocalModelIfNeeded(
+        _ incoming: AIConversationSummary
+    ) -> AIConversationSummary {
+        guard !incoming.isModelAuthoritative,
+              let existing = conversations.first(where: { $0.id == incoming.id }) else {
+            return incoming
+        }
+        var merged = incoming
+        merged.model = existing.model
+        merged.isModelAuthoritative = existing.isModelAuthoritative
+        return merged
     }
 
     private func snapshot(

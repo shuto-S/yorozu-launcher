@@ -906,12 +906,13 @@ actor CodexAIProvider: AIChatProvider, CodexAuthenticationManaging {
         let updatedAt = date(from: value["updatedAt"])
             ?? date(from: value["recencyAt"])
             ?? createdAt
-        let modelID = value["model"]?.stringValue ?? "codex-default"
+        let reportedModelID = value["model"]?.stringValue
         return AIConversationSummary(
             providerID: .codex,
             providerConversationID: id,
             title: String(rawTitle.prefix(60)),
-            model: AIModel(rawValue: modelID),
+            model: AIModel(rawValue: reportedModelID ?? "codex-default"),
+            isModelAuthoritative: reportedModelID != nil,
             isArchived: archived,
             deletionState: nil,
             createdAt: createdAt,

@@ -279,6 +279,8 @@ final class AIChatStorageTests: XCTestCase {
 
         XCTAssertEqual(page.conversations.map(\.id), ["thread-listed"])
         XCTAssertEqual(page.conversations.first?.title, "Listed thread")
+        XCTAssertEqual(page.conversations.first?.model.rawValue, "codex-test-model")
+        XCTAssertEqual(page.conversations.first?.isModelAuthoritative, true)
         XCTAssertEqual(page.nextCursor, nil)
         let params = await server.params(for: "thread/list")
         XCTAssertEqual(
@@ -289,6 +291,24 @@ final class AIChatStorageTests: XCTestCase {
         XCTAssertEqual(params?["searchTerm"]?.stringValue, "swift")
         XCTAssertEqual(params?["cursor"]?.stringValue, "next-page")
         XCTAssertEqual(params?["sortKey"]?.stringValue, "recency_at")
+    }
+
+    func testCodexProviderMarksMissingListModelAsNonAuthoritative() async throws {
+        let server = FakeCodexAppServer()
+        await server.setReportsThreadModel(false)
+        let provider = CodexAIProvider(clientFactory: { server })
+
+        let page = try await provider.listConversations(
+            request: AIConversationListRequest(
+                scope: .active,
+                query: "",
+                cursor: nil,
+                limit: 50
+            )
+        )
+
+        XCTAssertEqual(page.conversations.first?.model.rawValue, "codex-default")
+        XCTAssertEqual(page.conversations.first?.isModelAuthoritative, false)
     }
 
     func testCodexLoginCancelUsesReturnedLoginID() async throws {
@@ -439,6 +459,108 @@ final class AIChatStorageTests: XCTestCase {
         let archivedValues = await coordinator.search(query: "", scope: .archived)
         XCTAssertEqual(active.map(\.id), ["fresh-active"])
         XCTAssertEqual(archivedValues.map(\.id), ["archived"])
+    }
+
+    func testProviderRefreshPreservesLocallySelectedModelWhenListingOmitsIt() async throws {
+        let local = makeConversation(
+            id: "shared",
+            title: "Local",
+            providerID: .codex,
+            model: .sol,
+            lastMessageAt: Date(timeIntervalSince1970: 100)
+        )
+        let providerValue = makeConversation(
+            id: "shared",
+            title: "Provider",
+            providerID: .codex,
+            model: AIModel(rawValue: "codex-default"),
+            isModelAuthoritative: false,
+            lastMessageAt: Date(timeIntervalSince1970: 200)
+        )
+        let catalog = AIConversationCatalog(
+            providerID: .codex,
+            store: nil,
+            initialConversations: [local]
+        )
+        let coordinator = AIConversationCoordinator(
+            catalog: catalog,
+            provider: ConversationListTestProvider(values: [providerValue])
+        )
+
+        _ = try await coordinator.refreshIndex(query: "", scope: .active)
+
+        let refreshed = await coordinator.search(query: "", scope: .active)
+        XCTAssertEqual(refreshed.first?.title, "Provider")
+        XCTAssertEqual(refreshed.first?.model, .sol)
+        XCTAssertTrue(refreshed.first?.isModelAuthoritative == true)
+    }
+
+    func testProviderRefreshPreservesPersistedModelAfterCatalogReload() async throws {
+        let fixture = try makeStore()
+        let local = makeConversation(
+            id: "persisted",
+            title: "Persisted",
+            providerID: .codex,
+            model: .sol,
+            lastMessageAt: Date(timeIntervalSince1970: 100)
+        )
+        try await fixture.store.saveAIConversation(local)
+        let providerValue = makeConversation(
+            id: "persisted",
+            title: "Provider",
+            providerID: .codex,
+            model: AIModel(rawValue: "codex-default"),
+            isModelAuthoritative: false,
+            lastMessageAt: Date(timeIntervalSince1970: 200)
+        )
+        let catalog = AIConversationCatalog(
+            providerID: .codex,
+            store: fixture.store
+        )
+        let coordinator = AIConversationCoordinator(
+            catalog: catalog,
+            provider: ConversationListTestProvider(values: [providerValue])
+        )
+        _ = await coordinator.loadIndex()
+
+        _ = try await coordinator.refreshIndex(query: "", scope: .active)
+
+        let refreshed = await coordinator.search(query: "", scope: .active)
+        let persisted = try await fixture.store.loadAIConversationIndex(providerID: .codex)
+        XCTAssertEqual(refreshed.first?.model, .sol)
+        XCTAssertEqual(persisted.first?.model, .sol)
+    }
+
+    func testProviderRefreshUsesExplicitlyReportedModel() async throws {
+        let local = makeConversation(
+            id: "shared",
+            title: "Local",
+            providerID: .codex,
+            model: .sol,
+            lastMessageAt: Date(timeIntervalSince1970: 100)
+        )
+        let providerValue = makeConversation(
+            id: "shared",
+            title: "Provider",
+            providerID: .codex,
+            model: .luna,
+            lastMessageAt: Date(timeIntervalSince1970: 200)
+        )
+        let catalog = AIConversationCatalog(
+            providerID: .codex,
+            store: nil,
+            initialConversations: [local]
+        )
+        let coordinator = AIConversationCoordinator(
+            catalog: catalog,
+            provider: ConversationListTestProvider(values: [providerValue])
+        )
+
+        _ = try await coordinator.refreshIndex(query: "", scope: .active)
+
+        let refreshed = await coordinator.search(query: "", scope: .active)
+        XCTAssertEqual(refreshed.first?.model, .luna)
+        XCTAssertTrue(refreshed.first?.isModelAuthoritative == true)
     }
 
     func testProviderRefreshFailureDoesNotPruneCachedConversations() async {
@@ -791,6 +913,7 @@ final class AIChatStorageTests: XCTestCase {
         title: String,
         providerID: AIProviderID = .openAIAPI,
         model: AIModel = .terra,
+        isModelAuthoritative: Bool = true,
         isArchived: Bool = false,
         deletionState: AIConversationDeletionState? = nil,
         lastMessageAt: Date
@@ -800,6 +923,7 @@ final class AIChatStorageTests: XCTestCase {
             providerConversationID: id,
             title: title,
             model: model,
+            isModelAuthoritative: isModelAuthoritative,
             isArchived: isArchived,
             deletionState: deletionState,
             createdAt: Date(timeIntervalSince1970: 50),
@@ -1326,6 +1450,7 @@ private actor FakeCodexAppServer: CodexAppServerServing {
     private var notificationContinuations:
         [UUID: AsyncStream<CodexAppServerNotification>.Continuation] = [:]
     private var completesTurns = true
+    private var reportsThreadModel = true
 
     func request(
         method: String,
@@ -1361,17 +1486,18 @@ private actor FakeCodexAppServer: CodexAppServerServing {
                 "thread": .object(["id": .string("thread-test")]),
             ])
         case "thread/list":
+            var thread: [String: CodexJSONValue] = [
+                "id": .string("thread-listed"),
+                "name": .string("Listed thread"),
+                "preview": .string("Fallback preview"),
+                "createdAt": .number(100),
+                "updatedAt": .number(200),
+            ]
+            if reportsThreadModel {
+                thread["model"] = .string("codex-test-model")
+            }
             return .object([
-                "data": .array([
-                    .object([
-                        "id": .string("thread-listed"),
-                        "name": .string("Listed thread"),
-                        "preview": .string("Fallback preview"),
-                        "model": .string("codex-test-model"),
-                        "createdAt": .number(100),
-                        "updatedAt": .number(200),
-                    ]),
-                ]),
+                "data": .array([.object(thread)]),
                 "nextCursor": .null,
             ])
         case "turn/start":
@@ -1431,6 +1557,10 @@ private actor FakeCodexAppServer: CodexAppServerServing {
 
     func setCompletesTurns(_ value: Bool) {
         completesTurns = value
+    }
+
+    func setReportsThreadModel(_ value: Bool) {
+        reportsThreadModel = value
     }
 
     func waitUntilRequested(_ method: String, count: Int = 1) async {

@@ -803,6 +803,7 @@ final class AIChatViewModel {
         statusMessage = "\(model.title) will be used for the next message."
         if var conversation = currentConversation {
             conversation.model = model
+            conversation.isModelAuthoritative = true
             conversation.updatedAt = Date()
             Task {
                 do {

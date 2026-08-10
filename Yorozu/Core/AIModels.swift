@@ -176,6 +176,7 @@ struct AIConversationSummary: Identifiable, Hashable, Sendable {
     let providerConversationID: String
     var title: String
     var model: AIModel
+    var isModelAuthoritative = true
     var isArchived: Bool
     var deletionState: AIConversationDeletionState?
     let createdAt: Date
