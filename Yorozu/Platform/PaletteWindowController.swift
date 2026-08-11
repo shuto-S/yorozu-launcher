@@ -556,6 +556,10 @@ final class PaletteWindowController: NSWindowController, NSWindowDelegate {
             }
             return result
         }
+        viewModel.translationViewModel.copyText = { [weak self] text in
+            guard let self else { return .writeFailedAndRestoreFailed }
+            return await self.pasteCoordinator.copy(.text(text))
+        }
         viewModel.pasteContent = { [weak self] content, completion in
             guard let self else {
                 completion(.failed)

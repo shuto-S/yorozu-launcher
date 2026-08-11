@@ -376,7 +376,8 @@ private struct TranslationView: View {
 
             HStack(spacing: 0) {
                 translationPane(
-                    title: "Input"
+                    title: "Input",
+                    copyText: viewModel.inputText
                 ) {
                     TextEditor(text: $viewModel.inputText)
                         .focused($inputFocused)
@@ -399,7 +400,10 @@ private struct TranslationView: View {
 
                 Divider()
 
-                translationPane(title: "Translation") {
+                translationPane(
+                    title: "Translation",
+                    copyText: viewModel.outputText
+                ) {
                     ScrollView {
                         Text(viewModel.outputText.isEmpty ? "Your translation will appear here." : viewModel.outputText)
                             .foregroundStyle(viewModel.outputText.isEmpty ? .tertiary : .primary)
@@ -503,14 +507,32 @@ private struct TranslationView: View {
     @ViewBuilder
     private func translationPane<Content: View>(
         title: String,
+        copyText: String,
         @ViewBuilder content: () -> Content
     ) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             Text(title)
                 .font(.headline)
                 .foregroundStyle(.secondary)
-            content()
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            ZStack(alignment: .bottomTrailing) {
+                content()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                    .padding(.bottom, 26)
+
+                Button {
+                    viewModel.copyToClipboard(copyText)
+                } label: {
+                    Image(systemName: "doc.on.doc")
+                }
+                .buttonStyle(.borderless)
+                .controlSize(.small)
+                .disabled(copyText.isEmpty)
+                .accessibilityLabel("Copy \(title.lowercased()) to Clipboard")
+                .help("Copy \(title.lowercased()) to Clipboard")
+                .padding(.trailing, 4)
+                .padding(.bottom, 4)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }
         .padding(.horizontal, 12)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)

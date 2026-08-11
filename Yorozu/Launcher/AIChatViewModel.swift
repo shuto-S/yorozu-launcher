@@ -1762,6 +1762,7 @@ final class TranslationViewModel {
 
     let providerStore: AIChatViewModelStore
     let preferences: TranslationPreferences
+    var copyText: ((String) async -> PasteboardReplacementResult)?
     var inputText = ""
     private(set) var outputText = ""
     var targetLanguage: String {
@@ -1859,6 +1860,26 @@ final class TranslationViewModel {
     func clearOutput() {
         outputText = ""
         errorMessage = nil
+    }
+
+    func copyToClipboard(_ text: String) {
+        guard !text.isEmpty else { return }
+        guard let copyText else {
+            errorMessage = "The selected text could not be copied."
+            return
+        }
+
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            switch await copyText(text) {
+            case .written:
+                errorMessage = nil
+            case .preservationLimitExceeded:
+                errorMessage = "The current clipboard is too large to preserve safely."
+            case .invalidContent, .writeFailedAndRestored, .writeFailedAndRestoreFailed:
+                errorMessage = "The selected text could not be copied."
+            }
+        }
     }
 
     func selectTargetLanguage(_ language: String) {
