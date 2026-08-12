@@ -530,7 +530,12 @@ final class LauncherViewModel {
     var footerActions: [LauncherFooterAction] {
         switch route {
         case .root:
-            [
+            if isCalculationErrorSelected {
+                return [
+                    LauncherFooterAction(id: .actions, shortcut: "⌘K", title: "Actions"),
+                ]
+            }
+            return [
                 LauncherFooterAction(
                     id: .primary,
                     shortcut: "↩",
@@ -539,34 +544,41 @@ final class LauncherViewModel {
                 LauncherFooterAction(id: .actions, shortcut: "⌘K", title: "Actions"),
             ]
         case .translation:
-            []
+            return []
         case .clipboard:
-            [
+            return [
                 LauncherFooterAction(id: .primary, shortcut: "↩", title: "Paste"),
                 LauncherFooterAction(id: .copy, shortcut: "⌘↩", title: "Copy"),
                 LauncherFooterAction(id: .actions, shortcut: "⌘K", title: "Actions"),
             ]
         case .snippets:
-            [
+            return [
                 LauncherFooterAction(id: .primary, shortcut: "↩", title: "Paste"),
                 LauncherFooterAction(id: .newSnippet, shortcut: "⌘N", title: "New"),
                 LauncherFooterAction(id: .actions, shortcut: "⌘K", title: "Actions"),
             ]
         case .aliases:
-            [
+            return [
                 LauncherFooterAction(id: .primary, shortcut: "↩", title: "Open"),
                 LauncherFooterAction(id: .addAlias, shortcut: "⌘N", title: "Add Alias"),
                 LauncherFooterAction(id: .actions, shortcut: "⌘K", title: "Actions"),
             ]
         case .ai:
-            []
+            return []
         case .settings:
-            []
+            return []
         }
     }
 
     private var isCalculationSelected: Bool {
         if case .calculation = selectedResult?.payload {
+            return true
+        }
+        return false
+    }
+
+    private var isCalculationErrorSelected: Bool {
+        if case .calculationError = selectedResult?.payload {
             return true
         }
         return false
@@ -652,6 +664,8 @@ final class LauncherViewModel {
                     []
                 ),
             ]
+        case .calculationError:
+            return []
         case .clipboard:
             let isPinned = selectedClipboardItem?.isPinned == true
             return [
@@ -844,6 +858,8 @@ final class LauncherViewModel {
             openFeature(feature)
         case .calculation:
             copySelected()
+        case .calculationError:
+            return
         case .clipboard, .snippet:
             pasteSelected()
         }
@@ -909,7 +925,7 @@ final class LauncherViewModel {
                 apply(clipboardSnapshot: await clipboardCatalog.togglePin(id: id))
                 refreshSearch()
             }
-        case .feature, .calculation, .snippet:
+        case .feature, .calculation, .calculationError, .snippet:
             break
         }
     }
@@ -1089,7 +1105,7 @@ final class LauncherViewModel {
             performPaste(.text(snippet.content)) { [weak self] in
                 self?.recordSnippetUse(snippet.id)
             }
-        case .application, .feature, .calculation:
+        case .application, .feature, .calculation, .calculationError:
             return
         }
     }
@@ -1113,7 +1129,7 @@ final class LauncherViewModel {
             }
         case let .calculation(_, result):
             performCopy(.text(result)) {}
-        case .application, .feature:
+        case .application, .feature, .calculationError:
             return
         }
     }
@@ -1308,7 +1324,7 @@ final class LauncherViewModel {
             presentModal(.confirmation(.deleteClipboard(id)))
         case let .snippet(id):
             presentModal(.confirmation(.deleteSnippet(id)))
-        case .application, .feature, .calculation:
+        case .application, .feature, .calculation, .calculationError:
             break
         }
     }
@@ -2005,19 +2021,38 @@ final class LauncherViewModel {
         }
         var combined = featureResults(query: query) + applicationResults
         if !query.launcherNormalized.isEmpty,
-           let calculation = ArithmeticExpressionEvaluator.evaluate(query) {
-            combined.append(
-                CommandResult(
-                    id: CommandResultID(rawValue: "calculation:\(query.launcherNormalized)"),
-                    kind: .calculation,
-                    title: calculation,
-                    subtitle: query,
-                    icon: .system("equal.circle"),
-                    score: 1_200,
-                    isPinned: false,
-                    payload: .calculation(expression: query, result: calculation)
+           let evaluation = ArithmeticExpressionEvaluator.evaluateDetailed(query) {
+            switch evaluation {
+            case let .result(calculation):
+                combined.append(
+                    CommandResult(
+                        id: CommandResultID(rawValue: "calculation:\(query.launcherNormalized)"),
+                        kind: .calculation,
+                        title: calculation,
+                        subtitle: query,
+                        icon: .system("equal.circle"),
+                        score: 1_200,
+                        isPinned: false,
+                        payload: .calculation(expression: query, result: calculation)
+                    )
                 )
-            )
+            case .divisionByZero:
+                combined.append(
+                    CommandResult(
+                        id: CommandResultID(rawValue: "calculation-error:\(query.launcherNormalized)"),
+                        kind: .calculation,
+                        title: "Cannot divide by zero",
+                        subtitle: query,
+                        icon: .system("exclamationmark.triangle"),
+                        score: 1_200,
+                        isPinned: false,
+                        payload: .calculationError(
+                            expression: query,
+                            message: "Cannot divide by zero"
+                        )
+                    )
+                )
+            }
         }
         let sorted: [CommandResult]
         if query.launcherNormalized.isEmpty {
@@ -2063,7 +2098,7 @@ final class LauncherViewModel {
             return application.preference
         case let .feature(feature):
             return featureCommands.first(where: { $0.command == feature })?.preference ?? .empty
-        case .calculation, .clipboard, .snippet:
+        case .calculation, .calculationError, .clipboard, .snippet:
             return .empty
         }
     }

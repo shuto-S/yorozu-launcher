@@ -751,6 +751,8 @@ private struct CommandResultsListView: View {
             } label: {
                 Label("Copy Expression", systemImage: "function")
             }
+        case .calculationError:
+            EmptyView()
         case .clipboard:
             Button {
                 select(result) { viewModel.pasteSelected() }
@@ -1679,6 +1681,8 @@ private struct FeatureDetailSelectionKey: Hashable {
         case .snippet:
             revision = snippet.map { .dated($0.updatedAt) } ?? .none
         case .calculation:
+            revision = .none
+        case .calculationError:
             revision = .none
         case let .feature(feature):
             revision = .feature(feature)

@@ -233,11 +233,21 @@ enum SearchScorer {
     }
 }
 
+enum ArithmeticEvaluation: Equatable, Sendable {
+    case result(String)
+    case divisionByZero
+}
+
 /// Evaluates the small, deliberately bounded expression language offered by
 /// Root Search. Keeping this parser local avoids invoking a scripting engine
 /// or allowing arbitrary code when a query happens to look mathematical.
 enum ArithmeticExpressionEvaluator {
     nonisolated static func evaluate(_ input: String) -> String? {
+        guard case let .result(value) = evaluateDetailed(input) else { return nil }
+        return value
+    }
+
+    nonisolated static func evaluateDetailed(_ input: String) -> ArithmeticEvaluation? {
         let normalized = normalize(input)
         guard !normalized.isEmpty,
               normalized.count <= 128,
@@ -246,12 +256,19 @@ enum ArithmeticExpressionEvaluator {
         }
 
         var parser = Parser(Array(normalized))
-        guard let value = parser.parseExpression(),
-              parser.isAtEnd,
-              value.isFinite else {
+        let parsed = parser.parseExpression()
+        guard parser.isAtEnd else {
             return nil
         }
-        return format(value)
+        switch parsed {
+        case let .success(value):
+            guard value.isFinite else { return nil }
+            return .result(format(value))
+        case .failure(.divisionByZero):
+            return .divisionByZero
+        case .failure(.invalid):
+            return nil
+        }
     }
 
     private nonisolated static func normalize(_ input: String) -> String {
@@ -278,6 +295,11 @@ enum ArithmeticExpressionEvaluator {
     }
 
     private struct Parser {
+        enum ParseError: Error {
+            case invalid
+            case divisionByZero
+        }
+
         let characters: [Character]
         var index = 0
 
@@ -289,52 +311,65 @@ enum ArithmeticExpressionEvaluator {
             self.characters = characters
         }
 
-        mutating func parseExpression() -> Double? {
-            guard var value = parseTerm() else { return nil }
+        mutating func parseExpression() -> Result<Double, ParseError> {
+            let first = parseTerm()
+            guard case let .success(firstValue) = first else {
+                return first
+            }
+            var value = firstValue
             while let operation = consumeBinaryOperator(plus: true, minus: true) {
-                guard let rhs = parseTerm() else { return nil }
+                let parsed = parseTerm()
+                guard case let .success(rhs) = parsed else {
+                    return parsed
+                }
                 if operation == "+" {
                     value += rhs
                 } else {
                     value -= rhs
                 }
-                guard value.isFinite else { return nil }
+                guard value.isFinite else { return .failure(.invalid) }
             }
-            return value
+            return .success(value)
         }
 
-        private mutating func parseTerm() -> Double? {
-            guard var value = parseUnary() else { return nil }
+        private mutating func parseTerm() -> Result<Double, ParseError> {
+            let first = parseUnary()
+            guard case let .success(firstValue) = first else { return first }
+            var value = firstValue
             while let operation = consumeBinaryOperator(plus: false, minus: false) {
-                guard let rhs = parseUnary() else { return nil }
+                let parsed = parseUnary()
+                guard case let .success(rhs) = parsed else { return parsed }
                 switch operation {
                 case "*":
                     value *= rhs
                 case "/":
-                    guard rhs != 0 else { return nil }
+                    guard rhs != 0 else { return .failure(.divisionByZero) }
                     value /= rhs
                 default:
-                    guard rhs != 0 else { return nil }
+                    guard rhs != 0 else { return .failure(.divisionByZero) }
                     value.formRemainder(dividingBy: rhs)
                 }
-                guard value.isFinite else { return nil }
+                guard value.isFinite else { return .failure(.invalid) }
             }
-            return value
+            return .success(value)
         }
 
-        private mutating func parseUnary() -> Double? {
+        private mutating func parseUnary() -> Result<Double, ParseError> {
             if consume("+") { return parseUnary() }
             if consume("-") {
-                guard let value = parseUnary() else { return nil }
-                return -value
+                switch parseUnary() {
+                case let .success(value): return .success(-value)
+                case let .failure(error): return .failure(error)
+                }
             }
             return parsePrimary()
         }
 
-        private mutating func parsePrimary() -> Double? {
+        private mutating func parsePrimary() -> Result<Double, ParseError> {
             if consume("(") {
-                guard let value = parseExpression(), consume(")") else { return nil }
-                return value
+                let parsed = parseExpression()
+                guard consume(")") else { return .failure(.invalid) }
+                return parsed
             }
             let start = index
             var hasDigits = false
@@ -350,8 +385,11 @@ enum ArithmeticExpressionEvaluator {
                     break
                 }
             }
-            guard hasDigits, start < index else { return nil }
-            return Double(String(characters[start..<index]))
+            guard hasDigits, start < index,
+                  let value = Double(String(characters[start..<index])) else {
+                return .failure(.invalid)
+            }
+            return .success(value)
         }
 
         private mutating func consumeBinaryOperator(

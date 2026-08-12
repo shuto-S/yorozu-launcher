@@ -906,6 +906,21 @@ final class LauncherViewModelTests: XCTestCase {
         XCTAssertEqual(fixture.viewModel.footerActions.first?.shortcut, "↩")
     }
 
+    func testDivisionByZeroShowsNonCopyableCalculationError() async throws {
+        let fixture = try makeFixture(launcherShouldFail: false)
+        fixture.viewModel.start()
+        fixture.viewModel.query = "1 / 0"
+
+        try await waitUntil {
+            fixture.viewModel.results.first?.title == "Cannot divide by zero"
+        }
+
+        XCTAssertEqual(fixture.viewModel.footerActions.map(\.id), [.actions])
+        XCTAssertTrue(fixture.viewModel.actionItems.isEmpty)
+        fixture.viewModel.performPrimaryAction()
+        XCTAssertNil(fixture.viewModel.statusMessage)
+    }
+
     func testShortcutCatalogStartsWithTheLauncherShortcut() {
         XCTAssertEqual(
             AppShortcutCatalog.settings.map(\.id),

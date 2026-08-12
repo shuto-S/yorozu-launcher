@@ -20,6 +20,18 @@ final class SearchScorerTests: XCTestCase {
         XCTAssertNil(ArithmeticExpressionEvaluator.evaluate("１＋１"))
     }
 
+    func testArithmeticEvaluatorReportsDivisionByZeroSeparately() {
+        XCTAssertEqual(
+            ArithmeticExpressionEvaluator.evaluateDetailed("1 / 0"),
+            .divisionByZero
+        )
+        XCTAssertEqual(
+            ArithmeticExpressionEvaluator.evaluateDetailed("10 % 0"),
+            .divisionByZero
+        )
+        XCTAssertNil(ArithmeticExpressionEvaluator.evaluateDetailed("1 / 0 + invalid"))
+    }
+
     func testNormalizationHandlesWidthCaseDiacriticsAndWhitespace() {
         XCTAssertEqual("  ＣＡＦÉ   App  ".launcherNormalized, "cafe app")
         XCTAssertEqual("ば".launcherNormalized, "は\u{3099}".launcherNormalized)

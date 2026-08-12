@@ -514,6 +514,7 @@ enum CommandPayload: Hashable, Sendable {
     case application(LaunchableApplication)
     case feature(FeatureCommand)
     case calculation(expression: String, result: String)
+    case calculationError(expression: String, message: String)
     case clipboard(UUID)
     case snippet(UUID)
 }
