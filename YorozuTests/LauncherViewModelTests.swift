@@ -893,6 +893,19 @@ final class LauncherViewModelTests: XCTestCase {
         XCTAssertTrue(fixture.viewModel.isActionPanelPresented)
     }
 
+    func testCalculationFooterShowsCopyInsteadOfOpen() async throws {
+        let fixture = try makeFixture(launcherShouldFail: false)
+        fixture.viewModel.start()
+        fixture.viewModel.query = "1 + 1"
+
+        try await waitUntil {
+            fixture.viewModel.results.first?.kind == .calculation
+        }
+
+        XCTAssertEqual(fixture.viewModel.footerActions.first?.title, "Copy")
+        XCTAssertEqual(fixture.viewModel.footerActions.first?.shortcut, "↩")
+    }
+
     func testShortcutCatalogStartsWithTheLauncherShortcut() {
         XCTAssertEqual(
             AppShortcutCatalog.settings.map(\.id),
@@ -1151,6 +1164,52 @@ final class LauncherViewModelTests: XCTestCase {
             .aliasEditor(ApplicationIdentity(rawValue: "bundle:com.example.fixture"))
         )
         XCTAssertEqual(fixture.viewModel.aliasDraft, "")
+    }
+
+    func testRootArithmeticQueryShowsResultAndReturnCopiesIt() async throws {
+        let fixture = try makeFixture(launcherShouldFail: false)
+        fixture.viewModel.copyContent = { content in
+            XCTAssertEqual(content, .text("2"))
+            return .written(changeCount: 2)
+        }
+        fixture.viewModel.start()
+        fixture.viewModel.query = "1 + 1"
+
+        try await waitUntil {
+            fixture.viewModel.results.first?.kind == .calculation
+        }
+        XCTAssertEqual(fixture.viewModel.results.first?.title, "2")
+        XCTAssertEqual(fixture.viewModel.results.first?.subtitle, "1 + 1")
+
+        fixture.viewModel.performPrimaryAction()
+        try await waitUntil {
+            fixture.viewModel.statusMessage == "Copied to Clipboard"
+        }
+    }
+
+    func testRootArithmeticActionCopiesExpressionAndResult() async throws {
+        let fixture = try makeFixture(launcherShouldFail: false)
+        fixture.viewModel.copyContent = { content in
+            XCTAssertEqual(content, .text("1 + 1 = 2"))
+            return .written(changeCount: 2)
+        }
+        fixture.viewModel.start()
+        fixture.viewModel.query = "1 + 1"
+
+        try await waitUntil {
+            fixture.viewModel.results.first?.kind == .calculation
+        }
+        fixture.viewModel.showActionMenu()
+        XCTAssertTrue(
+            fixture.viewModel.actionItems.contains {
+                $0.id == .copyCalculationExpression
+                    && $0.title == "Copy Expression"
+            }
+        )
+        fixture.viewModel.performAction(.copyCalculationExpression)
+        try await waitUntil {
+            fixture.viewModel.statusMessage == "Copied to Clipboard"
+        }
     }
 
     func testSnippetModalDiscardsDraftAndBlocksActionPanel() throws {

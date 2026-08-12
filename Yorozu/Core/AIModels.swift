@@ -7,6 +7,7 @@ struct AIProviderID: RawRepresentable, Hashable, Codable, Sendable, Identifiable
 
     static let codex = AIProviderID(rawValue: "codex")
     static let openAIAPI = AIProviderID(rawValue: "openai_api")
+    static let claude = AIProviderID(rawValue: "claude")
 }
 
 struct AIProviderCapabilities: OptionSet, Hashable, Sendable {
@@ -118,7 +119,8 @@ struct AIModel: Hashable, Codable, Identifiable, Sendable {
         self.title = title ?? Self.knownTitle(for: rawValue) ?? rawValue
         self.detail = detail ?? Self.knownDetail(for: rawValue) ?? ""
         self.isDefault = isDefault
-            ?? Self.openAIModels.first(where: { $0.rawValue == rawValue })?.isDefault
+            ?? (Self.openAIModels + Self.claudeModels)
+                .first(where: { $0.rawValue == rawValue })?.isDefault
             ?? false
         self.supportedReasoningEfforts = supportedReasoningEfforts
         self.defaultReasoningEffort = defaultReasoningEffort
@@ -166,12 +168,34 @@ struct AIModel: Hashable, Codable, Identifiable, Sendable {
     )
     static let openAIModels = [terra, sol, luna]
 
+    // Anthropic can add model aliases over time. These are only the local
+    // fallback; the provider replaces them with the account's current list.
+    static let claudeSonnet = AIModel(
+        rawValue: "claude-sonnet-4-20250514",
+        title: "Claude Sonnet 4",
+        detail: "Balanced speed and intelligence",
+        isDefault: true
+    )
+    static let claudeOpus = AIModel(
+        rawValue: "claude-opus-4-1-20250805",
+        title: "Claude Opus 4.1",
+        detail: "Highest capability for complex work",
+        isDefault: false
+    )
+    static let claudeHaiku = AIModel(
+        rawValue: "claude-3-5-haiku-20241022",
+        title: "Claude 3.5 Haiku",
+        detail: "Fast and cost-efficient",
+        isDefault: false
+    )
+    static let claudeModels = [claudeSonnet, claudeOpus, claudeHaiku]
+
     private static func knownTitle(for rawValue: String) -> String? {
-        openAIModels.first(where: { $0.rawValue == rawValue })?.title
+        (openAIModels + claudeModels).first(where: { $0.rawValue == rawValue })?.title
     }
 
     private static func knownDetail(for rawValue: String) -> String? {
-        openAIModels.first(where: { $0.rawValue == rawValue })?.detail
+        (openAIModels + claudeModels).first(where: { $0.rawValue == rawValue })?.detail
     }
 }
 
@@ -633,6 +657,7 @@ enum AIChatError: LocalizedError, Equatable {
     case providerUnavailable
     case authenticationRequired
     case missingAPIKey
+    case missingClaudeAPIKey
     case authenticationFailed
     case modelUnavailable
     case invalidAttachment
@@ -667,6 +692,8 @@ enum AIChatError: LocalizedError, Equatable {
             "Sign in or add credentials to use this AI provider."
         case .missingAPIKey:
             "Add your OpenAI API key in Settings."
+        case .missingClaudeAPIKey:
+            "Add your Anthropic API key in Settings."
         case .authenticationFailed:
             "The OpenAI API key could not be authenticated."
         case .modelUnavailable:
@@ -793,6 +820,10 @@ protocol OpenAIAPIKeyManaging: Sendable {
     func saveAPIKey(_ value: String) async throws
     func removeAPIKey() async throws
 }
+
+// API-key based providers share this credential surface. The historical
+// OpenAI name remains the canonical declaration for source compatibility.
+typealias APIKeyManaging = OpenAIAPIKeyManaging
 
 protocol CodexAuthenticationManaging: Sendable {
     func signInWithChatGPT() async throws -> URL

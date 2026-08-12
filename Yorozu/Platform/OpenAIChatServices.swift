@@ -66,6 +66,66 @@ actor KeychainOpenAICredentialStore: OpenAICredentialStoring {
     }
 }
 
+actor KeychainClaudeCredentialStore: OpenAICredentialStoring {
+    private let service = "com.yorozu.app.claude"
+    private let account = "api-key"
+
+    func loadAPIKey() throws -> String? {
+        var query = baseQuery
+        query[kSecReturnData as String] = true
+        query[kSecMatchLimit as String] = kSecMatchLimitOne
+        var item: CFTypeRef?
+        let status = SecItemCopyMatching(query as CFDictionary, &item)
+        if status == errSecItemNotFound { return nil }
+        guard status == errSecSuccess,
+              let data = item as? Data,
+              let value = String(data: data, encoding: .utf8) else {
+            throw keychainError(status)
+        }
+        return value
+    }
+
+    func saveAPIKey(_ value: String) throws {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, let data = trimmed.data(using: .utf8) else {
+            throw AIChatError.authenticationFailed
+        }
+        let update = [kSecValueData as String: data]
+        let status = SecItemUpdate(baseQuery as CFDictionary, update as CFDictionary)
+        if status == errSecItemNotFound {
+            var insert = baseQuery
+            insert[kSecValueData as String] = data
+            let insertStatus = SecItemAdd(insert as CFDictionary, nil)
+            guard insertStatus == errSecSuccess else { throw keychainError(insertStatus) }
+        } else if status != errSecSuccess {
+            throw keychainError(status)
+        }
+    }
+
+    func deleteAPIKey() throws {
+        let status = SecItemDelete(baseQuery as CFDictionary)
+        guard status == errSecSuccess || status == errSecItemNotFound else {
+            throw keychainError(status)
+        }
+    }
+
+    private var baseQuery: [String: Any] {
+        [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account,
+        ]
+    }
+
+    private func keychainError(_ status: OSStatus) -> NSError {
+        NSError(
+            domain: NSOSStatusErrorDomain,
+            code: Int(status),
+            userInfo: [NSLocalizedDescriptionKey: "The API key could not be saved securely."]
+        )
+    }
+}
+
 actor InMemoryOpenAICredentialStore: OpenAICredentialStoring {
     private var value: String?
 
@@ -146,7 +206,8 @@ final class AIChatPreferences: ObservableObject {
 
     init(
         defaults: UserDefaults,
-        providerID: AIProviderID = .openAIAPI
+        providerID: AIProviderID = .openAIAPI,
+        fallbackModel: AIModel? = nil
     ) {
         self.defaults = defaults
         self.providerID = providerID
@@ -156,6 +217,7 @@ final class AIChatPreferences: ObservableObject {
             : nil
         defaultModel = (defaults.string(forKey: modelKey) ?? legacyModel)
             .map { AIModel(rawValue: $0) }
+            ?? fallbackModel
             ?? .terra
         defaultReasoningEffort = defaults
             .string(forKey: Keys.defaultReasoningEffort(providerID))
@@ -1441,5 +1503,542 @@ private extension Data {
         append("Content-Type: \(mimeType)\r\n\r\n".data(using: .utf8)!)
         append(data)
         append("\r\n".data(using: .utf8)!)
+    }
+}
+
+// MARK: - Claude Messages API
+
+protocol ClaudeChatServing: Sendable {
+    func availableModelIDs(apiKey: String) async throws -> Set<String>
+    func streamResponse(
+        apiKey: String,
+        request: AIChatSendRequest,
+        history: [AIChatMessage]
+    ) -> AsyncThrowingStream<AIChatStreamEvent, Error>
+}
+
+actor ClaudeChatClient: ClaudeChatServing {
+    private let session: URLSession
+    private let baseURL = URL(string: "https://api.anthropic.com/v1")!
+
+    init(session: URLSession? = nil) {
+        if let session {
+            self.session = session
+        } else {
+            let configuration = URLSessionConfiguration.ephemeral
+            configuration.urlCache = nil
+            configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
+            configuration.httpCookieStorage = nil
+            configuration.timeoutIntervalForRequest = 30
+            configuration.timeoutIntervalForResource = 120
+            self.session = URLSession(configuration: configuration)
+        }
+    }
+
+    func availableModelIDs(apiKey: String) async throws -> Set<String> {
+        let data = try await requestData(path: ["models"], method: "GET", apiKey: apiKey)
+        let object = try jsonObject(data)
+        let models = object["data"] as? [[String: Any]] ?? []
+        return Set(models.compactMap { $0["id"] as? String })
+    }
+
+    nonisolated func streamResponse(
+        apiKey: String,
+        request: AIChatSendRequest,
+        history: [AIChatMessage]
+    ) -> AsyncThrowingStream<AIChatStreamEvent, Error> {
+        AsyncThrowingStream { continuation in
+            let task = Task {
+                do {
+                    try await self.performStream(
+                        apiKey: apiKey,
+                        request: request,
+                        history: history,
+                        continuation: continuation
+                    )
+                    continuation.finish()
+                } catch is CancellationError {
+                    continuation.finish()
+                } catch {
+                    continuation.finish(throwing: error)
+                }
+            }
+            continuation.onTermination = { _ in task.cancel() }
+        }
+    }
+
+    private func performStream(
+        apiKey: String,
+        request: AIChatSendRequest,
+        history: [AIChatMessage],
+        continuation: AsyncThrowingStream<AIChatStreamEvent, Error>.Continuation
+    ) async throws {
+        let messages = history.map { message in
+            [
+                "role": message.role.rawValue,
+                "content": message.text,
+            ]
+        }
+        let body: [String: Any] = [
+            "model": request.model.rawValue,
+            "max_tokens": 4096,
+            "messages": messages,
+            "stream": true,
+        ]
+        var urlRequest = try makeRequest(
+            url: endpoint(["messages"]),
+            method: "POST",
+            apiKey: apiKey,
+            body: body
+        )
+        urlRequest.setValue(request.clientRequestID, forHTTPHeaderField: "X-Client-Request-Id")
+
+        do {
+            let (bytes, response) = try await session.bytes(for: urlRequest)
+            guard let httpResponse = response as? HTTPURLResponse else {
+                throw AIChatError.invalidResponse
+            }
+            if !(200..<300).contains(httpResponse.statusCode) {
+                var errorData = Data()
+                for try await byte in bytes {
+                    guard errorData.count < 65_536 else { break }
+                    errorData.append(byte)
+                }
+                throw Self.apiError(statusCode: httpResponse.statusCode, data: errorData)
+            }
+
+            var eventName: String?
+            var receivedStop = false
+            for try await rawLine in bytes.lines {
+                try Task.checkCancellation()
+                let line = rawLine.last == "\r" ? String(rawLine.dropLast()) : rawLine
+                if line.hasPrefix("event:") {
+                    eventName = line.dropFirst(6)
+                        .trimmingCharacters(in: .whitespaces)
+                    continue
+                }
+                guard line.hasPrefix("data:") else { continue }
+                let payload = String(line.dropFirst(5))
+                    .trimmingCharacters(in: .whitespaces)
+                guard let event = try Self.streamEvent(
+                    eventName: eventName,
+                    payload: payload
+                ) else { continue }
+                continuation.yield(event)
+                if case .completed = event {
+                    receivedStop = true
+                    break
+                }
+            }
+            guard receivedStop else {
+                throw AIChatError.streamTransportError(code: -1)
+            }
+        } catch let error as AIChatError {
+            throw error
+        } catch let error as URLError {
+            throw Self.transportError(error)
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            throw AIChatError.streamTransportError(code: (error as NSError).code)
+        }
+    }
+
+    private func requestData(
+        path: [String],
+        method: String,
+        apiKey: String,
+        body: [String: Any]? = nil
+    ) async throws -> Data {
+        let request = try makeRequest(
+            url: endpoint(path),
+            method: method,
+            apiKey: apiKey,
+            body: body
+        )
+        do {
+            let (data, response) = try await session.data(for: request)
+            guard let response = response as? HTTPURLResponse else {
+                throw AIChatError.invalidResponse
+            }
+            guard (200..<300).contains(response.statusCode) else {
+                throw Self.apiError(statusCode: response.statusCode, data: data)
+            }
+            return data
+        } catch let error as AIChatError {
+            throw error
+        } catch let error as URLError {
+            throw Self.transportError(error)
+        }
+    }
+
+    private func makeRequest(
+        url: URL,
+        method: String,
+        apiKey: String,
+        body: [String: Any]? = nil
+    ) throws -> URLRequest {
+        var request = URLRequest(url: url)
+        request.httpMethod = method
+        request.setValue(apiKey, forHTTPHeaderField: "x-api-key")
+        request.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        if let body {
+            request.httpBody = try JSONSerialization.data(withJSONObject: body)
+        }
+        return request
+    }
+
+    private func endpoint(_ path: [String]) -> URL {
+        path.reduce(baseURL) { $0.appendingPathComponent($1) }
+    }
+
+    private func jsonObject(_ data: Data) throws -> [String: Any] {
+        guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw AIChatError.invalidResponse
+        }
+        return object
+    }
+
+    private nonisolated static func streamEvent(
+        eventName: String?,
+        payload: String
+    ) throws -> AIChatStreamEvent? {
+        guard let data = payload.data(using: .utf8),
+              let object = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw AIChatError.streamProtocolError
+        }
+        let type = (object["type"] as? String) ?? eventName
+        switch type {
+        case "message_start":
+            let message = object["message"] as? [String: Any]
+            return (message?["id"] as? String).map(AIChatStreamEvent.responseCreated)
+        case "content_block_delta":
+            let delta = object["delta"] as? [String: Any]
+            guard delta?["type"] as? String == "text_delta" else { return nil }
+            return (delta?["text"] as? String).map(AIChatStreamEvent.textDelta)
+        case "message_stop":
+            return .completed
+        case "error":
+            let error = object["error"] as? [String: Any]
+            throw apiError(statusCode: nil, error: error)
+        default:
+            return nil
+        }
+    }
+
+    private nonisolated static func apiError(
+        statusCode: Int?,
+        data: Data
+    ) -> AIChatError {
+        let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+        return apiError(statusCode: statusCode, error: object?["error"] as? [String: Any])
+    }
+
+    private nonisolated static func apiError(
+        statusCode: Int?,
+        error: [String: Any]?
+    ) -> AIChatError {
+        let type = (error?["type"] as? String)?.lowercased()
+        switch statusCode {
+        case 401, 403:
+            return .authenticationFailed
+        case 408:
+            return .requestTimedOut
+        case 429:
+            return .rateLimited
+        case let code? where (500...599).contains(code):
+            return .serverUnavailable
+        case let code?:
+            return .requestFailed(statusCode: code)
+        case nil where type == "authentication_error":
+            return .authenticationFailed
+        default:
+            return .apiFailure(code: type)
+        }
+    }
+
+    private nonisolated static func transportError(_ error: URLError) -> AIChatError {
+        switch error.code {
+        case .notConnectedToInternet, .networkConnectionLost, .cannotFindHost,
+             .cannotConnectToHost, .dnsLookupFailed:
+            return .offline
+        case .timedOut:
+            return .requestTimedOut
+        default:
+            return .invalidResponse
+        }
+    }
+}
+
+actor DeferredClaudeChatService: ClaudeChatServing {
+    private let factory: @Sendable () -> any ClaudeChatServing
+    private var storage: (any ClaudeChatServing)?
+
+    init(factory: @escaping @Sendable () -> any ClaudeChatServing) {
+        self.factory = factory
+    }
+
+    func availableModelIDs(apiKey: String) async throws -> Set<String> {
+        try await resolved().availableModelIDs(apiKey: apiKey)
+    }
+
+    nonisolated func streamResponse(
+        apiKey: String,
+        request: AIChatSendRequest,
+        history: [AIChatMessage]
+    ) -> AsyncThrowingStream<AIChatStreamEvent, Error> {
+        AsyncThrowingStream { continuation in
+            let task = Task {
+                do {
+                    let service = await self.resolved()
+                    for try await event in service.streamResponse(
+                        apiKey: apiKey,
+                        request: request,
+                        history: history
+                    ) {
+                        try Task.checkCancellation()
+                        continuation.yield(event)
+                    }
+                    continuation.finish()
+                } catch is CancellationError {
+                    continuation.finish()
+                } catch {
+                    continuation.finish(throwing: error)
+                }
+            }
+            continuation.onTermination = { _ in task.cancel() }
+        }
+    }
+
+    private func resolved() -> any ClaudeChatServing {
+        if let storage { return storage }
+        let value = factory()
+        storage = value
+        return value
+    }
+}
+
+actor DisabledClaudeChatService: ClaudeChatServing {
+    func availableModelIDs(apiKey: String) -> Set<String> {
+        Set(AIModel.claudeModels.map(\.rawValue))
+    }
+
+    nonisolated func streamResponse(
+        apiKey: String,
+        request: AIChatSendRequest,
+        history: [AIChatMessage]
+    ) -> AsyncThrowingStream<AIChatStreamEvent, Error> {
+        AsyncThrowingStream { $0.finish(throwing: AIChatError.offline) }
+    }
+}
+
+actor ClaudeAPIProvider: AIChatProvider, OpenAIAPIKeyManaging {
+    nonisolated let descriptor = AIProviderDescriptor(
+        id: .claude,
+        displayName: "Claude",
+        rootCommandTitle: "AI Chat: Claude",
+        description: "Uses Anthropic API credits and usage-based billing",
+        symbolName: "bubble.left.and.bubble.right",
+        capabilities: [
+            .authentication, .modelSelection, .streaming,
+            .archive, .deletion, .translation,
+        ]
+    )
+    nonisolated let policies = AIProviderPolicies.localConversationIndex
+
+    private let service: any ClaudeChatServing
+    private let credentials: any OpenAICredentialStoring
+    private var messagesByConversation: [String: [AIChatMessage]] = [:]
+
+    init(
+        service: any ClaudeChatServing,
+        credentials: any OpenAICredentialStoring
+    ) {
+        self.service = service
+        self.credentials = credentials
+    }
+
+    func availability() -> AIProviderAvailability { .available }
+
+    func authenticationState() async -> AIAuthenticationState {
+        do {
+            return try await hasAPIKey()
+                ? .authenticated(detail: "API key saved")
+                : .authenticationRequired
+        } catch {
+            return .failed(message: "The Anthropic API key status could not be read.")
+        }
+    }
+
+    func availableModels() async throws -> [AIModel] {
+        let ids = try await service.availableModelIDs(apiKey: requiredAPIKey())
+        let models = ids.map { id in
+            AIModel(
+                rawValue: id,
+                title: AIModel(rawValue: id).title,
+                detail: "Anthropic Claude model",
+                isDefault: id == AIModel.claudeSonnet.rawValue
+            )
+        }
+        return models.sorted { lhs, rhs in
+            if lhs.isDefault != rhs.isDefault { return lhs.isDefault }
+            return lhs.title < rhs.title
+        }
+    }
+
+    func createConversation(title: String, model: AIModel) -> String {
+        let id = UUID().uuidString
+        messagesByConversation[id] = []
+        return id
+    }
+
+    func updateConversation(
+        conversationID: String,
+        title: String,
+        model: AIModel,
+        isArchived: Bool
+    ) {}
+
+    func setConversationArchived(
+        conversationID: String,
+        title: String,
+        model: AIModel,
+        isArchived: Bool
+    ) {}
+
+    func loadConversation(
+        conversationID: String,
+        limit: Int,
+        after: String?
+    ) -> AIConversationPage {
+        let messages = messagesByConversation[conversationID] ?? []
+        return AIConversationPage(
+            messages: Array(messages.suffix(max(1, limit))),
+            nextCursor: nil,
+            hasMore: false
+        )
+    }
+
+    func uploadAttachment(_ attachment: AIChatAttachment) async throws -> AIUploadedAttachment {
+        throw AIChatError.invalidAttachment
+    }
+
+    nonisolated func streamResponse(
+        request: AIChatSendRequest
+    ) -> AsyncThrowingStream<AIChatStreamEvent, Error> {
+        AsyncThrowingStream { continuation in
+            let task = Task {
+                do {
+                    let key = try await self.requiredAPIKey()
+                    let history = await self.recordUserMessage(request)
+                    for try await event in self.service.streamResponse(
+                        apiKey: key,
+                        request: request,
+                        history: history
+                    ) {
+                        continuation.yield(event)
+                        if case let .textDelta(text) = event {
+                            await self.appendAssistantDelta(text, conversationID: request.conversationID)
+                        } else if case .completed = event {
+                            await self.finishAssistantMessage(conversationID: request.conversationID)
+                        }
+                    }
+                    continuation.finish()
+                } catch {
+                    continuation.finish(throwing: error)
+                }
+            }
+            continuation.onTermination = { _ in task.cancel() }
+        }
+    }
+
+    nonisolated func streamTranslation(
+        request: AITranslationRequest
+    ) -> AsyncThrowingStream<AIChatStreamEvent, Error> {
+        streamResponse(
+            request: AIChatSendRequest(
+                conversationID: "",
+                model: request.model,
+                reasoningEffort: request.reasoningEffort,
+                prompt: request.prompt,
+                attachments: [],
+                enablesWebSearch: false,
+                clientRequestID: request.clientRequestID
+            )
+        )
+    }
+
+    func stopGeneration(conversationID: String) async {}
+
+    func deleteConversationCompletely(conversationID: String) {
+        messagesByConversation.removeValue(forKey: conversationID)
+    }
+
+    func shutdown() async {}
+
+    func hasAPIKey() async throws -> Bool {
+        try await credentials.loadAPIKey()?.isEmpty == false
+    }
+
+    func saveAPIKey(_ value: String) async throws {
+        try await credentials.saveAPIKey(value)
+    }
+
+    func removeAPIKey() async throws {
+        try await credentials.deleteAPIKey()
+    }
+
+    private func requiredAPIKey() async throws -> String {
+        guard let value = try await credentials.loadAPIKey(), !value.isEmpty else {
+            throw AIChatError.missingClaudeAPIKey
+        }
+        return value
+    }
+
+    private func recordUserMessage(_ request: AIChatSendRequest) -> [AIChatMessage] {
+        let message = AIChatMessage(
+            id: "user-\(request.clientRequestID)",
+            role: .user,
+            text: request.prompt,
+            citations: [],
+            attachments: [],
+            isStreaming: false
+        )
+        guard !request.conversationID.isEmpty else { return [message] }
+        var messages = messagesByConversation[request.conversationID] ?? []
+        messages.append(message)
+        messagesByConversation[request.conversationID] = messages
+        return messages
+    }
+
+    private func appendAssistantDelta(_ text: String, conversationID: String) {
+        guard !conversationID.isEmpty else { return }
+        var messages = messagesByConversation[conversationID] ?? []
+        if let index = messages.lastIndex(where: { $0.role == .assistant && $0.isStreaming }) {
+            messages[index].text += text
+        } else {
+            messages.append(
+                AIChatMessage(
+                    id: "assistant-\(UUID().uuidString)",
+                    role: .assistant,
+                    text: text,
+                    citations: [],
+                    attachments: [],
+                    isStreaming: true
+                )
+            )
+        }
+        messagesByConversation[conversationID] = messages
+    }
+
+    private func finishAssistantMessage(conversationID: String) {
+        guard !conversationID.isEmpty,
+              var messages = messagesByConversation[conversationID],
+              let index = messages.lastIndex(where: { $0.role == .assistant }) else {
+            return
+        }
+        messages[index].isStreaming = false
+        messagesByConversation[conversationID] = messages
     }
 }

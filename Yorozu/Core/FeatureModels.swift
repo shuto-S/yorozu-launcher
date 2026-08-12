@@ -68,6 +68,7 @@ enum FeatureCommand: Hashable, Sendable {
     case aliases
     case aiCodex
     case aiOpenAI
+    case aiClaude
     case settings
 
     static let all: [FeatureCommand] = [
@@ -77,6 +78,7 @@ enum FeatureCommand: Hashable, Sendable {
         .aliases,
         .aiCodex,
         .aiOpenAI,
+        .aiClaude,
         .settings,
     ]
 
@@ -94,6 +96,8 @@ enum FeatureCommand: Hashable, Sendable {
             "AI Chat: Codex"
         case .aiOpenAI:
             "AI Chat: OpenAI"
+        case .aiClaude:
+            "AI Chat: Claude"
         case .settings:
             "Settings"
         }
@@ -113,6 +117,8 @@ enum FeatureCommand: Hashable, Sendable {
             "Uses your ChatGPT plan through Codex"
         case .aiOpenAI:
             "Uses API credits and usage-based billing"
+        case .aiClaude:
+            "Uses Anthropic API credits and usage-based billing"
         case .settings:
             "Configure Yorozu"
         }
@@ -132,6 +138,8 @@ enum FeatureCommand: Hashable, Sendable {
             "terminal"
         case .aiOpenAI:
             "sparkles"
+        case .aiClaude:
+            "bubble.left.and.bubble.right"
         case .settings:
             "gearshape"
         }
@@ -151,6 +159,8 @@ enum FeatureCommand: Hashable, Sendable {
             .ai(providerID: .codex)
         case .aiOpenAI:
             .ai(providerID: .openAIAPI)
+        case .aiClaude:
+            .ai(providerID: .claude)
         case .settings:
             .settings
         }
@@ -178,6 +188,8 @@ enum FeatureCommand: Hashable, Sendable {
                 self = .aiCodex
             case .openAIAPI:
                 self = .aiOpenAI
+            case .claude:
+                self = .aiClaude
             default:
                 return nil
             }
@@ -190,6 +202,7 @@ enum FeatureCommand: Hashable, Sendable {
         switch self {
         case .aiCodex: .codex
         case .aiOpenAI: .openAIAPI
+        case .aiClaude: .claude
         default: nil
         }
     }
@@ -202,6 +215,7 @@ enum FeatureCommand: Hashable, Sendable {
         case .aliases: "aliases"
         case .aiCodex: "aiChat.codex"
         case .aiOpenAI: "aiChat.openai_api"
+        case .aiClaude: "aiChat.claude"
         case .settings: "settings"
         }
     }
@@ -223,6 +237,7 @@ struct CommandResultID: RawRepresentable, Hashable, Sendable {
 enum CommandResultKind: Hashable, Sendable {
     case application
     case feature
+    case calculation
     case clipboard
     case snippet
 }
@@ -498,6 +513,7 @@ struct Snippet: Identifiable, Hashable, Sendable {
 enum CommandPayload: Hashable, Sendable {
     case application(LaunchableApplication)
     case feature(FeatureCommand)
+    case calculation(expression: String, result: String)
     case clipboard(UUID)
     case snippet(UUID)
 }

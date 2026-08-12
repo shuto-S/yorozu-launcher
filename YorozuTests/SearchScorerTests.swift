@@ -2,6 +2,24 @@ import XCTest
 @testable import Yorozu
 
 final class SearchScorerTests: XCTestCase {
+    func testArithmeticEvaluatorSupportsFourOperationsAndPrecedence() {
+        XCTAssertEqual(ArithmeticExpressionEvaluator.evaluate("1 + 1"), "2")
+        XCTAssertEqual(ArithmeticExpressionEvaluator.evaluate("2 + 3 * 4"), "14")
+        XCTAssertEqual(ArithmeticExpressionEvaluator.evaluate("(10 - 4) / 3"), "2")
+        XCTAssertEqual(ArithmeticExpressionEvaluator.evaluate("17 % 5"), "2")
+    }
+
+    func testArithmeticEvaluatorRejectsUnsafeOrIncompleteExpressions() {
+        XCTAssertNil(ArithmeticExpressionEvaluator.evaluate("Visual Studio Code"))
+        XCTAssertNil(ArithmeticExpressionEvaluator.evaluate("1 / 0"))
+        XCTAssertNil(ArithmeticExpressionEvaluator.evaluate("1 +"))
+        XCTAssertNil(ArithmeticExpressionEvaluator.evaluate("1 + unknown"))
+        XCTAssertNil(ArithmeticExpressionEvaluator.evaluate("1足す1"))
+        XCTAssertNil(ArithmeticExpressionEvaluator.evaluate("1 × 1"))
+        XCTAssertNil(ArithmeticExpressionEvaluator.evaluate("1 ÷ 1"))
+        XCTAssertNil(ArithmeticExpressionEvaluator.evaluate("１＋１"))
+    }
+
     func testNormalizationHandlesWidthCaseDiacriticsAndWhitespace() {
         XCTAssertEqual("  ＣＡＦÉ   App  ".launcherNormalized, "cafe app")
         XCTAssertEqual("ば".launcherNormalized, "は\u{3099}".launcherNormalized)

@@ -1102,7 +1102,7 @@ final class AIChatViewModel {
         case .checking:
             credentialStatus = .checking
         case let .authenticated(detail):
-            hasAPIKey = providerID == .openAIAPI
+            hasAPIKey = providerID == .openAIAPI || providerID == .claude
             credentialStatus = .saved
             credentialStatusMessage = detail
         case .authenticationRequired:

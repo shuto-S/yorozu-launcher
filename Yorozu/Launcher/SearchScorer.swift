@@ -232,3 +232,149 @@ enum SearchScorer {
         return pinBonus + recencyBonus + frequencyBonus
     }
 }
+
+/// Evaluates the small, deliberately bounded expression language offered by
+/// Root Search. Keeping this parser local avoids invoking a scripting engine
+/// or allowing arbitrary code when a query happens to look mathematical.
+enum ArithmeticExpressionEvaluator {
+    nonisolated static func evaluate(_ input: String) -> String? {
+        let normalized = normalize(input)
+        guard !normalized.isEmpty,
+              normalized.count <= 128,
+              normalized.contains(where: { "+-*/%".contains($0) }) else {
+            return nil
+        }
+
+        var parser = Parser(Array(normalized))
+        guard let value = parser.parseExpression(),
+              parser.isAtEnd,
+              value.isFinite else {
+            return nil
+        }
+        return format(value)
+    }
+
+    private nonisolated static func normalize(_ input: String) -> String {
+        let value = input.trimmingCharacters(in: .whitespacesAndNewlines)
+        // Only programming-style ASCII operators are accepted. Keeping the
+        // accepted alphabet narrow prevents normal language queries from
+        // becoming calculator commands accidentally.
+        return value.filter { !$0.isWhitespace }
+    }
+
+    private nonisolated static func format(_ value: Double) -> String {
+        let normalized = abs(value) < 0.000000000001 ? 0 : value
+        if normalized.rounded() == normalized,
+           abs(normalized) <= 9_007_199_254_740_991 {
+            return String(Int64(normalized))
+        }
+        let formatter = NumberFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.numberStyle = .decimal
+        formatter.usesGroupingSeparator = false
+        formatter.maximumFractionDigits = 12
+        formatter.minimumFractionDigits = 0
+        return formatter.string(from: NSNumber(value: normalized)) ?? "\(normalized)"
+    }
+
+    private struct Parser {
+        let characters: [Character]
+        var index = 0
+
+        var isAtEnd: Bool {
+            index >= characters.count
+        }
+
+        init(_ characters: [Character]) {
+            self.characters = characters
+        }
+
+        mutating func parseExpression() -> Double? {
+            guard var value = parseTerm() else { return nil }
+            while let operation = consumeBinaryOperator(plus: true, minus: true) {
+                guard let rhs = parseTerm() else { return nil }
+                if operation == "+" {
+                    value += rhs
+                } else {
+                    value -= rhs
+                }
+                guard value.isFinite else { return nil }
+            }
+            return value
+        }
+
+        private mutating func parseTerm() -> Double? {
+            guard var value = parseUnary() else { return nil }
+            while let operation = consumeBinaryOperator(plus: false, minus: false) {
+                guard let rhs = parseUnary() else { return nil }
+                switch operation {
+                case "*":
+                    value *= rhs
+                case "/":
+                    guard rhs != 0 else { return nil }
+                    value /= rhs
+                default:
+                    guard rhs != 0 else { return nil }
+                    value.formRemainder(dividingBy: rhs)
+                }
+                guard value.isFinite else { return nil }
+            }
+            return value
+        }
+
+        private mutating func parseUnary() -> Double? {
+            if consume("+") { return parseUnary() }
+            if consume("-") {
+                guard let value = parseUnary() else { return nil }
+                return -value
+            }
+            return parsePrimary()
+        }
+
+        private mutating func parsePrimary() -> Double? {
+            if consume("(") {
+                guard let value = parseExpression(), consume(")") else { return nil }
+                return value
+            }
+            let start = index
+            var hasDigits = false
+            var hasDecimal = false
+            while let character = current {
+                if character.isNumber {
+                    hasDigits = true
+                    index += 1
+                } else if character == ".", !hasDecimal {
+                    hasDecimal = true
+                    index += 1
+                } else {
+                    break
+                }
+            }
+            guard hasDigits, start < index else { return nil }
+            return Double(String(characters[start..<index]))
+        }
+
+        private mutating func consumeBinaryOperator(
+            plus: Bool,
+            minus: Bool
+        ) -> Character? {
+            if plus, consume("+") { return "+" }
+            if minus, consume("-") { return "-" }
+            if !plus, !minus, consume("*") { return "*" }
+            if !plus, !minus, consume("/") { return "/" }
+            if !plus, !minus, consume("%") { return "%" }
+            return nil
+        }
+
+        private mutating func consume(_ expected: Character) -> Bool {
+            guard current == expected else { return false }
+            index += 1
+            return true
+        }
+
+        private var current: Character? {
+            guard characters.indices.contains(index) else { return nil }
+            return characters[index]
+        }
+    }
+}

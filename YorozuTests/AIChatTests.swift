@@ -35,6 +35,63 @@ final class AIChatStorageTests: XCTestCase {
     }
 
     @MainActor
+    func testClaudeProviderDefaultsAndFeatureCommandAreRegistered() {
+        let suiteName = "com.yorozu.claude-tests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        let preferences = AIChatPreferences(
+            defaults: defaults,
+            providerID: .claude,
+            fallbackModel: AIModel.claudeSonnet
+        )
+
+        XCTAssertEqual(preferences.defaultModel, .claudeSonnet)
+        XCTAssertEqual(FeatureCommand.aiClaude.route, .ai(providerID: .claude))
+        XCTAssertEqual(FeatureCommand.aiClaude.providerID, .claude)
+        XCTAssertEqual(FeatureCommand.aiClaude.title, "AI Chat: Claude")
+    }
+
+    func testClaudeProviderStreamsChatAndStatelessTranslation() async throws {
+        let service = ClaudeTestService()
+        let provider = ClaudeAPIProvider(
+            service: service,
+            credentials: InMemoryOpenAICredentialStore(value: "test-key")
+        )
+        let conversationID = await provider.createConversation(
+            title: "Claude",
+            model: .claudeSonnet
+        )
+        let request = AIChatSendRequest(
+            conversationID: conversationID,
+            model: .claudeSonnet,
+            prompt: "Hello",
+            attachments: [],
+            enablesWebSearch: false,
+            clientRequestID: "claude-test"
+        )
+        var events: [AIChatStreamEvent] = []
+        for try await event in provider.streamResponse(request: request) {
+            events.append(event)
+        }
+        XCTAssertTrue(events.contains { if case .textDelta("Claude reply") = $0 { true } else { false } })
+        let page = try await provider.loadConversation(
+            conversationID: conversationID,
+            limit: 10,
+            after: nil
+        )
+        XCTAssertEqual(page.messages.map(\.text), ["Hello", "Claude reply"])
+
+        let translation = AITranslationRequest(
+            model: .claudeSonnet,
+            reasoningEffort: nil,
+            prompt: "Translate this",
+            clientRequestID: "translation-test"
+        )
+        for try await _ in provider.streamTranslation(request: translation) {}
+        let histories = await service.histories
+        XCTAssertEqual(histories.last?.map(\.text), ["Translate this"])
+    }
+
+    @MainActor
     func testTranslationPreferencesPersistSeparatelyFromAIChatDefaults() {
         let defaults = UserDefaults(
             suiteName: "com.yorozu.translation-preferences-tests.\(UUID().uuidString)"
@@ -1948,6 +2005,35 @@ private actor RegistryTestProvider: AIChatProvider {
     func stopGeneration(conversationID: String) {}
     func deleteConversationCompletely(conversationID: String) {}
     func shutdown() {}
+}
+
+private actor ClaudeTestService: ClaudeChatServing {
+    private(set) var histories: [[AIChatMessage]] = []
+
+    func availableModelIDs(apiKey: String) -> Set<String> {
+        Set(AIModel.claudeModels.map(\.rawValue))
+    }
+
+    nonisolated func streamResponse(
+        apiKey: String,
+        request: AIChatSendRequest,
+        history: [AIChatMessage]
+    ) -> AsyncThrowingStream<AIChatStreamEvent, Error> {
+        AsyncThrowingStream { continuation in
+            let task = Task {
+                await self.record(history)
+                continuation.yield(.responseCreated("claude-response"))
+                continuation.yield(.textDelta("Claude reply"))
+                continuation.yield(.completed)
+                continuation.finish()
+            }
+            continuation.onTermination = { _ in task.cancel() }
+        }
+    }
+
+    private func record(_ history: [AIChatMessage]) {
+        histories.append(history)
+    }
 }
 
 private actor ConversationListTestProvider: AIChatProvider {

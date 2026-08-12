@@ -245,7 +245,9 @@ private struct AISettingsView: View {
     private func refreshSelectedProvider() {
         guard let selectedViewModel else { return }
         selectedViewModel.loadCredentialStatus()
-        guard selectedViewModel.providerID == .codex else { return }
+        guard selectedViewModel.providerDescriptor.capabilities.contains(.modelSelection) else {
+            return
+        }
         Task {
             await selectedViewModel.loadModelMetadataForSettings()
         }
@@ -425,6 +427,8 @@ private struct AIProviderSettingsDetailView: View {
             "Yorozu communicates with the installed Codex app-server. Codex manages ChatGPT authentication; Yorozu never reads or stores its tokens."
         case .openAIAPI:
             "Your API key is stored in macOS Keychain. Yorozu never writes it to its database or logs."
+        case .claude:
+            "Your Anthropic API key is stored in macOS Keychain. Yorozu never writes it to its database or logs."
         default:
             "Authentication is managed by \(viewModel.providerDescriptor.displayName)."
         }
@@ -436,6 +440,8 @@ private struct AIProviderSettingsDetailView: View {
             "Codex usage follows your ChatGPT plan. Yorozu stores only chat titles and the Codex thread IDs it indexes."
         case .openAIAPI:
             "OpenAI API usage is billed to your API Platform account. Conversation messages and uploaded files are stored by OpenAI."
+        case .claude:
+            "Anthropic API usage is billed to your Anthropic account. Conversation messages are sent to Anthropic for processing."
         default:
             "Usage, data retention, and billing are managed by \(viewModel.providerDescriptor.displayName)."
         }
@@ -467,6 +473,11 @@ private struct AIProviderConnectionSettingsView: View {
             ViewThatFits(in: .horizontal) {
                 openAIActions
                 openAIActionsVertical
+            }
+        case .claude:
+            ViewThatFits(in: .horizontal) {
+                claudeActions
+                claudeActionsVertical
             }
         default:
             EmptyView()
@@ -538,6 +549,42 @@ private struct AIProviderConnectionSettingsView: View {
     private var openAIRemoveButton: some View {
         Button("Remove Key", role: .destructive) {
             launcherViewModel.requestOpenAIAPIKeyRemoval()
+        }
+        .disabled(!viewModel.hasAPIKey)
+    }
+
+    private var claudeActions: some View {
+        HStack {
+            claudeKeyButton
+            claudeTestButton
+            claudeRemoveButton
+        }
+    }
+
+    private var claudeActionsVertical: some View {
+        VStack(alignment: .leading) {
+            claudeKeyButton
+            claudeTestButton
+            claudeRemoveButton
+        }
+    }
+
+    private var claudeKeyButton: some View {
+        Button(viewModel.hasAPIKey ? "Replace API Key…" : "Set API Key…") {
+            launcherViewModel.presentClaudeAPIKeyModal()
+        }
+    }
+
+    private var claudeTestButton: some View {
+        Button("Test Connection") {
+            Task { await viewModel.testConnection() }
+        }
+        .disabled(!viewModel.hasAPIKey)
+    }
+
+    private var claudeRemoveButton: some View {
+        Button("Remove Key", role: .destructive) {
+            launcherViewModel.requestClaudeAPIKeyRemoval()
         }
         .disabled(!viewModel.hasAPIKey)
     }

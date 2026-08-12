@@ -740,6 +740,17 @@ private struct CommandResultsListView: View {
             } label: {
                 Label("Open", systemImage: "arrow.right")
             }
+        case .calculation:
+            Button {
+                select(result) { viewModel.copySelected() }
+            } label: {
+                Label("Copy Result", systemImage: "doc.on.doc")
+            }
+            Button {
+                select(result) { viewModel.copyCalculationExpression() }
+            } label: {
+                Label("Copy Expression", systemImage: "function")
+            }
         case .clipboard:
             Button {
                 select(result) { viewModel.pasteSelected() }
@@ -1250,6 +1261,9 @@ private struct PaletteModalView: View {
             case .openAIAPIKey:
                 openAIAPIKeyEditor
                     .frame(width: 460)
+            case .claudeAPIKey:
+                claudeAPIKeyEditor
+                    .frame(width: 460)
             case .codexExecutablePath:
                 codexExecutablePathEditor
                     .frame(width: 500)
@@ -1279,6 +1293,8 @@ private struct PaletteModalView: View {
             case .aliasEditor:
                 focusedField = .alias
             case .openAIAPIKey:
+                focusedField = .apiKey
+            case .claudeAPIKey:
                 focusedField = .apiKey
             case .codexExecutablePath:
                 focusedField = .codexPath
@@ -1436,6 +1452,22 @@ private struct PaletteModalView: View {
                     .accessibilityIdentifier("modal.openai.api-key")
                 modalError
                 modalButtons(saveTitle: "Save", save: viewModel.saveOpenAIAPIKeyFromModal)
+            }
+            .padding(18)
+        }
+    }
+
+    private var claudeAPIKeyEditor: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            modalHeader("Anthropic API Key", subtitle: "The key is stored in macOS Keychain.")
+            Divider()
+            VStack(alignment: .leading, spacing: 14) {
+                SecureField("Paste your Anthropic API key", text: $viewModel.claudeAPIKeyDraft)
+                    .focused($focusedField, equals: .apiKey)
+                    .textContentType(.password)
+                    .accessibilityIdentifier("modal.claude.api-key")
+                modalError
+                modalButtons(saveTitle: "Save", save: viewModel.saveClaudeAPIKeyFromModal)
             }
             .padding(18)
         }
@@ -1646,6 +1678,8 @@ private struct FeatureDetailSelectionKey: Hashable {
             revision = clipboardItem.map { .dated($0.updatedAt) } ?? .none
         case .snippet:
             revision = snippet.map { .dated($0.updatedAt) } ?? .none
+        case .calculation:
+            revision = .none
         case let .feature(feature):
             revision = .feature(feature)
         case nil:

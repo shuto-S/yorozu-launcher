@@ -14,6 +14,7 @@ Yorozu is a lightweight, keyboard-first launcher for macOS. It brings applicatio
 - Dedicated screens for Clipboard History, Snippets, Aliases, AI Chat, and Settings
 - Codex chat through the installed `codex app-server` and the user's ChatGPT plan
 - OpenAI Responses API chat with streaming, Web Search, file inputs, and local title indexing
+- Claude Messages API chat with streaming and local title indexing (enable it and add an Anthropic API key in Settings)
 - Configurable global shortcuts
 - Keyboard-first navigation with mouse support
 - Japanese IME-safe command handling
@@ -87,7 +88,7 @@ UI tests require Xcode Automation permission and should be run with `-only-testi
 
 Clipboard history and snippets are stored locally. Yorozu does not send clipboard or snippet content over the network. URL previews are optional because loading one can contact the linked website.
 
-AI Chat is explicit. Codex is enabled by default and delegates ChatGPT authentication and conversation content to the installed `codex app-server`; Yorozu never reads or stores Codex tokens. The optional OpenAI API provider keeps the user's API key in macOS Keychain and uses API Platform billing. Yorozu stores only provider IDs, chat titles, model IDs, and list metadata in SQLite. It does not synchronize with ChatGPT history and never attaches clipboard content automatically.
+AI Chat is explicit. Codex is enabled by default and delegates ChatGPT authentication and conversation content to the installed `codex app-server`; Yorozu never reads or stores Codex tokens. The optional OpenAI API and Claude providers keep the user's API keys in macOS Keychain and use their respective API billing. Yorozu stores only provider IDs, chat titles, model IDs, and list metadata in SQLite. It does not synchronize with ChatGPT history and never attaches clipboard content automatically.
 
 The repository intentionally excludes local visual QA captures and runtime databases because they can contain application names, URLs, or clipboard content.
 

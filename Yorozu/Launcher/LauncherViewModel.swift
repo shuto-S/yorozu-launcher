@@ -9,6 +9,7 @@ enum LauncherActionID: String, CaseIterable, Identifiable {
     case open
     case paste
     case copy
+    case copyCalculationExpression
     case togglePin
     case editAlias
     case deleteAlias
@@ -94,6 +95,7 @@ enum PaletteConfirmation: Equatable {
     case clearClipboardHistory(includePinned: Bool)
     case codexSignOut
     case removeOpenAIAPIKey
+    case removeClaudeAPIKey
 }
 
 enum PaletteModal: Equatable {
@@ -101,6 +103,7 @@ enum PaletteModal: Equatable {
     case aliasApplicationPicker
     case aliasEditor(ApplicationIdentity)
     case openAIAPIKey
+    case claudeAPIKey
     case codexExecutablePath
     case confirmation(PaletteConfirmation)
 }
@@ -166,6 +169,7 @@ final class LauncherViewModel {
     var snippetKeywordDraft = ""
     var snippetContentDraft = ""
     var openAIAPIKeyDraft = ""
+    var claudeAPIKeyDraft = ""
     var codexExecutablePathDraft = ""
     var actionQuery = "" {
         didSet {
@@ -395,6 +399,8 @@ final class LauncherViewModel {
             return "Sign Out of ChatGPT?"
         case .removeOpenAIAPIKey:
             return "Remove OpenAI API Key?"
+        case .removeClaudeAPIKey:
+            return "Remove Anthropic API Key?"
         }
     }
 
@@ -420,6 +426,8 @@ final class LauncherViewModel {
             return "Yorozu will stop using your ChatGPT account until you sign in again."
         case .removeOpenAIAPIKey:
             return "The saved key will be removed from macOS Keychain."
+        case .removeClaudeAPIKey:
+            return "The saved Anthropic key will be removed from macOS Keychain."
         }
     }
 
@@ -433,6 +441,8 @@ final class LauncherViewModel {
         case .codexSignOut:
             return "Sign Out"
         case .removeOpenAIAPIKey:
+            return "Remove Key"
+        case .removeClaudeAPIKey:
             return "Remove Key"
         }
     }
@@ -521,7 +531,11 @@ final class LauncherViewModel {
         switch route {
         case .root:
             [
-                LauncherFooterAction(id: .primary, shortcut: "↩", title: "Open"),
+                LauncherFooterAction(
+                    id: .primary,
+                    shortcut: "↩",
+                    title: isCalculationSelected ? "Copy" : "Open"
+                ),
                 LauncherFooterAction(id: .actions, shortcut: "⌘K", title: "Actions"),
             ]
         case .translation:
@@ -549,6 +563,13 @@ final class LauncherViewModel {
         case .settings:
             []
         }
+    }
+
+    private var isCalculationSelected: Bool {
+        if case .calculation = selectedResult?.payload {
+            return true
+        }
+        return false
     }
 
     func isFooterActionEnabled(_ action: LauncherFooterActionID) -> Bool {
@@ -620,6 +641,16 @@ final class LauncherViewModel {
         case .feature:
             return [
                 action(.open, "Open", "arrow.right", ["↩"]),
+            ]
+        case .calculation:
+            return [
+                action(.copy, "Copy Result", "doc.on.doc", ["↩"]),
+                action(
+                    .copyCalculationExpression,
+                    "Copy Expression",
+                    "function",
+                    []
+                ),
             ]
         case .clipboard:
             let isPinned = selectedClipboardItem?.isPinned == true
@@ -811,6 +842,8 @@ final class LauncherViewModel {
             openSelectedApplication()
         case let .feature(feature):
             openFeature(feature)
+        case .calculation:
+            copySelected()
         case .clipboard, .snippet:
             pasteSelected()
         }
@@ -876,7 +909,7 @@ final class LauncherViewModel {
                 apply(clipboardSnapshot: await clipboardCatalog.togglePin(id: id))
                 refreshSearch()
             }
-        case .feature, .snippet:
+        case .feature, .calculation, .snippet:
             break
         }
     }
@@ -1056,7 +1089,7 @@ final class LauncherViewModel {
             performPaste(.text(snippet.content)) { [weak self] in
                 self?.recordSnippetUse(snippet.id)
             }
-        case .application, .feature:
+        case .application, .feature, .calculation:
             return
         }
     }
@@ -1078,9 +1111,18 @@ final class LauncherViewModel {
             performCopy(.text(snippet.content)) { [weak self] in
                 self?.recordSnippetUse(snippet.id)
             }
+        case let .calculation(_, result):
+            performCopy(.text(result)) {}
         case .application, .feature:
             return
         }
+    }
+
+    func copyCalculationExpression() {
+        guard case let .calculation(expression, result) = selectedResult?.payload else {
+            return
+        }
+        performCopy(.text("\(expression) = \(result)")) {}
     }
 
     private func performPaste(
@@ -1266,7 +1308,7 @@ final class LauncherViewModel {
             presentModal(.confirmation(.deleteClipboard(id)))
         case let .snippet(id):
             presentModal(.confirmation(.deleteSnippet(id)))
-        case .application, .feature:
+        case .application, .feature, .calculation:
             break
         }
     }
@@ -1391,6 +1433,9 @@ final class LauncherViewModel {
         case .copy:
             dismissActionPanel()
             copySelected()
+        case .copyCalculationExpression:
+            dismissActionPanel()
+            copyCalculationExpression()
         case .togglePin:
             dismissActionPanel()
             togglePinForSelectedResult()
@@ -1458,6 +1503,11 @@ final class LauncherViewModel {
         presentModal(.openAIAPIKey)
     }
 
+    func presentClaudeAPIKeyModal() {
+        claudeAPIKeyDraft = ""
+        presentModal(.claudeAPIKey)
+    }
+
     func presentCodexExecutablePathModal() {
         codexExecutablePathDraft = aiProviderPreferences.codexExecutablePath
         presentModal(.codexExecutablePath)
@@ -1470,6 +1520,23 @@ final class LauncherViewModel {
         isModalProcessing = true
         modalErrorMessage = nil
         viewModel.saveAPIKey(openAIAPIKeyDraft) { [weak self] success, message in
+            guard let self else { return }
+            self.isModalProcessing = false
+            if success {
+                self.dismissModal()
+            } else {
+                self.modalErrorMessage = message ?? "The API key could not be saved."
+            }
+        }
+    }
+
+    func saveClaudeAPIKeyFromModal() {
+        guard paletteModal == .claudeAPIKey,
+              !isModalProcessing,
+              let viewModel = aiChatViewModel(for: .claude) else { return }
+        isModalProcessing = true
+        modalErrorMessage = nil
+        viewModel.saveAPIKey(claudeAPIKeyDraft) { [weak self] success, message in
             guard let self else { return }
             self.isModalProcessing = false
             if success {
@@ -1510,6 +1577,10 @@ final class LauncherViewModel {
 
     func requestOpenAIAPIKeyRemoval() {
         presentModal(.confirmation(.removeOpenAIAPIKey))
+    }
+
+    func requestClaudeAPIKeyRemoval() {
+        presentModal(.confirmation(.removeClaudeAPIKey))
     }
 
     func requestAIConversationDeletion() {
@@ -1582,6 +1653,21 @@ final class LauncherViewModel {
                     self.modalErrorMessage = message ?? "The API key could not be removed."
                 }
             }
+        case .removeClaudeAPIKey:
+            guard let viewModel = aiChatViewModel(for: .claude) else {
+                modalErrorMessage = "Claude is unavailable."
+                return
+            }
+            isModalProcessing = true
+            viewModel.removeAPIKey { [weak self] success, message in
+                guard let self else { return }
+                self.isModalProcessing = false
+                if success {
+                    self.dismissModal()
+                } else {
+                    self.modalErrorMessage = message ?? "The API key could not be removed."
+                }
+            }
         }
     }
 
@@ -1595,6 +1681,8 @@ final class LauncherViewModel {
             saveAlias()
         case .openAIAPIKey:
             saveOpenAIAPIKeyFromModal()
+        case .claudeAPIKey:
+            saveClaudeAPIKeyFromModal()
         case .codexExecutablePath:
             saveCodexExecutablePathFromModal()
         case .confirmation, nil:
@@ -1609,6 +1697,7 @@ final class LauncherViewModel {
                 || !snippetKeywordDraft.isEmpty
                 || !snippetContentDraft.isEmpty
                 || !openAIAPIKeyDraft.isEmpty
+                || !claudeAPIKeyDraft.isEmpty
                 || !codexExecutablePathDraft.isEmpty else { return }
         paletteModal = nil
         modalErrorMessage = nil
@@ -1617,6 +1706,7 @@ final class LauncherViewModel {
         snippetKeywordDraft = ""
         snippetContentDraft = ""
         openAIAPIKeyDraft = ""
+        claudeAPIKeyDraft = ""
         codexExecutablePathDraft = ""
         aliasEditorMode = nil
         aliasDraft = ""
@@ -1913,7 +2003,22 @@ final class LauncherViewModel {
         let applicationResults = applications.map {
             Self.applicationResult($0, query: query)
         }
-        let combined = featureResults(query: query) + applicationResults
+        var combined = featureResults(query: query) + applicationResults
+        if !query.launcherNormalized.isEmpty,
+           let calculation = ArithmeticExpressionEvaluator.evaluate(query) {
+            combined.append(
+                CommandResult(
+                    id: CommandResultID(rawValue: "calculation:\(query.launcherNormalized)"),
+                    kind: .calculation,
+                    title: calculation,
+                    subtitle: query,
+                    icon: .system("equal.circle"),
+                    score: 1_200,
+                    isPinned: false,
+                    payload: .calculation(expression: query, result: calculation)
+                )
+            )
+        }
         let sorted: [CommandResult]
         if query.launcherNormalized.isEmpty {
             sorted = combined.sorted(by: rootEmptyQueryComparator)
@@ -1958,7 +2063,7 @@ final class LauncherViewModel {
             return application.preference
         case let .feature(feature):
             return featureCommands.first(where: { $0.command == feature })?.preference ?? .empty
-        case .clipboard, .snippet:
+        case .calculation, .clipboard, .snippet:
             return .empty
         }
     }

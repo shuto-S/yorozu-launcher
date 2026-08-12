@@ -284,36 +284,47 @@ private actor UITestOpenAIChatService: OpenAIChatServing {
     ) {}
 }
 
-private actor UITestAIChatProvider: AIChatProvider {
+private actor UITestAIChatProvider: AIChatProvider, OpenAIAPIKeyManaging {
     nonisolated let descriptor: AIProviderDescriptor
     private let service = UITestOpenAIChatService()
+    private var apiKey: String? = "ui-test-key"
 
     init(providerID: AIProviderID) {
+        let isCodex = providerID == .codex
+        let isClaude = providerID == .claude
         descriptor = AIProviderDescriptor(
             id: providerID,
-            displayName: providerID == .codex ? "Codex" : "OpenAI API",
-            rootCommandTitle: providerID == .codex
+            displayName: isCodex ? "Codex" : (isClaude ? "Claude" : "OpenAI API"),
+            rootCommandTitle: isCodex
                 ? "AI Chat: Codex"
-                : "AI Chat: OpenAI",
+                : (isClaude ? "AI Chat: Claude" : "AI Chat: OpenAI"),
             description: "UI test provider",
-            symbolName: providerID == .codex ? "terminal" : "sparkles",
-            capabilities: providerID == .codex
+            symbolName: isCodex ? "terminal" : (isClaude ? "bubble.left.and.bubble.right" : "sparkles"),
+            capabilities: isCodex
                 ? [
                     .authentication, .modelSelection, .reasoningEffort,
                     .streaming, .archive, .deletion, .translation,
                 ]
-                : [
+                : (isClaude
+                    ? [
+                        .authentication, .modelSelection, .streaming,
+                        .archive, .deletion, .translation,
+                    ]
+                    : [
                     .authentication, .modelSelection, .streaming,
                     .archive, .deletion, .translation,
-                ]
+                    ])
         )
     }
 
     func availability() -> AIProviderAvailability { .available }
     func authenticationState() -> AIAuthenticationState {
-        .authenticated(detail: "Test account")
+        apiKey == nil
+            ? .authenticationRequired
+            : .authenticated(detail: "Test account")
     }
     func availableModels() -> [AIModel] {
+        if descriptor.id == .claude { return AIModel.claudeModels }
         guard descriptor.id == .codex else { return AIModel.openAIModels }
         let efforts = ["low", "medium", "high"].map {
             AIReasoningEffort(rawValue: $0)
@@ -388,6 +399,9 @@ private actor UITestAIChatProvider: AIChatProvider {
     func stopGeneration(conversationID: String) async {}
     func deleteConversationCompletely(conversationID: String) async throws {}
     func shutdown() async {}
+    func hasAPIKey() async throws -> Bool { apiKey != nil }
+    func saveAPIKey(_ value: String) async throws { apiKey = value }
+    func removeAPIKey() async throws { apiKey = nil }
 }
 
 @MainActor
@@ -437,6 +451,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         defaults: environment.defaults,
         providerID: .openAIAPI
     )
+    private lazy var claudeAIChatPreferences = AIChatPreferences(
+        defaults: environment.defaults,
+        providerID: .claude,
+        fallbackModel: AIModel.claudeSonnet
+    )
     private lazy var translationPreferences = TranslationPreferences(
         defaults: environment.defaults
     )
@@ -461,6 +480,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private lazy var openAIProvider: any AIChatProvider = OpenAIAPIProvider(
         service: aiService,
         credentials: aiCredentials
+    )
+    private lazy var claudeCredentials: any OpenAICredentialStoring = {
+        let usesLiveAIIntegration = environment.usesLiveAIIntegration
+        return DeferredOpenAICredentialStore {
+            if usesLiveAIIntegration {
+                return KeychainClaudeCredentialStore()
+            }
+            return InMemoryOpenAICredentialStore(value: "ui-test-key")
+        }
+    }()
+    private lazy var claudeService: any ClaudeChatServing = {
+        let usesLiveAIIntegration = environment.usesLiveAIIntegration
+        return DeferredClaudeChatService {
+            if usesLiveAIIntegration {
+                return ClaudeChatClient()
+            }
+            return DisabledClaudeChatService()
+        }
+    }()
+    private lazy var claudeProvider: any AIChatProvider = ClaudeAPIProvider(
+        service: claudeService,
+        credentials: claudeCredentials
     )
     private lazy var codexProvider: any AIChatProvider = {
         if environment.usesLiveAIIntegration {
@@ -490,8 +531,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         provider: codexProvider,
         preferences: codexAIChatPreferences
     )
+    private lazy var claudeChatViewModel = AIChatViewModel(
+        catalog: AIConversationCatalog(
+            providerID: .claude,
+            store: store,
+            initialConversations: environment.aiConversationFixtures
+        ),
+        provider: environment.usesLiveAIIntegration
+            ? claudeProvider
+            : UITestAIChatProvider(providerID: .claude),
+        preferences: claudeAIChatPreferences
+    )
     private lazy var aiChatViewModelStore = AIChatViewModelStore(
-        viewModels: [codexChatViewModel, openAIChatViewModel],
+        viewModels: [codexChatViewModel, openAIChatViewModel, claudeChatViewModel],
         providerPreferences: aiProviderPreferences
     )
 

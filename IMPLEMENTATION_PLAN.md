@@ -58,6 +58,7 @@ The current target is:
 - shared provider-neutral models, `AIChatViewModel`, list, conversation, composer, message, and Action Panel UI
 - Codex enabled by default through the installed `codex app-server` and Sign in with ChatGPT
 - optional OpenAI API provider that can be enabled alongside Codex
+- optional Claude Messages API provider that can be enabled alongside Codex and OpenAI API
 - local title-only search and last-message ordering without network requests
 - OpenAI Responses API streaming backed by Conversations API state
 - API-key storage in macOS Keychain
@@ -166,6 +167,7 @@ Privacy and reliability requirements:
 - A URL preview that fails is not retried again during the same app process.
 - Codex requires an installed compatible `codex` executable and an authenticated ChatGPT account.
 - OpenAI API Chat requires a user-provided API key and API Platform billing.
+- Claude Chat requires a user-provided Anthropic API key and Anthropic API billing.
 - Local provider conversation indexes cannot be reconstructed by enumerating all remote conversations.
 - UI automation depends on Xcode Automation permission and can fail before executing tests even when unit tests and the app are healthy.
 - There is no packaged, notarized release yet.
