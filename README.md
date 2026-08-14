@@ -3,7 +3,7 @@
 Yorozu is a lightweight, keyboard-first launcher for macOS. It brings application launching, clipboard history, snippets, aliases, multi-provider AI chat, and settings into one native command palette.
 
 > [!NOTE]
-> Yorozu is an early development build for macOS 26 or later on Apple Silicon. There is no packaged release yet.
+> Yorozu is an early, local-first development build for macOS 26 or later on Apple Silicon. The source repository is public, but there is no packaged or supported public release yet.
 
 ## Features
 
@@ -12,6 +12,8 @@ Yorozu is a lightweight, keyboard-first launcher for macOS. It brings applicatio
 - Clipboard history for text, URLs, files, and images
 - Snippet creation, search, copy, and paste
 - Dedicated screens for Clipboard History, Snippets, Aliases, AI Chat, and Settings
+- AI-assisted translation with configurable target language, provider, model, and reasoning level
+- Root Search arithmetic for ASCII `+`, `-`, `*`, `/`, `%`, and parentheses
 - Codex chat through the installed `codex app-server` and the user's ChatGPT plan
 - OpenAI Responses API chat with streaming, Web Search, file inputs, and local title indexing
 - Claude Messages API chat with streaming and local title indexing (enable it and add an Anthropic API key in Settings)
@@ -33,6 +35,11 @@ Yorozu is a lightweight, keyboard-first launcher for macOS. It brings applicatio
 
 Feature-specific global shortcuts can be configured in Settings.
 
+When Root Search recognizes a supported arithmetic expression, the result is shown as a
+copyable command. `Return` copies the result; the Action Panel also offers `Copy Result`
+and `Copy Expression`. Natural-language arithmetic, Unicode operators, and division by
+zero are intentionally not evaluated.
+
 ## Requirements
 
 - macOS 26 or later
@@ -41,9 +48,9 @@ Feature-specific global shortcuts can be configured in Settings.
 
 ## Quick start
 
-Clone the repository and build the shared Debug configuration:
-
-The project builds ad hoc by default, so it does not require a personal Apple Development Team.
+Clone the repository and build the shared Debug configuration. The checked-in project
+does not contain a personal Development Team and can be built with its ad-hoc Debug
+defaults:
 
 ```bash
 xcodebuild \
@@ -84,11 +91,42 @@ xcodebuild \
 
 UI tests require Xcode Automation permission and should be run with `-only-testing:YorozuUITests`.
 
+The UI-test target must use its isolated test environment. It must not use the developer's
+normal SQLite database, pasteboard, Keychain, application list, or network credentials.
+
+## Local configuration
+
+AI credentials are configured from Yorozu Settings and stored in the macOS Keychain. Do
+not add API keys to source files, shell scripts, fixtures, screenshots, issue reports, or
+commit messages. Codex authentication is delegated to the locally installed Codex
+app-server; Yorozu does not read or export its tokens.
+
+For stable Accessibility testing, use the ignored `Config/Local.xcconfig` described above.
+The tracked `Config/Local.example.xcconfig` contains only a placeholder and is safe to
+share. If the signing identity changes, macOS may require the current build to be
+re-authorized in Privacy & Security → Accessibility.
+
 ## Privacy
 
 Clipboard history and snippets are stored locally. Yorozu does not send clipboard or snippet content over the network. URL previews are optional because loading one can contact the linked website.
 
-AI Chat is explicit. Codex is enabled by default and delegates ChatGPT authentication and conversation content to the installed `codex app-server`; Yorozu never reads or stores Codex tokens. The optional OpenAI API and Claude providers keep the user's API keys in macOS Keychain and use their respective API billing. Yorozu stores only provider IDs, chat titles, model IDs, and list metadata in SQLite. It does not synchronize with ChatGPT history and never attaches clipboard content automatically.
+AI Chat and Translation are explicit. Codex is enabled by default and delegates ChatGPT
+authentication and conversation content to the installed `codex app-server`; Yorozu never
+reads or stores Codex tokens. The optional OpenAI API and Claude providers keep the user's
+API keys in macOS Keychain and use their respective API billing. Network requests are
+created only after the relevant feature is opened and used.
+
+Yorozu stores only provider IDs, chat titles, model IDs, and list metadata in SQLite. AI
+message bodies are sent only to the provider after an explicit user action and are not
+written to the repository. Credentials, clipboard content, and snippet content are not
+committed or attached automatically. Yorozu does not synchronize with ChatGPT history.
+Translation can read selected text only when the user invokes it and macOS Accessibility
+permits that operation.
+
+Clipboard history is local, disabled by default, and configurable by source application,
+retention, and item limit. URL previews are opt-in and use bounded HTTP(S)-only fetching
+with address, redirect, MIME, and payload checks; enabling previews can contact the
+selected website.
 
 The repository intentionally excludes local visual QA captures and runtime databases because they can contain application names, URLs, or clipboard content.
 
@@ -113,5 +151,16 @@ YorozuUITests/
 - [DEVELOPMENT.md](DEVELOPMENT.md): setup, architecture, validation, performance harnesses, and contribution hygiene
 - [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md): current implementation status and roadmap
 - [AGENTS.md](AGENTS.md): repository constraints for coding agents
+
+## Public repository hygiene
+
+Before opening an issue or pull request, inspect the diff for local paths, runtime
+databases, clipboard or snippet captures, screenshots, logs, Keychain exports, API keys,
+access tokens, and signing or provisioning identifiers. The repository's ignore rules
+cover common local artifacts, but an ignored file can still be added explicitly.
+
+If a report may contain sensitive data, describe the problem without the value and use a
+private GitHub security channel when available. Do not publish credentials or personal
+data in a public issue.
 
 No license has been selected yet. Until one is added, the source remains under its default copyright restrictions.

@@ -1,10 +1,16 @@
 # Yorozu Implementation Status and Roadmap
 
-Last updated: 2026-07-31
+Last updated: 2026-08-14
 
 ## Product direction
 
-Yorozu is a lightweight native command palette for macOS. It aims to keep frequent application, clipboard, and text-reuse workflows fast without requiring a browser engine, background network service, or extension runtime.
+Yorozu is a lightweight native command palette for macOS. It aims to keep frequent
+application, clipboard, text-reuse, translation, calculation, and AI workflows fast
+without requiring a browser engine, background network service, or extension runtime.
+
+The repository is public, but the product is still an early local-first private-dogfood
+build. Public source availability does not imply a packaged release, API stability, or
+support for third-party deployment.
 
 The current target is:
 
@@ -34,7 +40,7 @@ The current target is:
 - local search, pinning, deletion, clear-history controls, and retention settings
 - excluded-application settings and concealed/transient pasteboard filtering
 - lazy image reads and bounded preview decoding
-- optional native URL previews
+- optional safe URL previews
 - Accessibility-based automatic paste with safe copy fallback
 - clipboard restoration that does not overwrite a newer user copy
 
@@ -52,10 +58,26 @@ The current target is:
 - add, edit, and delete without a separate utility window
 - immediate reflection in Root Search
 
+### Translation
+
+- Root Search command and dedicated translation route
+- typed input or explicitly selected text when Accessibility allows it
+- configurable target language, provider, model, and reasoning level
+- streaming result with independent copy controls for source and translation
+- no implicit clipboard or selection upload
+
+### Calculator
+
+- Root Search arithmetic candidate for ASCII `+`, `-`, `*`, `/`, `%`, and parentheses
+- explicit `Copy Result` and `Copy Expression` actions
+- `Return` copies a valid result rather than launching an application
+- invalid expressions and division by zero are surfaced as non-copyable errors
+
 ### AI Chat
 
 - dedicated single-pane route: Root Search → chat list → conversation
 - shared provider-neutral models, `AIChatViewModel`, list, conversation, composer, message, and Action Panel UI
+- provider registry and provider-neutral conversation interfaces with capability-driven behavior
 - Codex enabled by default through the installed `codex app-server` and Sign in with ChatGPT
 - optional OpenAI API provider that can be enabled alongside Codex
 - optional Claude Messages API provider that can be enabled alongside Codex and OpenAI API
@@ -88,6 +110,7 @@ The current target is:
 - amortized database retention maintenance
 - bounded image and URL-preview caches
 - built-in presentation and Clipboard-interaction performance modes
+- lazy provider credential and network initialization
 
 ## v0.1 private-dogfood milestones
 
@@ -135,7 +158,7 @@ Launcher/
 Platform/
   PaletteWindowController and PaletteView
   Pasteboard, Accessibility, and paste coordination
-  Settings, OpenAI integration, and native URL previews
+  Settings, AI provider integrations, and safe URL previews
 ```
 
 The runtime database is the single persistence source for launcher preferences, feature usage, clipboard history, snippets, AI chat list metadata, and URL-preview metadata. Search never queries SQLite per keystroke. AI message bodies and attachments are not stored in SQLite.
@@ -155,6 +178,7 @@ Privacy and reliability requirements:
 - no clipboard, snippet, URL, file-path, credential, or selected-text logging
 - no automatic network transmission of clipboard or snippet content
 - URL previews remain explicit and optional
+- AI network work starts only from an explicit AI or Translation action
 - database failure must not make already-loaded Copy/Paste actions unusable
 - paste failure must preserve copied content and explain the next action
 - Japanese IME composition must reach the AppKit field editor
@@ -168,9 +192,13 @@ Privacy and reliability requirements:
 - Codex requires an installed compatible `codex` executable and an authenticated ChatGPT account.
 - OpenAI API Chat requires a user-provided API key and API Platform billing.
 - Claude Chat requires a user-provided Anthropic API key and Anthropic API billing.
+- Translation requires an enabled provider with translation capability and the provider's
+  configured credentials or local authentication.
 - Local provider conversation indexes cannot be reconstructed by enumerating all remote conversations.
 - UI automation depends on Xcode Automation permission and can fail before executing tests even when unit tests and the app are healthy.
 - There is no packaged, notarized release yet.
+- No open-source license has been selected yet; public visibility should not be treated as
+  a grant to redistribute the source.
 
 ## Near-term roadmap
 
@@ -204,6 +232,7 @@ Privacy and reliability requirements:
 - team sharing or cloud sync
 - Windows, Linux, iOS, or Mac App Store distribution
 - OCR and full-fidelity preservation of every pasteboard representation
+- A public hosted service or shared provider credentials
 
 ## Definition of done for a change
 
@@ -214,6 +243,7 @@ Privacy and reliability requirements:
 5. UI work is checked with keyboard and mouse input.
 6. IME-sensitive work is verified with marked text.
 7. Performance-sensitive work is compared against an independently built baseline.
-8. No local signing data, runtime database, clipboard capture, QA screenshot, or machine-specific path is staged.
+8. No local signing data, runtime database, clipboard capture, QA screenshot, credential,
+   or machine-specific path is staged.
 
 See [DEVELOPMENT.md](DEVELOPMENT.md) for commands and operational details.

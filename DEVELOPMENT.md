@@ -2,6 +2,10 @@
 
 This guide is the operational source for building, testing, and profiling Yorozu. Product scope and roadmap live in [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md).
 
+The repository is public, while the application is still an early local-first dogfood
+build. Keep implementation notes reproducible and generic: never document a developer's
+machine path, signing identity, account, credential, or captured user data.
+
 ## Supported environment
 
 - macOS 26 or later
@@ -47,6 +51,18 @@ Replace `YOUR_TEAM_ID` in `Config/Local.xcconfig`. Do not commit this file, cert
 
 The shared project must remain buildable without a personal Apple account. Never place a Development Team directly in `project.pbxproj`.
 
+### Public-repository safety
+
+- Keep `Config/Local.xcconfig` ignored; only the placeholder example is tracked.
+- Never commit API keys, access tokens, cookies, Keychain exports, provisioning files, or
+  personal signing identifiers.
+- Never commit `Yorozu.sqlite`, WAL/SHM files, clipboard captures, snippet content, URL
+  preview data, screenshots, logs, traces, or Xcode result bundles.
+- Scrub local paths and selected text from issue reports, test fixtures, screenshots, and
+  commit messages.
+- If a suspected vulnerability contains sensitive details, use a private GitHub security
+  channel when available instead of a public issue.
+
 ## Repository structure
 
 ```text
@@ -78,6 +94,7 @@ LauncherViewModel ─────── route, query, selection, actions
           ├── ApplicationCatalog
           ├── ClipboardCatalog
           ├── SnippetCatalog
+          ├── AIChatViewModelStore and provider registry
           └── FeatureCommandCatalog
                     │
                     ▼
@@ -109,9 +126,25 @@ Privacy invariants:
 - Clipboard history is local and disabled by default.
 - URL previews are optional and may contact the selected website.
 - A failed URL preview is not retried repeatedly during the same process.
-- Yorozu does not currently implement AI chat, cloud sync, or telemetry.
+- AI Chat and Translation are opt-in feature routes. They do not create network tasks
+  during normal Root Search startup.
+- Provider credentials are loaded lazily from Keychain or the provider's local app-server
+  integration only when the provider is selected or used.
+- AI message bodies, attachments, and prompt drafts are not stored in SQLite.
+- Yorozu does not implement cloud sync or telemetry.
 
 Clipboard maintenance is intentionally amortized. Non-image captures perform full database retention maintenance every 32 writes; in-memory pruning still occurs for each capture. Image captures perform full maintenance immediately.
+
+### Translation and Calculator
+
+Translation is an explicit Root Search feature. It can use selected text when Accessibility
+allows it, or text entered in the translation route. Provider, model, reasoning level, and
+target language are user-configurable. The translation request is sent only after the user
+starts translation; clipboard content is not attached implicitly.
+
+Root arithmetic is deliberately narrow and predictable. Only ASCII digits, decimal points,
+parentheses, and `+ - * / %` are accepted. Results are copied through an explicit result
+action, while invalid expressions and division by zero remain non-copyable error states.
 
 ### Storage recovery
 
@@ -182,6 +215,9 @@ For UI or input changes, check:
 - Root, Clipboard, Snippets, Aliases, AI Chat, and Settings route transitions
 - Japanese IME composition, candidate movement, confirmation, and cancellation
 - automatic paste and copy fallback with Accessibility both allowed and denied
+- Root arithmetic, including copy-result actions and division-by-zero handling
+- Translation with typed input, selected-text handoff, provider/model/reasoning selection,
+  and copy controls
 
 ## Performance measurement
 
@@ -220,4 +256,6 @@ Targets:
 - Stage explicit files when the worktree is mixed.
 - Keep local signing, databases, visual QA captures, logs, traces, and Xcode result bundles untracked.
 - Do not include clipboard or snippet content in test names, snapshots, commit messages, or pull-request descriptions.
+- Before pushing, run `git diff --check` and inspect `git diff --cached` for secrets,
+  personal paths, credentials, and runtime artifacts.
 - Separate unit/integration results, UI automation, and manual acceptance in the final report.
