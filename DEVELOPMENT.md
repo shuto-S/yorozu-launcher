@@ -197,7 +197,7 @@ Pass `--ui-testing-run-id <unique-value>` when starting the test host. UI-test m
 - fake Accessibility and event-posting dependencies;
 - global shortcut registration disabled and shortcut recorders backed by isolated bindings;
 - URL preview networking disabled.
-- fake Codex/OpenAI/Claude providers, credentials, conversation fixtures, and chat services with no network access.
+- fake Codex/OpenAI/Claude/Ollama providers, credentials, conversation fixtures, and chat services with no network access.
 
 Failure to construct this environment is fatal. UI tests must never fall back to production dependencies. Test shutdown waits for Clipboard monitoring to stop, closes the store, and only then removes the temporary directory.
 
@@ -218,6 +218,11 @@ For UI or input changes, check:
 - Root arithmetic, including copy-result actions and division-by-zero handling
 - Translation with typed input, selected-text handoff, provider/model/reasoning selection,
   and copy controls
+
+Ollama is disabled by default and has no Keychain credential. It contacts the default local
+service (`127.0.0.1:11434`) only after the provider is selected or used. Model discovery uses
+the local tags endpoint and chat responses are consumed as newline-delimited JSON; Root
+Search never performs this work.
 
 ## Performance measurement
 

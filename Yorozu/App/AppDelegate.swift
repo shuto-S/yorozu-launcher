@@ -292,15 +292,29 @@ private actor UITestAIChatProvider: AIChatProvider, OpenAIAPIKeyManaging {
     init(providerID: AIProviderID) {
         let isCodex = providerID == .codex
         let isClaude = providerID == .claude
+        let isOllama = providerID == .ollama
         descriptor = AIProviderDescriptor(
             id: providerID,
-            displayName: isCodex ? "Codex" : (isClaude ? "Claude" : "OpenAI API"),
+            displayName: isCodex
+                ? "Codex"
+                : (isClaude ? "Claude" : (isOllama ? "Ollama" : "OpenAI API")),
             rootCommandTitle: isCodex
                 ? "AI Chat: Codex"
-                : (isClaude ? "AI Chat: Claude" : "AI Chat: OpenAI"),
-            description: "UI test provider",
-            symbolName: isCodex ? "terminal" : (isClaude ? "bubble.left.and.bubble.right" : "sparkles"),
-            capabilities: isCodex
+                : (isClaude
+                    ? "AI Chat: Claude"
+                    : (isOllama ? "AI Chat: Ollama" : "AI Chat: OpenAI")),
+            description: isOllama ? "Local UI test provider" : "UI test provider",
+            symbolName: isCodex
+                ? "terminal"
+                : (isClaude
+                    ? "bubble.left.and.bubble.right"
+                    : (isOllama ? "server.rack" : "sparkles")),
+            capabilities: isOllama
+                ? [
+                    .modelSelection, .streaming, .archive,
+                    .deletion, .translation,
+                ]
+                : (isCodex
                 ? [
                     .authentication, .modelSelection, .reasoningEffort,
                     .streaming, .archive, .deletion, .translation,
@@ -313,7 +327,7 @@ private actor UITestAIChatProvider: AIChatProvider, OpenAIAPIKeyManaging {
                     : [
                     .authentication, .modelSelection, .streaming,
                     .archive, .deletion, .translation,
-                    ])
+                    ]))
         )
     }
 
@@ -325,6 +339,7 @@ private actor UITestAIChatProvider: AIChatProvider, OpenAIAPIKeyManaging {
     }
     func availableModels() -> [AIModel] {
         if descriptor.id == .claude { return AIModel.claudeModels }
+        if descriptor.id == .ollama { return AIModel.ollamaModels }
         guard descriptor.id == .codex else { return AIModel.openAIModels }
         let efforts = ["low", "medium", "high"].map {
             AIReasoningEffort(rawValue: $0)
@@ -456,6 +471,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         providerID: .claude,
         fallbackModel: AIModel.claudeSonnet
     )
+    private lazy var ollamaAIChatPreferences = AIChatPreferences(
+        defaults: environment.defaults,
+        providerID: .ollama,
+        fallbackModel: AIModel.ollamaDefault
+    )
     private lazy var translationPreferences = TranslationPreferences(
         defaults: environment.defaults
     )
@@ -503,6 +523,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         service: claudeService,
         credentials: claudeCredentials
     )
+    private lazy var ollamaService: any OllamaChatServing = OllamaChatClient()
+    private lazy var ollamaProvider: any AIChatProvider = OllamaAIProvider(
+        service: ollamaService
+    )
     private lazy var codexProvider: any AIChatProvider = {
         if environment.usesLiveAIIntegration {
             return CodexAIProvider(
@@ -542,8 +566,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             : UITestAIChatProvider(providerID: .claude),
         preferences: claudeAIChatPreferences
     )
+    private lazy var ollamaChatViewModel = AIChatViewModel(
+        catalog: AIConversationCatalog(
+            providerID: .ollama,
+            store: store,
+            initialConversations: environment.aiConversationFixtures
+        ),
+        provider: environment.usesLiveAIIntegration
+            ? ollamaProvider
+            : UITestAIChatProvider(providerID: .ollama),
+        preferences: ollamaAIChatPreferences
+    )
     private lazy var aiChatViewModelStore = AIChatViewModelStore(
-        viewModels: [codexChatViewModel, openAIChatViewModel, claudeChatViewModel],
+        viewModels: [
+            codexChatViewModel,
+            openAIChatViewModel,
+            claudeChatViewModel,
+            ollamaChatViewModel,
+        ],
         providerPreferences: aiProviderPreferences
     )
 

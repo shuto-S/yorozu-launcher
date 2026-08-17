@@ -429,6 +429,8 @@ private struct AIProviderSettingsDetailView: View {
             "Your API key is stored in macOS Keychain. Yorozu never writes it to its database or logs."
         case .claude:
             "Your Anthropic API key is stored in macOS Keychain. Yorozu never writes it to its database or logs."
+        case .ollama:
+            "Yorozu connects to the local Ollama service. No API key or cloud account is required."
         default:
             "Authentication is managed by \(viewModel.providerDescriptor.displayName)."
         }
@@ -442,6 +444,8 @@ private struct AIProviderSettingsDetailView: View {
             "OpenAI API usage is billed to your API Platform account. Conversation messages and uploaded files are stored by OpenAI."
         case .claude:
             "Anthropic API usage is billed to your Anthropic account. Conversation messages are sent to Anthropic for processing."
+        case .ollama:
+            "Models run on this Mac through Ollama. Yorozu does not send Ollama messages to a cloud provider."
         default:
             "Usage, data retention, and billing are managed by \(viewModel.providerDescriptor.displayName)."
         }
@@ -479,9 +483,37 @@ private struct AIProviderConnectionSettingsView: View {
                 claudeActions
                 claudeActionsVertical
             }
+        case .ollama:
+            VStack(alignment: .leading, spacing: 8) {
+                LabeledContent("Service") {
+                    Text("Local Ollama")
+                        .foregroundStyle(.secondary)
+                }
+                HStack {
+                    Text(ollamaModelSummary)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Button("Refresh Models") {
+                        viewModel.refreshAvailableModels()
+                    }
+                }
+            }
         default:
             EmptyView()
         }
+    }
+
+    private var ollamaModelSummary: String {
+        guard viewModel.hasLoadedAvailableModels else {
+            return "Model list not loaded"
+        }
+        let count = viewModel.availableModels.count
+        if count == 0 {
+            return "No installed models detected"
+        }
+        return count == 1
+            ? "1 installed model"
+            : "\(count) installed models"
     }
 
     private var codexActions: some View {

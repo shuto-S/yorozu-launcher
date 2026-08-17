@@ -91,6 +91,78 @@ final class AIChatStorageTests: XCTestCase {
         XCTAssertEqual(histories.last?.map(\.text), ["Translate this"])
     }
 
+    func testOllamaParsesLocalModelsAndNDJSONEvents() throws {
+        let data = #"{"models":[{"name":"llama3.2:latest","details":{"family":"llama"}},{"name":"qwen2.5:7b"}]}"#.data(using: .utf8)!
+        let models = try OllamaChatClient.models(fromTagsResponse: data)
+
+        XCTAssertEqual(models.map(\.rawValue), ["llama3.2:latest", "qwen2.5:7b"])
+        XCTAssertTrue(models[0].isDefault)
+        XCTAssertEqual(models[0].detail, "Local llama model")
+        let delta = try OllamaChatClient.streamEvent(
+            fromNDJSONLine: #"{"model":"llama3.2:latest","message":{"role":"assistant","content":"Hello"},"done":false}"#
+        )
+        guard let delta, case .textDelta("Hello") = delta else {
+            return XCTFail("Expected an Ollama text delta")
+        }
+        let completed = try OllamaChatClient.streamEvent(
+            fromNDJSONLine: #"{"model":"llama3.2:latest","message":{"role":"assistant","content":""},"done":true}"#
+        )
+        guard let completed, case .completed = completed else {
+            return XCTFail("Expected an Ollama completion event")
+        }
+        XCTAssertThrowsError(
+            try OllamaChatClient.streamEvent(
+                fromNDJSONLine: #"{"error":"model 'missing' not found"}"#
+            )
+        ) { error in
+            XCTAssertEqual(error as? AIChatError, .modelUnavailable)
+        }
+    }
+
+    func testOllamaProviderStreamsChatAndStatelessTranslation() async throws {
+        let service = OllamaTestService()
+        let provider = OllamaAIProvider(service: service)
+        let models = try await provider.availableModels()
+        XCTAssertEqual(models.map(\.rawValue), ["llama3.2"])
+
+        let conversationID = await provider.createConversation(
+            title: "Ollama",
+            model: .ollamaDefault
+        )
+        let request = AIChatSendRequest(
+            conversationID: conversationID,
+            model: .ollamaDefault,
+            prompt: "Hello",
+            attachments: [],
+            enablesWebSearch: false,
+            clientRequestID: "ollama-test"
+        )
+        var events: [AIChatStreamEvent] = []
+        for try await event in provider.streamResponse(request: request) {
+            events.append(event)
+        }
+        XCTAssertTrue(events.contains { event in
+            if case .textDelta("Ollama reply") = event { return true }
+            return false
+        })
+        let page = try await provider.loadConversation(
+            conversationID: conversationID,
+            limit: 10,
+            after: nil
+        )
+        XCTAssertEqual(page.messages.map(\.text), ["Hello", "Ollama reply"])
+
+        let translation = AITranslationRequest(
+            model: .ollamaDefault,
+            reasoningEffort: nil,
+            prompt: "Translate this",
+            clientRequestID: "ollama-translation"
+        )
+        for try await _ in provider.streamTranslation(request: translation) {}
+        let histories = await service.histories
+        XCTAssertEqual(histories.last?.map(\.text), ["Translate this"])
+    }
+
     @MainActor
     func testTranslationPreferencesPersistSeparatelyFromAIChatDefaults() {
         let defaults = UserDefaults(
@@ -1116,6 +1188,48 @@ final class AIChatStorageTests: XCTestCase {
 
 @MainActor
 final class AIChatViewModelTests: XCTestCase {
+    func testOllamaRefreshesDownloadedModelsBeforeModelSelection() async {
+        let downloadedModel = AIModel(
+            rawValue: "qwen2.5:7b",
+            title: "qwen2.5:7b",
+            detail: "Local qwen model"
+        )
+        let service = OllamaTestService(
+            models: [.ollamaDefault, downloadedModel]
+        )
+        let suite = "com.yorozu.ollama-model-selection-tests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite) ?? .standard
+        defer {
+            defaults.removePersistentDomain(forName: suite)
+        }
+        let viewModel = AIChatViewModel(
+            catalog: AIConversationCatalog(providerID: .ollama, store: nil),
+            provider: OllamaAIProvider(service: service),
+            preferences: AIChatPreferences(
+                defaults: defaults,
+                providerID: .ollama,
+                fallbackModel: .ollamaDefault
+            )
+        )
+
+        viewModel.beginChoosingModel()
+        await waitUntil { viewModel.availableModels.count == 2 }
+
+        XCTAssertEqual(
+            viewModel.availableModels.map(\.rawValue),
+            ["llama3.2", "qwen2.5:7b"]
+        )
+        XCTAssertTrue(
+            viewModel.actionItems.contains {
+                $0.title == "qwen2.5:7b"
+            }
+        )
+
+        viewModel.performAction(.aiModelSol)
+
+        XCTAssertEqual(viewModel.currentModel.rawValue, "qwen2.5:7b")
+    }
+
     func testCodexReasoningPreferencePersistsAndSeedsNewChats() async {
         let suite = "com.yorozu.ai-reasoning-tests.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suite) ?? .standard
@@ -2024,6 +2138,39 @@ private actor ClaudeTestService: ClaudeChatServing {
                 await self.record(history)
                 continuation.yield(.responseCreated("claude-response"))
                 continuation.yield(.textDelta("Claude reply"))
+                continuation.yield(.completed)
+                continuation.finish()
+            }
+            continuation.onTermination = { _ in task.cancel() }
+        }
+    }
+
+    private func record(_ history: [AIChatMessage]) {
+        histories.append(history)
+    }
+}
+
+private actor OllamaTestService: OllamaChatServing {
+    private(set) var histories: [[AIChatMessage]] = []
+    private let models: [AIModel]
+
+    init(models: [AIModel] = [.ollamaDefault]) {
+        self.models = models
+    }
+
+    func availableModels() -> [AIModel] {
+        models
+    }
+
+    nonisolated func streamResponse(
+        request: AIChatSendRequest,
+        history: [AIChatMessage]
+    ) -> AsyncThrowingStream<AIChatStreamEvent, Error> {
+        AsyncThrowingStream { continuation in
+            let task = Task {
+                await self.record(history)
+                continuation.yield(.responseCreated("ollama-response"))
+                continuation.yield(.textDelta("Ollama reply"))
                 continuation.yield(.completed)
                 continuation.finish()
             }

@@ -8,6 +8,7 @@ struct AIProviderID: RawRepresentable, Hashable, Codable, Sendable, Identifiable
     static let codex = AIProviderID(rawValue: "codex")
     static let openAIAPI = AIProviderID(rawValue: "openai_api")
     static let claude = AIProviderID(rawValue: "claude")
+    static let ollama = AIProviderID(rawValue: "ollama")
 }
 
 struct AIProviderCapabilities: OptionSet, Hashable, Sendable {
@@ -119,7 +120,7 @@ struct AIModel: Hashable, Codable, Identifiable, Sendable {
         self.title = title ?? Self.knownTitle(for: rawValue) ?? rawValue
         self.detail = detail ?? Self.knownDetail(for: rawValue) ?? ""
         self.isDefault = isDefault
-            ?? (Self.openAIModels + Self.claudeModels)
+            ?? (Self.openAIModels + Self.claudeModels + Self.ollamaModels)
                 .first(where: { $0.rawValue == rawValue })?.isDefault
             ?? false
         self.supportedReasoningEfforts = supportedReasoningEfforts
@@ -190,12 +191,24 @@ struct AIModel: Hashable, Codable, Identifiable, Sendable {
     )
     static let claudeModels = [claudeSonnet, claudeOpus, claudeHaiku]
 
+    /// Ollama model names are discovered from the local service. This fallback
+    /// keeps the settings and composer usable before the first model refresh.
+    static let ollamaDefault = AIModel(
+        rawValue: "llama3.2",
+        title: "Llama 3.2",
+        detail: "Local Ollama model",
+        isDefault: true
+    )
+    static let ollamaModels = [ollamaDefault]
+
     private static func knownTitle(for rawValue: String) -> String? {
-        (openAIModels + claudeModels).first(where: { $0.rawValue == rawValue })?.title
+        (openAIModels + claudeModels + ollamaModels)
+            .first(where: { $0.rawValue == rawValue })?.title
     }
 
     private static func knownDetail(for rawValue: String) -> String? {
-        (openAIModels + claudeModels).first(where: { $0.rawValue == rawValue })?.detail
+        (openAIModels + claudeModels + ollamaModels)
+            .first(where: { $0.rawValue == rawValue })?.detail
     }
 }
 
@@ -658,6 +671,8 @@ enum AIChatError: LocalizedError, Equatable {
     case authenticationRequired
     case missingAPIKey
     case missingClaudeAPIKey
+    case ollamaNotRunning
+    case ollamaNoModels
     case authenticationFailed
     case modelUnavailable
     case invalidAttachment
@@ -694,6 +709,10 @@ enum AIChatError: LocalizedError, Equatable {
             "Add your OpenAI API key in Settings."
         case .missingClaudeAPIKey:
             "Add your Anthropic API key in Settings."
+        case .ollamaNotRunning:
+            "Ollama is not running. Start Ollama and try again."
+        case .ollamaNoModels:
+            "No Ollama models are installed. Pull a model and try again."
         case .authenticationFailed:
             "The OpenAI API key could not be authenticated."
         case .modelUnavailable:

@@ -2042,3 +2042,428 @@ actor ClaudeAPIProvider: AIChatProvider, OpenAIAPIKeyManaging {
         messagesByConversation[conversationID] = messages
     }
 }
+
+// MARK: - Ollama Chat API
+
+/// Ollama is intentionally local-only in Yorozu. There is no credential store
+/// or configurable remote endpoint; the provider talks to the default local
+/// Ollama service only when the user opens this provider or sends a message.
+protocol OllamaChatServing: Sendable {
+    func availableModels() async throws -> [AIModel]
+    func streamResponse(
+        request: AIChatSendRequest,
+        history: [AIChatMessage]
+    ) -> AsyncThrowingStream<AIChatStreamEvent, Error>
+}
+
+actor OllamaChatClient: OllamaChatServing {
+    private let session: URLSession
+    private let baseURL: URL
+
+    init(session: URLSession? = nil) {
+        if let session {
+            self.session = session
+        } else {
+            let configuration = URLSessionConfiguration.ephemeral
+            configuration.urlCache = nil
+            configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
+            configuration.httpCookieStorage = nil
+            configuration.timeoutIntervalForRequest = 8
+            configuration.timeoutIntervalForResource = 120
+            self.session = URLSession(configuration: configuration)
+        }
+        baseURL = URL(string: "http://127.0.0.1:11434")!
+    }
+
+    func availableModels() async throws -> [AIModel] {
+        let data = try await requestData(path: ["api", "tags"], method: "GET")
+        return try Self.models(fromTagsResponse: data)
+    }
+
+    nonisolated func streamResponse(
+        request: AIChatSendRequest,
+        history: [AIChatMessage]
+    ) -> AsyncThrowingStream<AIChatStreamEvent, Error> {
+        AsyncThrowingStream { continuation in
+            let task = Task {
+                do {
+                    try await self.performStream(
+                        request: request,
+                        history: history,
+                        continuation: continuation
+                    )
+                    continuation.finish()
+                } catch is CancellationError {
+                    continuation.finish()
+                } catch {
+                    continuation.finish(throwing: error)
+                }
+            }
+            continuation.onTermination = { _ in task.cancel() }
+        }
+    }
+
+    private func performStream(
+        request: AIChatSendRequest,
+        history: [AIChatMessage],
+        continuation: AsyncThrowingStream<AIChatStreamEvent, Error>.Continuation
+    ) async throws {
+        guard request.attachments.isEmpty else {
+            throw AIChatError.invalidAttachment
+        }
+
+        var body: [String: Any] = [
+            "model": request.model.rawValue,
+            "messages": history.map { message in
+                [
+                    "role": message.role.rawValue,
+                    "content": message.text,
+                ]
+            },
+            "stream": true,
+        ]
+        if let reasoningEffort = request.reasoningEffort {
+            body["think"] = reasoningEffort.rawValue.lowercased() == "none"
+                ? false
+                : reasoningEffort.rawValue
+        }
+
+        var urlRequest = URLRequest(url: endpoint(["api", "chat"]))
+        urlRequest.httpMethod = "POST"
+        urlRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        urlRequest.setValue("application/x-ndjson", forHTTPHeaderField: "Accept")
+        urlRequest.setValue(request.clientRequestID, forHTTPHeaderField: "X-Client-Request-Id")
+        urlRequest.httpBody = try JSONSerialization.data(withJSONObject: body)
+
+        do {
+            let (bytes, response) = try await session.bytes(for: urlRequest)
+            guard let httpResponse = response as? HTTPURLResponse else {
+                throw AIChatError.invalidResponse
+            }
+            if !(200..<300).contains(httpResponse.statusCode) {
+                var errorData = Data()
+                for try await byte in bytes {
+                    guard errorData.count < 65_536 else { break }
+                    errorData.append(byte)
+                }
+                throw Self.apiError(statusCode: httpResponse.statusCode, data: errorData)
+            }
+
+            continuation.yield(.responseCreated(request.clientRequestID))
+            var receivedCompletion = false
+            for try await rawLine in bytes.lines {
+                try Task.checkCancellation()
+                guard let event = try Self.streamEvent(fromNDJSONLine: rawLine) else {
+                    continue
+                }
+                continuation.yield(event)
+                if case .completed = event {
+                    receivedCompletion = true
+                    break
+                }
+            }
+            guard receivedCompletion else {
+                throw AIChatError.streamTransportError(code: -1)
+            }
+        } catch let error as AIChatError {
+            throw error
+        } catch let error as URLError {
+            throw Self.transportError(error)
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            throw AIChatError.streamTransportError(code: (error as NSError).code)
+        }
+    }
+
+    nonisolated static func models(fromTagsResponse data: Data) throws -> [AIModel] {
+        guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let rawModels = object["models"] as? [[String: Any]] else {
+            throw AIChatError.invalidResponse
+        }
+
+        let names = rawModels.compactMap { model -> (String, String?)? in
+            guard let name = model["name"] as? String,
+                  !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                return nil
+            }
+            let family = (model["details"] as? [String: Any])?["family"] as? String
+            return (name, family)
+        }
+        .sorted { $0.0.localizedStandardCompare($1.0) == .orderedAscending }
+
+        return names.enumerated().map { index, value in
+            AIModel(
+                rawValue: value.0,
+                title: value.0,
+                detail: value.1.map { "Local \($0) model" } ?? "Local Ollama model",
+                isDefault: index == 0
+            )
+        }
+    }
+
+    nonisolated static func streamEvent(
+        fromNDJSONLine line: String
+    ) throws -> AIChatStreamEvent? {
+        let normalized = line.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalized.isEmpty,
+              let data = normalized.data(using: .utf8),
+              let object = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw AIChatError.streamProtocolError
+        }
+
+        if let error = object["error"] as? String {
+            let normalizedError = error.lowercased()
+            if normalizedError.contains("model") && normalizedError.contains("not found") {
+                throw AIChatError.modelUnavailable
+            }
+            throw AIChatError.apiFailure(code: "ollama")
+        }
+
+        if let message = object["message"] as? [String: Any],
+           let content = message["content"] as? String,
+           !content.isEmpty {
+            return .textDelta(content)
+        }
+        if object["done"] as? Bool == true {
+            return .completed
+        }
+        return nil
+    }
+
+    private func requestData(path: [String], method: String) async throws -> Data {
+        var request = URLRequest(url: endpoint(path))
+        request.httpMethod = method
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        do {
+            let (data, response) = try await session.data(for: request)
+            guard let httpResponse = response as? HTTPURLResponse else {
+                throw AIChatError.invalidResponse
+            }
+            guard (200..<300).contains(httpResponse.statusCode) else {
+                throw Self.apiError(statusCode: httpResponse.statusCode, data: data)
+            }
+            return data
+        } catch let error as AIChatError {
+            throw error
+        } catch let error as URLError {
+            throw Self.transportError(error)
+        } catch {
+            throw AIChatError.invalidResponse
+        }
+    }
+
+    private func endpoint(_ path: [String]) -> URL {
+        path.reduce(baseURL) { $0.appendingPathComponent($1) }
+    }
+
+    private nonisolated static func apiError(statusCode: Int, data: Data) -> AIChatError {
+        switch statusCode {
+        case 404:
+            return .modelUnavailable
+        case 408:
+            return .requestTimedOut
+        case 429:
+            return .rateLimited
+        case 500...599:
+            return .serverUnavailable
+        default:
+            return .requestFailed(statusCode: statusCode)
+        }
+    }
+
+    private nonisolated static func transportError(_ error: URLError) -> AIChatError {
+        switch error.code {
+        case .cannotConnectToHost, .cannotFindHost, .dnsLookupFailed,
+             .networkConnectionLost, .notConnectedToInternet:
+            return .ollamaNotRunning
+        case .timedOut:
+            return .requestTimedOut
+        default:
+            return .serverUnavailable
+        }
+    }
+}
+
+actor OllamaAIProvider: AIChatProvider {
+    nonisolated let descriptor = AIProviderDescriptor(
+        id: .ollama,
+        displayName: "Ollama",
+        rootCommandTitle: "AI Chat: Ollama",
+        description: "Runs local models with Ollama",
+        symbolName: "server.rack",
+        capabilities: [
+            .modelSelection, .streaming, .archive, .deletion,
+            .cancellation, .translation,
+        ]
+    )
+    nonisolated let policies = AIProviderPolicies.localConversationIndex
+
+    private let service: any OllamaChatServing
+    private var messagesByConversation: [String: [AIChatMessage]] = [:]
+
+    init(service: any OllamaChatServing) {
+        self.service = service
+    }
+
+    func availability() -> AIProviderAvailability { .available }
+
+    func authenticationState() async -> AIAuthenticationState {
+        do {
+            let models = try await service.availableModels()
+            if models.isEmpty {
+                return .authenticated(detail: "Ollama is running, but no models are installed")
+            }
+            return .authenticated(detail: "Ollama is running locally")
+        } catch let error as AIChatError {
+            return .failed(message: error.localizedDescription)
+        } catch {
+            return .failed(message: AIChatError.ollamaNotRunning.localizedDescription)
+        }
+    }
+
+    func availableModels() async throws -> [AIModel] {
+        try await service.availableModels()
+    }
+
+    func createConversation(title: String, model: AIModel) -> String {
+        let id = UUID().uuidString
+        messagesByConversation[id] = []
+        return id
+    }
+
+    func updateConversation(
+        conversationID: String,
+        title: String,
+        model: AIModel,
+        isArchived: Bool
+    ) {}
+
+    func setConversationArchived(
+        conversationID: String,
+        title: String,
+        model: AIModel,
+        isArchived: Bool
+    ) {}
+
+    func loadConversation(
+        conversationID: String,
+        limit: Int,
+        after: String?
+    ) -> AIConversationPage {
+        let messages = messagesByConversation[conversationID] ?? []
+        return AIConversationPage(
+            messages: Array(messages.suffix(max(1, limit))),
+            nextCursor: nil,
+            hasMore: false
+        )
+    }
+
+    func uploadAttachment(_ attachment: AIChatAttachment) async throws -> AIUploadedAttachment {
+        throw AIChatError.invalidAttachment
+    }
+
+    nonisolated func streamResponse(
+        request: AIChatSendRequest
+    ) -> AsyncThrowingStream<AIChatStreamEvent, Error> {
+        AsyncThrowingStream { continuation in
+            let task = Task {
+                do {
+                    let history = await self.recordUserMessage(request)
+                    for try await event in self.service.streamResponse(
+                        request: request,
+                        history: history
+                    ) {
+                        continuation.yield(event)
+                        if case let .textDelta(text) = event {
+                            await self.appendAssistantDelta(
+                                text,
+                                conversationID: request.conversationID
+                            )
+                        } else if case .completed = event {
+                            await self.finishAssistantMessage(
+                                conversationID: request.conversationID
+                            )
+                        }
+                    }
+                    continuation.finish()
+                } catch is CancellationError {
+                    continuation.finish()
+                } catch {
+                    continuation.finish(throwing: error)
+                }
+            }
+            continuation.onTermination = { _ in task.cancel() }
+        }
+    }
+
+    nonisolated func streamTranslation(
+        request: AITranslationRequest
+    ) -> AsyncThrowingStream<AIChatStreamEvent, Error> {
+        streamResponse(
+            request: AIChatSendRequest(
+                conversationID: "",
+                model: request.model,
+                reasoningEffort: request.reasoningEffort,
+                prompt: request.prompt,
+                attachments: [],
+                enablesWebSearch: false,
+                clientRequestID: request.clientRequestID
+            )
+        )
+    }
+
+    func stopGeneration(conversationID: String) async {}
+
+    func deleteConversationCompletely(conversationID: String) {
+        messagesByConversation.removeValue(forKey: conversationID)
+    }
+
+    func shutdown() async {}
+
+    private func recordUserMessage(_ request: AIChatSendRequest) -> [AIChatMessage] {
+        let message = AIChatMessage(
+            id: "user-\(request.clientRequestID)",
+            role: .user,
+            text: request.prompt,
+            citations: [],
+            attachments: [],
+            isStreaming: false
+        )
+        guard !request.conversationID.isEmpty else { return [message] }
+        var messages = messagesByConversation[request.conversationID] ?? []
+        messages.append(message)
+        messagesByConversation[request.conversationID] = messages
+        return messages
+    }
+
+    private func appendAssistantDelta(_ text: String, conversationID: String) {
+        guard !conversationID.isEmpty else { return }
+        var messages = messagesByConversation[conversationID] ?? []
+        if let index = messages.lastIndex(where: { $0.role == .assistant && $0.isStreaming }) {
+            messages[index].text += text
+        } else {
+            messages.append(
+                AIChatMessage(
+                    id: "assistant-\(UUID().uuidString)",
+                    role: .assistant,
+                    text: text,
+                    citations: [],
+                    attachments: [],
+                    isStreaming: true
+                )
+            )
+        }
+        messagesByConversation[conversationID] = messages
+    }
+
+    private func finishAssistantMessage(conversationID: String) {
+        guard !conversationID.isEmpty,
+              var messages = messagesByConversation[conversationID],
+              let index = messages.lastIndex(where: { $0.role == .assistant }) else {
+            return
+        }
+        messages[index].isStreaming = false
+        messagesByConversation[conversationID] = messages
+    }
+}

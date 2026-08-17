@@ -46,7 +46,7 @@ final class AIChatViewModel {
     private(set) var nextCursor: String?
     private(set) var storageMessage: String?
     private(set) var availableModels: [AIModel]
-    private var hasLoadedAvailableModels = false
+    private(set) var hasLoadedAvailableModels = false
     private(set) var hasAPIKey = false
     private(set) var credentialStatus: AICredentialStatus = .checking
     private(set) var credentialStatusMessage: String?
@@ -66,6 +66,18 @@ final class AIChatViewModel {
                 return "ChatGPT sign-in required"
             case .unavailable:
                 return "Codex status unavailable"
+            }
+        }
+        if providerID == .ollama {
+            switch credentialStatus {
+            case .checking:
+                return "Checking Ollama…"
+            case .saved:
+                return "Ollama is running"
+            case .notSaved:
+                return "Ollama is not running"
+            case .unavailable:
+                return "Ollama status unavailable"
             }
         }
         switch credentialStatus {
@@ -91,6 +103,18 @@ final class AIChatViewModel {
                 return "Sign in with ChatGPT to use your Codex plan."
             case .unavailable:
                 return "Install or select Codex, then refresh the status."
+            }
+        }
+        if providerID == .ollama {
+            switch credentialStatus {
+            case .checking:
+                return "Checking the local Ollama service."
+            case .saved:
+                return "Models run locally. No API key is required."
+            case .notSaved:
+                return "Start Ollama to use local models."
+            case .unavailable:
+                return "Start Ollama and refresh the status."
             }
         }
         switch credentialStatus {
@@ -129,6 +153,7 @@ final class AIChatViewModel {
     private var hasLoadedCatalog = false
     private var loadTask: Task<Void, Never>?
     private var streamTask: Task<Void, Never>?
+    private var modelRefreshTask: Task<Void, Never>?
     private var authenticationTask: Task<Void, Never>?
     private var credentialStatusTask: Task<Void, Never>?
     private var listSearchTask: Task<Void, Never>?
@@ -467,6 +492,8 @@ final class AIChatViewModel {
     func shutdown() {
         loadTask?.cancel()
         loadTask = nil
+        modelRefreshTask?.cancel()
+        modelRefreshTask = nil
         conversationLoadRevision &+= 1
         streamTask?.cancel()
         streamTask = nil
@@ -727,6 +754,9 @@ final class AIChatViewModel {
             var didStartGenerationRequest = false
             do {
                 guard availableModels.contains(requestModel) else {
+                    if providerID == .ollama && availableModels.isEmpty {
+                        throw AIChatError.ollamaNoModels
+                    }
                     throw AIChatError.modelUnavailable
                 }
                 let conversationID = try await ensureConversation(
@@ -890,6 +920,9 @@ final class AIChatViewModel {
     func beginChoosingModel() {
         isChoosingModel = true
         isChoosingReasoningEffort = false
+        if providerID == .ollama {
+            refreshAvailableModels()
+        }
     }
 
     func beginChoosingReasoningEffort() {
@@ -1228,6 +1261,27 @@ final class AIChatViewModel {
             applyAvailableModels(try await coordinator.availableModels())
         } catch {
             // Connection status already owns the user-facing error state in Settings.
+        }
+    }
+
+    /// Refreshes provider-owned model metadata without touching the conversation list.
+    /// Ollama models can be installed while Yorozu is running, so model selection must
+    /// fetch the current local list instead of relying on the startup fallback model.
+    func refreshAvailableModels() {
+        modelRefreshTask?.cancel()
+        modelRefreshTask = Task { [weak self] in
+            guard let self else { return }
+            do {
+                let models = try await coordinator.availableModels()
+                guard !Task.isCancelled else { return }
+                applyAvailableModels(models)
+            } catch {
+                guard !Task.isCancelled else { return }
+                if providerID == .ollama {
+                    statusMessage = userMessage(for: error)
+                }
+            }
+            modelRefreshTask = nil
         }
     }
 

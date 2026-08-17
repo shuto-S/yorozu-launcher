@@ -81,6 +81,7 @@ The current target is:
 - Codex enabled by default through the installed `codex app-server` and Sign in with ChatGPT
 - optional OpenAI API provider that can be enabled alongside Codex
 - optional Claude Messages API provider that can be enabled alongside Codex and OpenAI API
+- optional Ollama provider that can be enabled for models installed in the local Ollama service
 - local title-only search and last-message ordering without network requests
 - OpenAI Responses API streaming backed by Conversations API state
 - API-key storage in macOS Keychain
@@ -192,6 +193,8 @@ Privacy and reliability requirements:
 - Codex requires an installed compatible `codex` executable and an authenticated ChatGPT account.
 - OpenAI API Chat requires a user-provided API key and API Platform billing.
 - Claude Chat requires a user-provided Anthropic API key and Anthropic API billing.
+- Ollama Chat requires Ollama to be running locally and at least one locally installed model;
+  it does not require an API key or cloud account.
 - Translation requires an enabled provider with translation capability and the provider's
   configured credentials or local authentication.
 - Local provider conversation indexes cannot be reconstructed by enumerating all remote conversations.

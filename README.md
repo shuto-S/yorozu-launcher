@@ -17,6 +17,7 @@ Yorozu is a lightweight, keyboard-first launcher for macOS. It brings applicatio
 - Codex chat through the installed `codex app-server` and the user's ChatGPT plan
 - OpenAI Responses API chat with streaming, Web Search, file inputs, and local title indexing
 - Claude Messages API chat with streaming and local title indexing (enable it and add an Anthropic API key in Settings)
+- Ollama chat with locally installed models discovered from the local Ollama service (enable it in Settings; no API key is required)
 - Configurable global shortcuts
 - Keyboard-first navigation with mouse support
 - Japanese IME-safe command handling
@@ -113,15 +114,18 @@ Clipboard history and snippets are stored locally. Yorozu does not send clipboar
 AI Chat and Translation are explicit. Codex is enabled by default and delegates ChatGPT
 authentication and conversation content to the installed `codex app-server`; Yorozu never
 reads or stores Codex tokens. The optional OpenAI API and Claude providers keep the user's
-API keys in macOS Keychain and use their respective API billing. Network requests are
-created only after the relevant feature is opened and used.
+API keys in macOS Keychain and use their respective API billing. The optional Ollama
+provider connects only to the default local Ollama service, discovers installed models on
+the Mac, and does not require or store a credential. Network requests are created only
+after the relevant feature is opened and used.
 
 Yorozu stores only provider IDs, chat titles, model IDs, and list metadata in SQLite. AI
 message bodies are sent only to the provider after an explicit user action and are not
 written to the repository. Credentials, clipboard content, and snippet content are not
 committed or attached automatically. Yorozu does not synchronize with ChatGPT history.
-Translation can read selected text only when the user invokes it and macOS Accessibility
-permits that operation.
+Ollama conversations are sent to the local Ollama installation and are not sent to a cloud
+AI provider by Yorozu. Translation can read selected text only when the user invokes it
+and macOS Accessibility permits that operation.
 
 Clipboard history is local, disabled by default, and configurable by source application,
 retention, and item limit. URL previews are opt-in and use bounded HTTP(S)-only fetching
