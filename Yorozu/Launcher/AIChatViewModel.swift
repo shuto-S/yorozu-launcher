@@ -1828,6 +1828,7 @@ final class TranslationViewModel {
     private(set) var selectedModel: AIModel
     private(set) var selectedReasoningEffort: AIReasoningEffort?
     private(set) var availableModels: [AIModel]
+    private(set) var providerViewModels: [AIChatViewModel]
     private(set) var isTranslating = false
     private(set) var isLoadingModels = false
     var errorMessage: String?
@@ -1843,6 +1844,7 @@ final class TranslationViewModel {
     ) {
         self.providerStore = providerStore
         self.preferences = preferences
+        providerViewModels = Self.enabledProviders(from: providerStore)
         let initial = Self.initialProvider(
             from: providerStore,
             preferences: preferences
@@ -1855,18 +1857,11 @@ final class TranslationViewModel {
         selectedReasoningEffort = initial.flatMap {
             preferences.reasoningEffort(for: $0.providerID)
         } ?? initial?.preferences.defaultReasoningEffort
-        availableModels = initial?.availableModels ?? [initialModel]
+        availableModels = initial?.availableModels ?? []
         let preferredTargetLanguage = preferences.targetLanguage
         targetLanguage = preferredTargetLanguage.flatMap {
             Self.supportedTargetLanguages.contains($0) ? $0 : nil
         } ?? Self.supportedTargetLanguages[0]
-    }
-
-    var providerViewModels: [AIChatViewModel] {
-        providerStore.orderedViewModels.filter {
-            providerStore.providerPreferences.isEnabled($0.providerID)
-                && $0.providerDescriptor.capabilities.contains(.translation)
-        }
     }
 
     var hasTranslationProvider: Bool {
@@ -2024,6 +2019,33 @@ final class TranslationViewModel {
         loadModelsIfNeeded()
     }
 
+    /// Keeps the translation picker aligned with the AI provider switches in Settings.
+    /// Provider preferences are shared with LauncherViewModel, so this is called after
+    /// a toggle without requiring a second provider registry or a database read.
+    func refreshProviderAvailability() {
+        let enabledProviders = Self.enabledProviders(from: providerStore)
+        providerViewModels = enabledProviders
+
+        guard let selectedProviderID,
+              enabledProviders.contains(where: { $0.providerID == selectedProviderID }) else {
+            if isTranslating {
+                stop()
+            }
+            guard let fallback = Self.initialProvider(
+                from: providerStore,
+                preferences: preferences
+            ) ?? enabledProviders.first else {
+                self.selectedProviderID = nil
+                preferences.providerID = nil
+                availableModels = []
+                selectedReasoningEffort = nil
+                return
+            }
+            selectProvider(fallback.providerID)
+            return
+        }
+    }
+
     func selectModel(_ model: AIModel) {
         selectedModel = model
         selectedReasoningEffort = preferredReasoningEffort(for: model)
@@ -2096,7 +2118,16 @@ final class TranslationViewModel {
                 && $0.providerDescriptor.capabilities.contains(.translation)
         }) ?? store.defaultViewModel().flatMap {
             store.providerPreferences.isEnabled($0.providerID)
-                && $0.providerDescriptor.capabilities.contains(.translation) ? $0 : nil
+            && $0.providerDescriptor.capabilities.contains(.translation) ? $0 : nil
+        }
+    }
+
+    private static func enabledProviders(
+        from store: AIChatViewModelStore
+    ) -> [AIChatViewModel] {
+        store.orderedViewModels.filter {
+            store.providerPreferences.isEnabled($0.providerID)
+                && $0.providerDescriptor.capabilities.contains(.translation)
         }
     }
 

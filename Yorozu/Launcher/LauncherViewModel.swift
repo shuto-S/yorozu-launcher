@@ -2001,6 +2001,7 @@ final class LauncherViewModel {
     }
 
     private func handleAIProviderPreferencesChange() {
+        translationViewModel.refreshProviderAvailability()
         rebuildRootDefaultResults()
         if let providerID = route.aiProviderID,
            !aiProviderPreferences.isEnabled(providerID) {

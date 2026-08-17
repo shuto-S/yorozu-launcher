@@ -215,6 +215,44 @@ final class AIChatStorageTests: XCTestCase {
         XCTAssertFalse(viewModel.providerViewModels.map(\.providerID).contains(.codex))
     }
 
+    @MainActor
+    func testTranslationProviderPickerTracksAISettingsToggles() {
+        let defaults = UserDefaults(
+            suiteName: "com.yorozu.translation-provider-toggle-tests.\(UUID().uuidString)"
+        )!
+        let providerPreferences = AIProviderPreferences(defaults: defaults)
+        let store = AIChatViewModelStore(
+            viewModels: [
+                makeProviderViewModel(providerID: .codex, defaults: defaults),
+                makeProviderViewModel(providerID: .openAIAPI, defaults: defaults),
+            ],
+            providerPreferences: providerPreferences
+        )
+        let viewModel = TranslationViewModel(
+            providerStore: store,
+            preferences: TranslationPreferences(defaults: defaults)
+        )
+
+        XCTAssertEqual(viewModel.providerViewModels.map(\.providerID), [.codex])
+
+        providerPreferences.setEnabled(true, for: .openAIAPI)
+        viewModel.refreshProviderAvailability()
+        XCTAssertEqual(
+            viewModel.providerViewModels.map(\.providerID),
+            [.codex, .openAIAPI]
+        )
+
+        providerPreferences.setEnabled(false, for: .codex)
+        viewModel.refreshProviderAvailability()
+        XCTAssertEqual(viewModel.selectedProviderID, .openAIAPI)
+        XCTAssertEqual(viewModel.providerViewModels.map(\.providerID), [.openAIAPI])
+
+        providerPreferences.setEnabled(false, for: .openAIAPI)
+        viewModel.refreshProviderAvailability()
+        XCTAssertTrue(viewModel.providerViewModels.isEmpty)
+        XCTAssertNil(viewModel.selectedProviderID)
+    }
+
     func testProviderRegistryKeepsMultipleProvidersAndRejectsUnknownID() async throws {
         let registry = AIProviderRegistry(providers: [
             RegistryTestProvider(providerID: .codex),
