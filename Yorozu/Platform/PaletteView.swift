@@ -17,7 +17,8 @@ struct PaletteView: View {
                     TranslationView(
                         viewModel: viewModel.translationViewModel,
                         onBack: viewModel.returnToRoot,
-                        onOpenSettings: viewModel.openSettingsFromTranslation
+                        onOpenSettings: viewModel.openSettingsFromTranslation,
+                        onShowActions: viewModel.showActionMenu
                     )
                 } else {
                     VStack(spacing: 0) {
@@ -297,6 +298,7 @@ private struct TranslationView: View {
     @Bindable var viewModel: TranslationViewModel
     let onBack: () -> Void
     let onOpenSettings: () -> Void
+    let onShowActions: () -> Void
     @FocusState private var inputFocused: Bool
 
     var body: some View {
@@ -316,20 +318,13 @@ private struct TranslationView: View {
 
                 Spacer()
 
-                Text("Translate to")
-                    .foregroundStyle(.secondary)
-
-                Picker("Target language", selection: Binding(
-                    get: { viewModel.targetLanguage },
-                    set: { viewModel.selectTargetLanguage($0) }
-                )) {
-                    ForEach(TranslationViewModel.supportedTargetLanguages, id: \.self) {
-                        Text($0).tag($0)
-                    }
+                Button(action: onShowActions) {
+                    Image(systemName: "ellipsis")
+                        .frame(width: 36, height: 36)
+                        .contentShape(Rectangle())
                 }
-                .pickerStyle(.menu)
-                .accessibilityLabel("Target language")
-                .accessibilityValue(viewModel.targetLanguage)
+                .buttonStyle(.plain)
+                .accessibilityLabel("Translation Actions")
             }
             .padding(.horizontal, 14)
             .frame(minHeight: 58)
@@ -421,51 +416,58 @@ private struct TranslationView: View {
             Divider()
                 .padding(.horizontal, 14)
 
-            HStack(spacing: 10) {
-                Picker("Provider", selection: Binding(
-                    get: { viewModel.selectedProviderID },
-                    set: { if let value = $0 { viewModel.selectProvider(value) } }
-                )) {
-                    ForEach(viewModel.providerViewModels, id: \.providerID) { provider in
-                        Text(provider.providerDescriptor.displayName)
-                            .tag(Optional(provider.providerID))
-                    }
-                }
-                .pickerStyle(.menu)
-                .labelsHidden()
-                .disabled(viewModel.providerViewModels.isEmpty || viewModel.isTranslating)
-                .accessibilityLabel("Translation provider")
-
-                Picker("Model", selection: Binding(
-                    get: { viewModel.selectedModel },
-                    set: { viewModel.selectModel($0) }
-                )) {
-                    ForEach(viewModel.availableModels) { model in
-                        Text(model.title).tag(model)
-                    }
-                }
-                .pickerStyle(.menu)
-                .labelsHidden()
-                .disabled(viewModel.availableModels.isEmpty || viewModel.isTranslating)
-                .accessibilityLabel("Translation model")
-
-                if !viewModel.availableReasoningEfforts.isEmpty {
-                    Picker("Reasoning", selection: Binding(
-                        get: { viewModel.selectedReasoningEffort },
-                        set: { viewModel.selectReasoningEffort($0) }
-                    )) {
-                        Text("Default").tag(AIReasoningEffort?.none)
-                        ForEach(viewModel.availableReasoningEfforts) { effort in
-                            Text(effort.title).tag(Optional(effort))
-                        }
-                    }
-                    .pickerStyle(.menu)
-                    .labelsHidden()
-                    .disabled(viewModel.isTranslating)
-                    .accessibilityLabel("Reasoning level")
-                }
-
+            HStack(spacing: 6) {
                 Spacer()
+
+                compactSelectionButton(
+                    title: viewModel.targetLanguage,
+                    symbolName: "globe",
+                    accessibilityLabel: "Change translation language, \(viewModel.targetLanguage)",
+                    action: {
+                        viewModel.beginChoosingTargetLanguage()
+                        onShowActions()
+                    }
+                )
+                .disabled(viewModel.isTranslating)
+
+                if viewModel.providerViewModels.count > 1 {
+                    compactSelectionButton(
+                        title: viewModel.selectedProvider?.providerDescriptor.displayName
+                            ?? "Provider",
+                        symbolName: "person.2",
+                        accessibilityLabel: "Change translation provider, \(viewModel.selectedProvider?.providerDescriptor.displayName ?? "Provider")",
+                        action: {
+                            viewModel.beginChoosingProvider()
+                            onShowActions()
+                        }
+                    )
+                    .disabled(viewModel.isTranslating)
+                }
+
+                compactSelectionButton(
+                    title: viewModel.selectedModel.title,
+                    accessibilityLabel: "Change translation model, \(viewModel.selectedModel.title)",
+                    action: {
+                        viewModel.beginChoosingModel()
+                        onShowActions()
+                    }
+                )
+                .disabled(viewModel.availableModels.isEmpty || viewModel.isTranslating)
+
+                if let effort = viewModel.selectedReasoningEffort,
+                   !viewModel.availableReasoningEfforts.isEmpty {
+                    compactSelectionButton(
+                        title: effort.title,
+                        symbolName: "brain",
+                        showsChevron: false,
+                        accessibilityLabel: "Change translation reasoning, \(effort.title)",
+                        action: {
+                            viewModel.beginChoosingReasoningEffort()
+                            onShowActions()
+                        }
+                    )
+                    .disabled(viewModel.isTranslating)
+                }
 
                 if viewModel.isLoadingModels {
                     ProgressView()
@@ -493,6 +495,38 @@ private struct TranslationView: View {
             viewModel.loadModelsIfNeeded()
         }
         .accessibilityIdentifier("launcher.translation")
+    }
+
+    private func compactSelectionButton(
+        title: String,
+        symbolName: String? = nil,
+        showsChevron: Bool = true,
+        accessibilityLabel: String,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            HStack(spacing: 4) {
+                if let symbolName {
+                    Image(systemName: symbolName)
+                        .imageScale(.small)
+                }
+                Text(title)
+                    .lineLimit(1)
+                if showsChevron {
+                    Image(systemName: "chevron.down")
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(.tertiary)
+                }
+            }
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, 6)
+            .frame(height: 30)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(accessibilityLabel)
+        .help(accessibilityLabel)
     }
 
     private func openAccessibilitySettings() {

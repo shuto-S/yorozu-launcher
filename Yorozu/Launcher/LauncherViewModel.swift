@@ -20,6 +20,24 @@ enum LauncherActionID: String, CaseIterable, Identifiable {
     case aiOpenChat
     case aiOpenInCodex
     case aiNewChat
+    case translationChangeLanguage
+    case translationLanguage1
+    case translationLanguage2
+    case translationLanguage3
+    case translationLanguage4
+    case translationLanguage5
+    case translationLanguage6
+    case translationLanguage7
+    case translationLanguage8
+    case translationLanguage9
+    case translationLanguage10
+    case translationLanguage11
+    case translationLanguage12
+    case translationChangeProvider
+    case translationProvider1
+    case translationProvider2
+    case translationProvider3
+    case translationProvider4
     case aiChangeModel
     case aiChangeReasoning
     case aiModelTerra
@@ -448,6 +466,9 @@ final class LauncherViewModel {
     }
 
     var actionPanelTitle: String {
+        if route == .translation {
+            return translationViewModel.actionPanelTitle
+        }
         if route.isAI {
             return aiChatViewModel.actionPanelTitle
         }
@@ -614,6 +635,9 @@ final class LauncherViewModel {
     }
 
     var actionItems: [LauncherActionItem] {
+        if route == .translation {
+            return translationViewModel.actionItems
+        }
         if route.isAI {
             return aiChatViewModel.actionItems
         }
@@ -1376,7 +1400,15 @@ final class LauncherViewModel {
     }
 
     func showActionMenu() {
-        guard (route.isAI ? !aiChatViewModel.actionItems.isEmpty : selectedResult != nil),
+        let hasActions: Bool
+        if route.isAI {
+            hasActions = !aiChatViewModel.actionItems.isEmpty
+        } else if route == .translation {
+            hasActions = !translationViewModel.actionItems.isEmpty
+        } else {
+            hasActions = selectedResult != nil
+        }
+        guard hasActions,
               paletteModal == nil,
               route != .aliases || aliasEditorMode == nil else {
             return
@@ -1399,6 +1431,8 @@ final class LauncherViewModel {
         selectedActionID = nil
         if route.isAI {
             aiChatViewModel.cancelActionNavigation()
+        } else if route == .translation {
+            translationViewModel.cancelActionNavigation()
         }
         if restoreSearchFocus {
             focusRequest += 1
@@ -1426,6 +1460,16 @@ final class LauncherViewModel {
     }
 
     func performAction(_ action: LauncherActionID) {
+        if route == .translation {
+            let keepsActionPanel = translationViewModel.performAction(action)
+            if keepsActionPanel {
+                actionQuery = ""
+                selectedActionID = filteredActionItems.first?.id
+            } else {
+                dismissActionPanel()
+            }
+            return
+        }
         if action.rawValue.hasPrefix("ai") {
             if action == .aiDelete {
                 requestAIConversationDeletion()
@@ -1472,7 +1516,17 @@ final class LauncherViewModel {
         case .delete:
             dismissActionPanel()
             requestDeleteSelected()
-        case .aiOpenChat, .aiOpenInCodex, .aiNewChat, .aiChangeModel,
+        case .aiOpenChat, .aiOpenInCodex, .aiNewChat,
+             .translationChangeLanguage,
+             .translationLanguage1, .translationLanguage2,
+             .translationLanguage3, .translationLanguage4,
+             .translationLanguage5, .translationLanguage6,
+             .translationLanguage7, .translationLanguage8,
+             .translationLanguage9, .translationLanguage10,
+             .translationLanguage11, .translationLanguage12,
+             .translationChangeProvider, .translationProvider1,
+             .translationProvider2, .translationProvider3,
+             .translationProvider4, .aiChangeModel,
              .aiChangeReasoning, .aiModelTerra,
              .aiModelSol, .aiModelLuna, .aiModel4, .aiModel5, .aiModel6,
              .aiModel7, .aiModel8, .aiModel9, .aiModel10,

@@ -253,6 +253,56 @@ final class AIChatStorageTests: XCTestCase {
         XCTAssertNil(viewModel.selectedProviderID)
     }
 
+    @MainActor
+    func testTranslationActionPanelUsesAIChatSelectionFlow() async {
+        let suite = "com.yorozu.translation-action-panel-tests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+
+        let providerPreferences = AIProviderPreferences(defaults: defaults)
+        providerPreferences.setEnabled(true, for: .openAIAPI)
+        let store = AIChatViewModelStore(
+            viewModels: [
+                makeProviderViewModel(providerID: .codex, defaults: defaults),
+                makeProviderViewModel(providerID: .openAIAPI, defaults: defaults),
+            ],
+            providerPreferences: providerPreferences
+        )
+        let viewModel = TranslationViewModel(
+            providerStore: store,
+            preferences: TranslationPreferences(defaults: defaults)
+        )
+
+        XCTAssertTrue(viewModel.actionItems.contains { $0.id == .translationChangeLanguage })
+        XCTAssertTrue(viewModel.actionItems.contains { $0.id == .translationChangeProvider })
+        XCTAssertTrue(viewModel.actionItems.contains { $0.id == .aiChangeModel })
+
+        XCTAssertTrue(viewModel.performAction(.translationChangeLanguage))
+        XCTAssertEqual(viewModel.actionPanelTitle, "Change Language")
+        XCTAssertEqual(
+            viewModel.actionItems.count,
+            TranslationViewModel.supportedTargetLanguages.count
+        )
+        XCTAssertFalse(viewModel.performAction(.translationLanguage2))
+        XCTAssertEqual(viewModel.targetLanguage, "English")
+        XCTAssertFalse(viewModel.isChoosingTargetLanguage)
+
+        XCTAssertTrue(viewModel.performAction(.translationChangeProvider))
+        XCTAssertEqual(viewModel.actionPanelTitle, "Change Provider")
+        XCTAssertEqual(viewModel.actionItems.count, 2)
+        XCTAssertTrue(viewModel.actionItems.contains { $0.title.contains("openai_api") })
+
+        XCTAssertFalse(viewModel.performAction(.translationProvider2))
+        XCTAssertEqual(viewModel.selectedProviderID, .openAIAPI)
+        XCTAssertFalse(viewModel.isChoosingProvider)
+
+        viewModel.beginChoosingModel()
+        XCTAssertEqual(viewModel.actionPanelTitle, "Change Model")
+        XCTAssertTrue(viewModel.actionItems.contains { $0.id == .aiModelTerra })
+        XCTAssertFalse(viewModel.performAction(.aiModelTerra))
+        XCTAssertFalse(viewModel.isChoosingModel)
+    }
+
     func testProviderRegistryKeepsMultipleProvidersAndRejectsUnknownID() async throws {
         let registry = AIProviderRegistry(providers: [
             RegistryTestProvider(providerID: .codex),

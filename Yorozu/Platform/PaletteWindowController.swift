@@ -97,7 +97,7 @@ enum PaletteKeyEventPolicy {
             return keyCode == 53 ? .escape : .passThrough
         }
 
-        if route == .translation {
+        if route == .translation, !isActionPanelPresented {
             return keyCode == 53 ? .escape : .passThrough
         }
 

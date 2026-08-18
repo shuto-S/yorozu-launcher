@@ -1808,6 +1808,30 @@ final class TranslationPreferences {
 @MainActor
 @Observable
 final class TranslationViewModel {
+    private static let languageActionIDs: [LauncherActionID] = [
+        .translationLanguage1, .translationLanguage2,
+        .translationLanguage3, .translationLanguage4,
+        .translationLanguage5, .translationLanguage6,
+        .translationLanguage7, .translationLanguage8,
+        .translationLanguage9, .translationLanguage10,
+        .translationLanguage11, .translationLanguage12,
+    ]
+    private static let providerActionIDs: [LauncherActionID] = [
+        .translationProvider1,
+        .translationProvider2,
+        .translationProvider3,
+        .translationProvider4,
+    ]
+    private static let modelActionIDs: [LauncherActionID] = [
+        .aiModelTerra, .aiModelSol, .aiModelLuna, .aiModel4, .aiModel5,
+        .aiModel6, .aiModel7, .aiModel8, .aiModel9, .aiModel10,
+    ]
+    private static let reasoningActionIDs: [LauncherActionID] = [
+        .aiReasoning1, .aiReasoning2, .aiReasoning3, .aiReasoning4,
+        .aiReasoning5, .aiReasoning6, .aiReasoning7, .aiReasoning8,
+        .aiReasoning9, .aiReasoning10,
+    ]
+
     static let supportedTargetLanguages = [
         "Japanese", "English", "Chinese (Simplified)", "Korean",
         "Spanish", "French", "German", "Italian", "Portuguese (Brazil)",
@@ -1831,12 +1855,18 @@ final class TranslationViewModel {
     private(set) var providerViewModels: [AIChatViewModel]
     private(set) var isTranslating = false
     private(set) var isLoadingModels = false
+    private(set) var isChoosingTargetLanguage = false
+    private(set) var isChoosingProvider = false
+    private(set) var isChoosingModel = false
+    private(set) var isChoosingReasoningEffort = false
     var errorMessage: String?
     var selectionPermissionMessage: String?
     private(set) var focusRequest = 0
 
     private var translationTask: Task<Void, Never>?
     private var prepareTask: Task<Void, Never>?
+    private var modelLoadTask: Task<Void, Never>?
+    private var modelLoadRevision = 0
 
     init(
         providerStore: AIChatViewModelStore,
@@ -1905,6 +1935,118 @@ final class TranslationViewModel {
     }
 
     var outputTextIsPresent: Bool { !outputText.isEmpty }
+
+    var actionPanelTitle: String {
+        if isChoosingTargetLanguage {
+            return "Change Language"
+        }
+        if isChoosingProvider {
+            return "Change Provider"
+        }
+        if isChoosingModel {
+            return "Change Model"
+        }
+        if isChoosingReasoningEffort {
+            return "Change Reasoning"
+        }
+        return "Translation"
+    }
+
+    var actionItems: [LauncherActionItem] {
+        if isChoosingTargetLanguage {
+            return Self.supportedTargetLanguages
+                .prefix(Self.languageActionIDs.count)
+                .enumerated()
+                .map { index, language in
+                    LauncherActionItem(
+                        id: Self.languageActionIDs[index],
+                        title: language == targetLanguage ? "\(language) ✓" : language,
+                        symbolName: "globe",
+                        shortcutGlyphs: []
+                    )
+                }
+        }
+        if isChoosingProvider {
+            return providerViewModels.prefix(Self.providerActionIDs.count).enumerated().map {
+                index,
+                provider in
+                LauncherActionItem(
+                    id: Self.providerActionIDs[index],
+                    title: provider.providerID == selectedProviderID
+                        ? "\(provider.providerDescriptor.displayName) ✓"
+                        : provider.providerDescriptor.displayName,
+                    symbolName: provider.providerDescriptor.symbolName,
+                    shortcutGlyphs: []
+                )
+            }
+        }
+        if isChoosingModel {
+            return availableModels.prefix(Self.modelActionIDs.count).enumerated().map {
+                index,
+                model in
+                LauncherActionItem(
+                    id: Self.modelActionIDs[index],
+                    title: model == selectedModel ? "\(model.title) ✓" : model.title,
+                    symbolName: model.symbolName,
+                    shortcutGlyphs: []
+                )
+            }
+        }
+        if isChoosingReasoningEffort {
+            return availableReasoningEfforts.prefix(Self.reasoningActionIDs.count).enumerated().map {
+                index,
+                effort in
+                LauncherActionItem(
+                    id: Self.reasoningActionIDs[index],
+                    title: effort == selectedReasoningEffort
+                        ? "\(effort.title) ✓"
+                        : effort.title,
+                    symbolName: "brain",
+                    shortcutGlyphs: []
+                )
+            }
+        }
+
+        var items: [LauncherActionItem] = [
+            LauncherActionItem(
+                id: .translationChangeLanguage,
+                title: "Change Language…",
+                symbolName: "globe",
+                shortcutGlyphs: []
+            ),
+        ]
+        if providerViewModels.count > 1 {
+            items.append(
+                LauncherActionItem(
+                    id: .translationChangeProvider,
+                    title: "Change Provider…",
+                    symbolName: "person.2",
+                    shortcutGlyphs: []
+                )
+            )
+        }
+        if !availableModels.isEmpty {
+            items.append(
+                LauncherActionItem(
+                    id: .aiChangeModel,
+                    title: "Change Model…",
+                    symbolName: "cpu",
+                    shortcutGlyphs: []
+                )
+            )
+        }
+        if !availableReasoningEfforts.isEmpty {
+            items.append(
+                LauncherActionItem(
+                    id: .aiChangeReasoning,
+                    title: "Change Reasoning…",
+                    symbolName: "brain",
+                    shortcutGlyphs: []
+                )
+            )
+        }
+        return items
+    }
 
     func clearOutput() {
         outputText = ""
@@ -2004,10 +2146,105 @@ final class TranslationViewModel {
         isTranslating = false
     }
 
+    func beginChoosingTargetLanguage() {
+        isChoosingTargetLanguage = true
+        isChoosingProvider = false
+        isChoosingModel = false
+        isChoosingReasoningEffort = false
+    }
+
+    func beginChoosingProvider() {
+        guard providerViewModels.count > 1 else { return }
+        isChoosingTargetLanguage = false
+        isChoosingProvider = true
+        isChoosingModel = false
+        isChoosingReasoningEffort = false
+    }
+
+    func beginChoosingModel() {
+        guard selectedProvider != nil else { return }
+        isChoosingTargetLanguage = false
+        isChoosingProvider = false
+        isChoosingModel = true
+        isChoosingReasoningEffort = false
+        refreshModelsForSelection()
+    }
+
+    func beginChoosingReasoningEffort() {
+        guard !availableReasoningEfforts.isEmpty else { return }
+        isChoosingTargetLanguage = false
+        isChoosingProvider = false
+        isChoosingModel = false
+        isChoosingReasoningEffort = true
+    }
+
+    func cancelActionNavigation() {
+        isChoosingTargetLanguage = false
+        isChoosingProvider = false
+        isChoosingModel = false
+        isChoosingReasoningEffort = false
+    }
+
+    /// Performs a translation-specific Action Panel action. Returning true keeps
+    /// the panel open for a second-level picker; selecting a value returns false
+    /// so the shared panel closes and the compact footer reflects the new value.
+    @discardableResult
+    func performAction(_ action: LauncherActionID) -> Bool {
+        if isChoosingTargetLanguage,
+           let index = Self.languageActionIDs.firstIndex(of: action),
+           Self.supportedTargetLanguages.indices.contains(index) {
+            selectTargetLanguage(Self.supportedTargetLanguages[index])
+            cancelActionNavigation()
+            return false
+        }
+        if isChoosingProvider,
+           let index = Self.providerActionIDs.firstIndex(of: action),
+           providerViewModels.indices.contains(index) {
+            selectProvider(providerViewModels[index].providerID)
+            cancelActionNavigation()
+            return false
+        }
+        if isChoosingModel,
+           let index = Self.modelActionIDs.firstIndex(of: action),
+           availableModels.indices.contains(index) {
+            selectModel(availableModels[index])
+            cancelActionNavigation()
+            return false
+        }
+        if isChoosingReasoningEffort,
+           let index = Self.reasoningActionIDs.firstIndex(of: action),
+           availableReasoningEfforts.indices.contains(index) {
+            selectReasoningEffort(availableReasoningEfforts[index])
+            cancelActionNavigation()
+            return false
+        }
+
+        switch action {
+        case .translationChangeLanguage:
+            beginChoosingTargetLanguage()
+            return true
+        case .translationChangeProvider:
+            beginChoosingProvider()
+            return isChoosingProvider
+        case .aiChangeModel:
+            beginChoosingModel()
+            return isChoosingModel
+        case .aiChangeReasoning:
+            beginChoosingReasoningEffort()
+            return isChoosingReasoningEffort
+        default:
+            return false
+        }
+    }
+
     func selectProvider(_ providerID: AIProviderID) {
         guard providerStore.providerPreferences.isEnabled(providerID),
               let provider = providerStore.viewModel(for: providerID),
               provider.providerDescriptor.capabilities.contains(.translation) else { return }
+        modelLoadTask?.cancel()
+        modelLoadTask = nil
+        modelLoadRevision += 1
+        isLoadingModels = false
         selectedProviderID = providerID
         preferences.providerID = providerID
         selectedModel = preferences.model(for: providerID)
@@ -2039,6 +2276,10 @@ final class TranslationViewModel {
                 preferences.providerID = nil
                 availableModels = []
                 selectedReasoningEffort = nil
+                modelLoadTask?.cancel()
+                modelLoadTask = nil
+                modelLoadRevision += 1
+                isLoadingModels = false
                 return
             }
             selectProvider(fallback.providerID)
@@ -2069,20 +2310,38 @@ final class TranslationViewModel {
             reconcileSelection(with: provider)
             return
         }
+        refreshModelsForSelection()
+    }
+
+    private func refreshModelsForSelection() {
+        modelLoadRevision += 1
+        let revision = modelLoadRevision
+        modelLoadTask?.cancel()
+        guard let provider = selectedProvider else { return }
         isLoadingModels = true
-        Task { @MainActor [weak self, weak provider] in
+        modelLoadTask = Task { @MainActor [weak self, weak provider] in
             guard let self, let provider else { return }
             await provider.loadModelMetadataForSettings()
-            guard self.selectedProviderID == provider.providerID else { return }
+            guard !Task.isCancelled,
+                  self.modelLoadRevision == revision,
+                  self.selectedProviderID == provider.providerID else {
+                return
+            }
             self.availableModels = provider.availableModels
             self.reconcileSelection(with: provider)
             self.isLoadingModels = false
+            self.modelLoadTask = nil
         }
     }
 
     func shutdown() {
         translationTask?.cancel()
         prepareTask?.cancel()
+        modelLoadTask?.cancel()
+        modelLoadTask = nil
+        modelLoadRevision += 1
+        isLoadingModels = false
+        cancelActionNavigation()
     }
 
     private func reconcileSelection(with provider: AIChatViewModel) {

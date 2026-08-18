@@ -486,6 +486,53 @@ final class YorozuUITests: XCTestCase {
     }
 
     @MainActor
+    func testTranslationActionPanelChangesLanguageWithArrowKeys() {
+        continueAfterFailure = false
+        let application = XCUIApplication()
+        application.launchArguments = ["--ui-testing", "--ui-testing-sticky"]
+        application.launch()
+
+        let rootSearch = application.searchFields["launcher.search"]
+        XCTAssertTrue(rootSearch.waitForExistence(timeout: 5))
+        rootSearch.typeText("translate")
+
+        let translationRow = application
+            .descendants(matching: .any)["launcher.row.feature:translation"]
+        XCTAssertTrue(translationRow.waitForExistence(timeout: 2))
+        application.typeKey(.return, modifierFlags: [])
+        XCTAssertTrue(
+            application.descendants(matching: .any)["launcher.translation"]
+                .waitForExistence(timeout: 2)
+        )
+
+        application.typeKey("k", modifierFlags: .command)
+        let actionPanel = application.descendants(matching: .any)["launcher.action-panel"]
+        let changeLanguage = application.buttons[
+            "launcher.action.translationChangeLanguage"
+        ]
+        XCTAssertTrue(actionPanel.waitForExistence(timeout: 2))
+        XCTAssertTrue(changeLanguage.waitForExistence(timeout: 2))
+        XCTAssertTrue(changeLanguage.isSelected)
+
+        application.typeKey(.return, modifierFlags: [])
+        let japanese = application.buttons["launcher.action.translationLanguage1"]
+        let english = application.buttons["launcher.action.translationLanguage2"]
+        XCTAssertTrue(japanese.waitForExistence(timeout: 2))
+        XCTAssertTrue(japanese.isSelected)
+
+        application.typeKey(.downArrow, modifierFlags: [])
+        XCTAssertTrue(english.waitForExistence(timeout: 2))
+        XCTAssertTrue(english.isSelected)
+        application.typeKey(.return, modifierFlags: [])
+
+        XCTAssertTrue(actionPanel.waitForNonExistence(timeout: 2))
+        XCTAssertTrue(
+            application.buttons["Change translation language, English"]
+                .waitForExistence(timeout: 2)
+        )
+    }
+
+    @MainActor
     private func assertSelectedRootRowIsVisible(
         in application: XCUIApplication,
         below searchField: XCUIElement,

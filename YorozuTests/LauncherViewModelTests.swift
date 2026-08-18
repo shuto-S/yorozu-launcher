@@ -162,6 +162,31 @@ final class LauncherViewModelTests: XCTestCase {
             keyAction(keyCode: 53, isActionPanelPresented: true),
             .escape
         )
+
+        XCTAssertEqual(
+            keyAction(
+                keyCode: 125,
+                route: .translation,
+                isActionPanelPresented: true
+            ),
+            .moveSelection(1)
+        )
+        XCTAssertEqual(
+            keyAction(
+                keyCode: 126,
+                route: .translation,
+                isActionPanelPresented: true
+            ),
+            .moveSelection(-1)
+        )
+        XCTAssertEqual(
+            keyAction(
+                keyCode: 36,
+                route: .translation,
+                isActionPanelPresented: true
+            ),
+            .performPrimaryAction
+        )
     }
 
     func testSettingsEscapePassesThroughWhileTextIsComposing() {
