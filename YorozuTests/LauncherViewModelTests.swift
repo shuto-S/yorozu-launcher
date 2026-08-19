@@ -1179,6 +1179,13 @@ final class LauncherViewModelTests: XCTestCase {
         XCTAssertEqual(fixture.viewModel.route, .translation)
         XCTAssertTrue(fixture.viewModel.translationViewModel.inputText.isEmpty)
         XCTAssertTrue(fixture.viewModel.translationViewModel.outputText.isEmpty)
+
+        let focusRequestBeforePresentation = fixture.viewModel.translationViewModel.focusRequest
+        fixture.viewModel.paletteDidBecomeVisible()
+        XCTAssertEqual(
+            fixture.viewModel.translationViewModel.focusRequest,
+            focusRequestBeforePresentation + 1
+        )
     }
 
     func testRootActionPanelOpensAliasesEditorForSelectedApplication() async throws {

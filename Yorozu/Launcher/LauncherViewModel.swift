@@ -1804,8 +1804,11 @@ final class LauncherViewModel {
     }
 
     func paletteDidBecomeVisible() {
-        guard route.isAI else { return }
-        aiChatViewModel.paletteDidBecomeVisible()
+        if route.isAI {
+            aiChatViewModel.paletteDidBecomeVisible()
+        } else if route == .translation {
+            translationViewModel.requestInputFocus()
+        }
     }
 
     private func beginEditingAlias(for application: LaunchableApplication) {

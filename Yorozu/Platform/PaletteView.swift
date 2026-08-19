@@ -299,7 +299,6 @@ private struct TranslationView: View {
     let onBack: () -> Void
     let onOpenSettings: () -> Void
     let onShowActions: () -> Void
-    @FocusState private var inputFocused: Bool
 
     var body: some View {
         VStack(spacing: 0) {
@@ -374,11 +373,10 @@ private struct TranslationView: View {
                     title: "Input",
                     copyText: viewModel.inputText
                 ) {
-                    TextEditor(text: $viewModel.inputText)
-                        .focused($inputFocused)
-                        .font(.body)
-                        .scrollContentBackground(.hidden)
-                        .background(Color.clear)
+                    TranslationInputTextView(
+                        text: $viewModel.inputText,
+                        focusRequest: viewModel.focusRequest
+                    )
                         .overlay(alignment: .topLeading) {
                             if viewModel.inputText.isEmpty {
                                 Text("Enter text to translate…")
@@ -490,8 +488,7 @@ private struct TranslationView: View {
             .frame(height: 48)
         }
         .padding(.top, 12)
-        .task(id: viewModel.focusRequest) {
-            inputFocused = true
+        .task {
             viewModel.loadModelsIfNeeded()
         }
         .accessibilityIdentifier("launcher.translation")
@@ -570,6 +567,78 @@ private struct TranslationView: View {
         }
         .padding(.horizontal, 12)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+}
+
+private struct TranslationInputTextView: NSViewRepresentable {
+    @Binding var text: String
+    let focusRequest: Int
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(text: $text)
+    }
+
+    func makeNSView(context: Context) -> NSScrollView {
+        let textView = NSTextView()
+        textView.delegate = context.coordinator
+        textView.isRichText = false
+        textView.isAutomaticQuoteSubstitutionEnabled = false
+        textView.isAutomaticDashSubstitutionEnabled = false
+        textView.drawsBackground = false
+        textView.font = .preferredFont(forTextStyle: .body)
+        textView.textContainerInset = NSSize(width: 0, height: 2)
+        textView.isHorizontallyResizable = false
+        textView.isVerticallyResizable = true
+        textView.autoresizingMask = [.width]
+        textView.textContainer?.widthTracksTextView = true
+        textView.textContainer?.heightTracksTextView = false
+        textView.setAccessibilityLabel("Translation input")
+        textView.setAccessibilityIdentifier("translation.input")
+
+        let scrollView = NSScrollView()
+        scrollView.drawsBackground = false
+        scrollView.borderType = .noBorder
+        scrollView.hasVerticalScroller = true
+        scrollView.autohidesScrollers = true
+        scrollView.scrollerStyle = .overlay
+        scrollView.documentView = textView
+        context.coordinator.textView = textView
+        return scrollView
+    }
+
+    func updateNSView(_ scrollView: NSScrollView, context: Context) {
+        guard let textView = context.coordinator.textView else { return }
+        if textView.string != text {
+            textView.string = text
+            textView.setSelectedRange(
+                NSRange(location: (text as NSString).length, length: 0)
+            )
+        }
+        guard context.coordinator.lastFocusRequest != focusRequest else { return }
+        context.coordinator.lastFocusRequest = focusRequest
+        DispatchQueue.main.async {
+            guard let window = textView.window else { return }
+            window.makeFirstResponder(textView)
+            textView.setSelectedRange(
+                NSRange(location: (textView.string as NSString).length, length: 0)
+            )
+        }
+    }
+
+    @MainActor
+    final class Coordinator: NSObject, NSTextViewDelegate {
+        @Binding private var text: String
+        weak var textView: NSTextView?
+        var lastFocusRequest = -1
+
+        init(text: Binding<String>) {
+            _text = text
+        }
+
+        func textDidChange(_ notification: Notification) {
+            guard let textView = notification.object as? NSTextView else { return }
+            text = textView.string
+        }
     }
 }
 

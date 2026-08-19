@@ -2105,6 +2105,10 @@ final class TranslationViewModel {
         }
     }
 
+    func requestInputFocus() {
+        focusRequest += 1
+    }
+
     func translate() {
         guard canTranslate,
               let provider = selectedProvider else { return }

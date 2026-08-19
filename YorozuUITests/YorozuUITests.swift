@@ -533,6 +533,24 @@ final class YorozuUITests: XCTestCase {
     }
 
     @MainActor
+    func testTranslationFocusesInputWhenOpened() {
+        continueAfterFailure = false
+        let application = XCUIApplication()
+        application.launchArguments = ["--ui-testing", "--ui-testing-sticky"]
+        application.launch()
+
+        let rootSearch = application.searchFields["launcher.search"]
+        XCTAssertTrue(rootSearch.waitForExistence(timeout: 5))
+        rootSearch.typeText("translate")
+        application.typeKey(.return, modifierFlags: [])
+
+        let input = application.textViews["translation.input"]
+        XCTAssertTrue(input.waitForExistence(timeout: 2))
+        application.typeText("Focus check")
+        XCTAssertEqual(input.value as? String, "Focus check")
+    }
+
+    @MainActor
     private func assertSelectedRootRowIsVisible(
         in application: XCUIApplication,
         below searchField: XCUIElement,
