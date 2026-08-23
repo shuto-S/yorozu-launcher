@@ -624,6 +624,12 @@ private struct AIProviderConnectionSettingsView: View {
 
 private struct GeneralSettingsView: View {
     var viewModel: LauncherViewModel
+    @ObservedObject private var inputModeController: CommandInputModeController
+
+    init(viewModel: LauncherViewModel) {
+        self.viewModel = viewModel
+        inputModeController = viewModel.commandInputModeController
+    }
 
     var body: some View {
         Form {
@@ -648,6 +654,143 @@ private struct GeneralSettingsView: View {
                 } footer: {
                     Text("The previous database was preserved for manual recovery.")
                 }
+            }
+
+            Section {
+                Toggle(
+                    "Use Command keys to switch input mode",
+                    isOn: $inputModeController.isEnabled
+                )
+                .accessibilityIdentifier("settings.input-mode.enabled")
+
+                Text("Press Left Command alone for English and Right Command alone for Japanese.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                if inputModeController.isEnabled {
+                    LabeledContent("Runtime Status") {
+                        Text(inputModeController.runtimeStatus.title)
+                            .foregroundStyle(runtimeStatusColor)
+                            .accessibilityIdentifier(
+                                "settings.input-mode.runtime-status"
+                            )
+                    }
+
+                    permissionRow(
+                        title: "Accessibility",
+                        isGranted: inputModeController.isAccessibilityGranted,
+                        request: inputModeController.requestAccessibilityAccess
+                    )
+
+                    LabeledContent("Event Monitor") {
+                        Text(inputModeController.monitorStatus.title)
+                            .foregroundStyle(monitorStatusColor)
+                            .accessibilityIdentifier(
+                                "settings.input-mode.monitor-status"
+                            )
+                    }
+
+                    LabeledContent("Code Signing") {
+                        Text(inputModeController.codeSigningStatus.title)
+                            .foregroundStyle(codeSigningStatusColor)
+                            .accessibilityIdentifier(
+                                "settings.input-mode.code-signing"
+                            )
+                    }
+
+                    LabeledContent("Command Detection") {
+                        if let detectedAt = inputModeController.lastCommandEventAt {
+                            Text(detectedAt, format: .dateTime.hour().minute().second())
+                        } else {
+                            Text("Waiting for a Command press")
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+
+                    LabeledContent("Last Switch Request") {
+                        if let action = inputModeController.lastAction {
+                            VStack(alignment: .trailing, spacing: 2) {
+                                Text(action.title)
+                                Text(postingResultTitle)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                        } else {
+                            Text("None")
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+
+                    LabeledContent("Switch Test") {
+                        HStack {
+                            Button("English") {
+                                inputModeController.testSwitch(.switchToEnglish)
+                            }
+                            .accessibilityIdentifier(
+                                "settings.input-mode.test-english"
+                            )
+
+                            Button("Japanese") {
+                                inputModeController.testSwitch(.switchToJapanese)
+                            }
+                            .accessibilityIdentifier(
+                                "settings.input-mode.test-japanese"
+                            )
+                        }
+                        .controlSize(.small)
+                    }
+                    .disabled(!inputModeController.isAccessibilityGranted)
+
+                    HStack {
+                        Button("Open Accessibility Settings") {
+                            inputModeController.openAccessibilitySettings()
+                        }
+
+                        Button("Reveal Current Build") {
+                            inputModeController.revealCurrentBuild()
+                        }
+
+                        Spacer()
+
+                        Button("Check Again") {
+                            inputModeController.refreshAuthorization()
+                        }
+                    }
+
+                    if inputModeController.codeSigningStatus == .adHoc {
+                        Label {
+                            Text("This build is ad hoc signed. macOS can treat a changed build as a different app, so Accessibility permission may be lost after rebuilding. Sign local Debug builds with Apple Development for stable permission.")
+                        } icon: {
+                            Image(systemName: "exclamationmark.triangle.fill")
+                        }
+                        .foregroundStyle(.orange)
+                        .accessibilityIdentifier(
+                            "settings.input-mode.ad-hoc-warning"
+                        )
+                    }
+
+                    Text("Accessibility authorizes both Command-event listening and Eisu/Kana event posting; separate Input Monitoring access is not required. Use the Switch Test buttons to check posting independently from Command detection.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+
+                    if !inputModeController.isAccessibilityGranted {
+                        Text("If Yorozu is missing from the Accessibility list, choose Reveal Current Build and drag Yorozu.app into the list. Permission applies to this exact signed build.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    } else if inputModeController.runtimeStatus == .unavailable {
+                        Text("Accessibility is allowed, but the event monitor could not start. Quit and reopen Yorozu, then use Check Again. Stable code signing may be required after a rebuild.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+
+                    Text("A Japanese input source must already be added in macOS. Permission changes may require quitting and reopening Yorozu.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            } header: {
+                Text("Input Mode Switching")
+            } footer: {
+                Text("Command shortcuts and regular Command clicks continue to work normally.")
             }
 
             Section {
@@ -691,6 +834,77 @@ private struct GeneralSettingsView: View {
         .scrollContentBackground(.hidden)
         .background(Color.clear)
         .accessibilityIdentifier("settings.detail.general")
+        .onAppear {
+            inputModeController.refreshAuthorization()
+        }
+        .onReceive(
+            NotificationCenter.default.publisher(
+                for: NSApplication.didBecomeActiveNotification
+            )
+        ) { _ in
+            inputModeController.refreshAuthorization()
+        }
+    }
+
+    private var runtimeStatusColor: Color {
+        switch inputModeController.runtimeStatus {
+        case .active:
+            .green
+        case .permissionRequired, .unavailable:
+            .orange
+        case .off:
+            .secondary
+        }
+    }
+
+    private var monitorStatusColor: Color {
+        switch inputModeController.monitorStatus {
+        case .running:
+            .green
+        case .temporarilyDisabled, .creationFailed:
+            .orange
+        case .stopped:
+            .secondary
+        }
+    }
+
+    private var codeSigningStatusColor: Color {
+        switch inputModeController.codeSigningStatus {
+        case .stable:
+            .green
+        case .adHoc:
+            .orange
+        case .unknown:
+            .secondary
+        }
+    }
+
+    private var postingResultTitle: String {
+        switch inputModeController.lastPostCreatedEvents {
+        case true:
+            "Synthetic event pair created"
+        case false:
+            "Could not create events"
+        case nil:
+            "Result unavailable"
+        }
+    }
+
+    private func permissionRow(
+        title: String,
+        isGranted: Bool,
+        request: @escaping () -> Void
+    ) -> some View {
+        LabeledContent(title) {
+            HStack(spacing: 8) {
+                Text(isGranted ? "Allowed" : "Permission Required")
+                    .foregroundStyle(isGranted ? Color.green : Color.secondary)
+                if !isGranted {
+                    Button("Request Access", action: request)
+                        .controlSize(.small)
+                }
+            }
+        }
     }
 }
 

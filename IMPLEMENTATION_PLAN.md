@@ -1,6 +1,6 @@
 # Yorozu Implementation Status and Roadmap
 
-Last updated: 2026-08-14
+Last updated: 2026-08-23
 
 ## Product direction
 
@@ -95,6 +95,9 @@ The current target is:
 - General, Clipboard, AI, and Shortcuts sections
 - configurable shortcuts for Yorozu and feature routes
 - current-process Accessibility status
+- optional left/right Command-alone switching to Eisu/Kana, configured only in General
+- separate signing, Accessibility, event-monitor, Command-detection, and event-posting diagnostics
+- windowless background monitoring protected from App Nap, with automatic event-tap recovery
 - keyboard-first operation with mouse-accessible primary actions
 - Japanese IME marked-text handling in search and action fields
 - outside-click dismissal and menu-bar restart
@@ -188,6 +191,9 @@ Privacy and reliability requirements:
 
 - Clipboard History is disabled by default.
 - Automatic paste requires current-process Accessibility trust and stable local signing.
+- Command input-mode switching is disabled by default. It requires current-process
+  Accessibility trust, stable local signing across rebuilds, and an existing Japanese
+  input source in macOS.
 - Non-image database retention cleanup is batched; expired rows can remain on disk until the next maintenance pass or explicit settings prune.
 - A URL preview that fails is not retried again during the same app process.
 - Codex requires an installed compatible `codex` executable and an authenticated ChatGPT account.

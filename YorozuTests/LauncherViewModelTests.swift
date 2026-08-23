@@ -26,6 +26,7 @@ final class LauncherViewModelTests: XCTestCase {
         XCTAssertFalse(environment.usesLiveAIIntegration)
         XCTAssertFalse(environment.registersGlobalShortcuts)
         XCTAssertTrue(environment.isolatesShortcutSettings)
+        XCTAssertFalse(environment.startsCommandInputModeSwitching)
         XCTAssertTrue(
             temporaryDirectory.path.contains("com.yorozu.app-ui-tests-\(runID)")
         )
@@ -408,6 +409,7 @@ final class LauncherViewModelTests: XCTestCase {
                 initialSnippets: snippets
             ),
             clipboardPreferences: ClipboardPreferences(defaults: defaults),
+            commandInputModeController: .disabled(defaults: defaults),
             urlPreviewService: URLPreviewService(store: nil),
             launcher: StubApplicationLauncher(shouldFail: false)
         )
@@ -511,6 +513,7 @@ final class LauncherViewModelTests: XCTestCase {
             ),
             snippetCatalog: SnippetCatalog(store: nil),
             clipboardPreferences: ClipboardPreferences(defaults: defaults),
+            commandInputModeController: .disabled(defaults: defaults),
             urlPreviewService: URLPreviewService(store: nil),
             launcher: StubApplicationLauncher(shouldFail: false),
             clipboardImageDecoder: DelayedClipboardImageDecoder()
@@ -596,6 +599,7 @@ final class LauncherViewModelTests: XCTestCase {
                 initialSnippets: [secondSnippet, firstSnippet]
             ),
             clipboardPreferences: ClipboardPreferences(defaults: defaults),
+            commandInputModeController: .disabled(defaults: defaults),
             urlPreviewService: URLPreviewService(store: nil),
             launcher: StubApplicationLauncher(shouldFail: false)
         )
@@ -723,6 +727,7 @@ final class LauncherViewModelTests: XCTestCase {
                 initialSnippets: [firstSnippet, secondSnippet]
             ),
             clipboardPreferences: ClipboardPreferences(defaults: defaults),
+            commandInputModeController: .disabled(defaults: defaults),
             urlPreviewService: URLPreviewService(store: nil),
             launcher: StubApplicationLauncher(shouldFail: false)
         )
@@ -812,6 +817,7 @@ final class LauncherViewModelTests: XCTestCase {
             ),
             snippetCatalog: SnippetCatalog(store: nil),
             clipboardPreferences: ClipboardPreferences(defaults: defaults),
+            commandInputModeController: .disabled(defaults: defaults),
             urlPreviewService: URLPreviewService(store: nil),
             launcher: StubApplicationLauncher(shouldFail: false)
         )
@@ -1416,6 +1422,7 @@ final class LauncherViewModelTests: XCTestCase {
             clipboardCatalog: ClipboardCatalog(store: store),
             snippetCatalog: SnippetCatalog(store: store),
             clipboardPreferences: ClipboardPreferences(defaults: defaults),
+            commandInputModeController: .disabled(defaults: defaults),
             urlPreviewService: URLPreviewService(store: store),
             launcher: StubApplicationLauncher(shouldFail: false)
         )
@@ -1674,6 +1681,7 @@ final class LauncherViewModelTests: XCTestCase {
             clipboardCatalog: ClipboardCatalog(store: store),
             snippetCatalog: SnippetCatalog(store: store),
             clipboardPreferences: ClipboardPreferences(defaults: defaults),
+            commandInputModeController: .disabled(defaults: defaults),
             urlPreviewService: URLPreviewService(store: store),
             launcher: launcher
         )

@@ -230,6 +230,7 @@ final class LauncherViewModel {
     var copyContent: ((PasteboardContent) async -> PasteboardReplacementResult)?
 
     let clipboardPreferences: ClipboardPreferences
+    let commandInputModeController: CommandInputModeController
     let urlPreviewService: URLPreviewService
     let shortcutSettings: AppShortcutSettings
     let aiChatViewModelStore: AIChatViewModelStore
@@ -292,6 +293,7 @@ final class LauncherViewModel {
         clipboardCatalog: ClipboardCatalog,
         snippetCatalog: SnippetCatalog,
         clipboardPreferences: ClipboardPreferences,
+        commandInputModeController: CommandInputModeController,
         urlPreviewService: URLPreviewService,
         shortcutSettings: AppShortcutSettings = AppShortcutSettings(),
         aiChatViewModel: AIChatViewModel? = nil,
@@ -306,6 +308,7 @@ final class LauncherViewModel {
         self.clipboardCatalog = clipboardCatalog
         self.snippetCatalog = snippetCatalog
         self.clipboardPreferences = clipboardPreferences
+        self.commandInputModeController = commandInputModeController
         self.urlPreviewService = urlPreviewService
         self.shortcutSettings = shortcutSettings
         let resolvedAIStore: AIChatViewModelStore

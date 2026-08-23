@@ -1,6 +1,6 @@
 // Copy this file to Local.xcconfig and replace the placeholder.
 // A stable Apple Development signature keeps Accessibility permission valid
-// across local Debug builds.
+// across local Debug builds, including Command input-mode switching.
 YOROZU_DEVELOPMENT_TEAM = YOUR_TEAM_ID
 YOROZU_CODE_SIGN_IDENTITY = Apple Development
 YOROZU_CODE_SIGN_STYLE = Automatic

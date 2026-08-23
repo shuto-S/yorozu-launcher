@@ -17,6 +17,7 @@ struct AppEnvironment {
     let registersGlobalShortcuts: Bool
     let isolatesShortcutSettings: Bool
     let monitorsApplicationDirectories: Bool
+    let startsCommandInputModeSwitching: Bool
 
     static func production() -> AppEnvironment {
         let result: LauncherStoreOpenResult
@@ -40,7 +41,8 @@ struct AppEnvironment {
             aiConversationFixtures: [],
             registersGlobalShortcuts: true,
             isolatesShortcutSettings: false,
-            monitorsApplicationDirectories: true
+            monitorsApplicationDirectories: true,
+            startsCommandInputModeSwitching: true
         )
     }
 
@@ -92,7 +94,8 @@ struct AppEnvironment {
             ],
             registersGlobalShortcuts: false,
             isolatesShortcutSettings: true,
-            monitorsApplicationDirectories: false
+            monitorsApplicationDirectories: false,
+            startsCommandInputModeSwitching: false
         )
     }
 }
@@ -453,6 +456,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private lazy var clipboardPreferences = ClipboardPreferences(
         defaults: environment.defaults
     )
+    private lazy var commandInputModeController: CommandInputModeController = {
+        if environment.startsCommandInputModeSwitching {
+            return .live(defaults: environment.defaults)
+        }
+        return .disabled(defaults: environment.defaults)
+    }()
     private lazy var urlPreviewService = URLPreviewService(
         store: store,
         networkEnabled: environment.allowsURLPreviewNetwork
@@ -593,6 +602,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         clipboardCatalog: clipboardCatalog,
         snippetCatalog: snippetCatalog,
         clipboardPreferences: clipboardPreferences,
+        commandInputModeController: commandInputModeController,
         urlPreviewService: urlPreviewService,
         shortcutSettings: AppShortcutSettings(
             usesIsolatedStorage: environment.isolatesShortcutSettings
@@ -706,6 +716,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 await clipboardMonitor.start()
             }
         }
+        if environment.startsCommandInputModeSwitching {
+            commandInputModeController.start()
+        }
 
         #if DEBUG
         if arguments.contains("--performance-testing-clipboard-interaction") {
@@ -791,6 +804,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         paletteController.show(route: .settings, origin: .direct)
     }
 
+    func applicationDidBecomeActive(_ notification: Notification) {
+        commandInputModeController.refreshAuthorization()
+    }
+
+    func applicationDidResignActive(_ notification: Notification) {
+        // Reconcile once AppKit has completed the foreground transition. The
+        // Command-key service is process-scoped and must remain active when the
+        // settings panel or palette is no longer visible.
+        DispatchQueue.main.async { [weak self] in
+            self?.commandInputModeController.refreshAuthorization()
+        }
+    }
+
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         false
     }
@@ -807,6 +833,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         automaticReindexTask = nil
         applicationDirectoryMonitor?.stop()
         applicationDirectoryMonitor = nil
+        commandInputModeController.stop()
         viewModel.shutdown()
         let clipboardMonitor = self.clipboardMonitor
         let store = store
@@ -827,6 +854,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        commandInputModeController.stop()
         if environment.registersGlobalShortcuts {
             KeyboardShortcuts.disable(
                 .toggleLauncher,

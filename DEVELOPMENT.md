@@ -41,13 +41,37 @@ xcodebuild \
 
 ### Apple Development signing
 
-Accessibility trust is tied to the current code-signing identity. For stable automatic-paste testing, create an ignored local override:
+Accessibility trust is tied to the current code-signing identity. For stable automatic-paste and Command input-mode switching tests, create an ignored local override:
+
+1. In Xcode, open **Settings → Accounts** and add an Apple Account.
+2. Select the account, open **Manage Certificates**, and create an **Apple Development** certificate if one is not already available.
+3. Find the account's Team ID, then create the local override:
 
 ```bash
 cp Config/Local.example.xcconfig Config/Local.xcconfig
 ```
 
-Replace `YOUR_TEAM_ID` in `Config/Local.xcconfig`. Do not commit this file, certificate names, provisioning profiles, or other personal signing data.
+Replace `YOUR_TEAM_ID` in `Config/Local.xcconfig`, then rebuild. Confirm that the
+Input Mode Switching section reports `Code Signing: Stable`. The following command
+should also list the development identity:
+
+```bash
+security find-identity -v -p codesigning
+```
+
+Do not commit `Config/Local.xcconfig`, certificate names, provisioning profiles, or
+other personal signing data.
+
+An ad hoc signature changes when the executable changes. macOS can therefore show an old
+Yorozu entry while the current build remains untrusted, or turn its switch off after a
+rebuild. Use an Apple Development identity before diagnosing Accessibility-dependent
+features. Input mode switching intentionally requests Accessibility only: that privilege
+covers both listening to Command events and posting Eisu/Kana events.
+
+While input mode switching is enabled and authorized, Yorozu holds a nondeferrable
+`ProcessInfo` background activity so its listen-only event tap remains responsive when the
+palette and Settings are hidden. A lightweight health check recreates an invalidated tap.
+Both are stopped immediately when the feature is disabled or the app terminates.
 
 The shared project must remain buildable without a personal Apple account. Never place a Development Team directly in `project.pbxproj`.
 

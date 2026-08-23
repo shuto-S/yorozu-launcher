@@ -81,6 +81,24 @@ final class YorozuUITests: XCTestCase {
             .descendants(matching: .any)["settings.destination.general"]
         XCTAssertTrue(general.waitForExistence(timeout: 2))
         general.click()
+        XCTAssertTrue(application.staticTexts["Input Mode Switching"].exists)
+        XCTAssertTrue(
+            application.descendants(matching: .any)["settings.input-mode.enabled"]
+                .exists
+        )
+        XCTAssertTrue(
+            application.staticTexts["Use Command keys to switch input mode"].exists
+        )
+        let inputModeToggle = application
+            .descendants(matching: .any)["settings.input-mode.enabled"]
+        inputModeToggle.click()
+        XCTAssertTrue(application.staticTexts["Permission Required"].exists)
+        XCTAssertGreaterThanOrEqual(
+            application.buttons.matching(identifier: "Request Access").count,
+            1
+        )
+        inputModeToggle.click()
+        XCTAssertFalse(application.staticTexts["Permission Required"].exists)
         application.typeKey(.downArrow, modifierFlags: [])
         XCTAssertTrue(
             application.staticTexts["Recording"].waitForExistence(timeout: 2)
