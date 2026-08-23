@@ -105,8 +105,8 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         menu.addItem(item(
             title: toggleTitle,
             symbol: keepAwakeController.isActive
-                ? "mug"
-                : "mug.fill",
+                ? "cup.and.saucer"
+                : "cup.and.saucer.fill",
             action: #selector(toggleKeepAwake)
         ))
         menu.addItem(.separator())
@@ -171,8 +171,8 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         let description = keepAwakeController.isActive ? "Keep Awake On" : "Keep Awake Off"
         let image = NSImage(
             systemSymbolName: keepAwakeController.isActive
-                ? "mug.fill"
-                : "mug",
+                ? "cup.and.saucer.fill"
+                : "cup.and.saucer",
             accessibilityDescription: description
         )
         image?.isTemplate = true

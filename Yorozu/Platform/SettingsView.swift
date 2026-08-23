@@ -32,7 +32,7 @@ private enum SettingsDestination: String, CaseIterable, Identifiable {
         case .general:
             "gearshape"
         case .keepAwake:
-            "mug"
+            "cup.and.saucer"
         case .clipboard:
             "clipboard"
         case .ai:

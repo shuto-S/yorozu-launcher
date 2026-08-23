@@ -139,7 +139,7 @@ enum FeatureCommand: Hashable, Sendable {
     var symbolName: String {
         switch self {
         case .keepAwake:
-            "mug"
+            "cup.and.saucer"
         case .translation:
             "character.bubble"
         case .clipboardHistory:

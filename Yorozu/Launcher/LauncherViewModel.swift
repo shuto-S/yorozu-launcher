@@ -725,8 +725,8 @@ final class LauncherViewModel {
                         ? "Turn Off"
                         : "Turn On for \(keepAwakeController.defaultDuration.title)",
                     keepAwakeController.isActive
-                        ? "mug"
-                        : "mug.fill",
+                        ? "cup.and.saucer"
+                        : "cup.and.saucer.fill",
                     ["↩"]
                 ),
                 action(.keepAwakeSetDuration, "Set Duration…", "timer", []),
@@ -2107,7 +2107,7 @@ final class LauncherViewModel {
                 ? keepAwakeController.statusSubtitle
                 : feature.subtitle
             let symbolName = feature == .keepAwake && keepAwakeController.isActive
-                ? "mug.fill"
+                ? "cup.and.saucer.fill"
                 : feature.symbolName
             let score: Int
             if normalized.isEmpty {
