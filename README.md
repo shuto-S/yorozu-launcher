@@ -19,6 +19,7 @@ Yorozu is a lightweight, keyboard-first launcher for macOS. It brings applicatio
 - Claude Messages API chat with streaming and local title indexing (enable it and add an Anthropic API key in Settings)
 - Ollama chat with locally installed models discovered from the local Ollama service (enable it in Settings; no API key is required)
 - Configurable global shortcuts
+- Optional Left/Right Command-alone input-mode switching for English and Japanese
 - Keyboard-first navigation with mouse support
 - Japanese IME-safe command handling
 - Native AppKit and SwiftUI interface
@@ -35,6 +36,11 @@ Yorozu is a lightweight, keyboard-first launcher for macOS. It brings applicatio
 | Open Settings | `⌘ ,` |
 
 Feature-specific global shortcuts can be configured in Settings.
+
+Input Mode Switching is disabled by default. Enable it from **Settings → General** to
+use Left Command alone for English and Right Command alone for Japanese. It requires
+macOS Accessibility permission, but not a separate Input Monitoring grant. Command
+shortcuts and regular Command-clicks continue to work normally.
 
 When Root Search recognizes a supported arithmetic expression, the result is shown as a
 copyable command. `Return` copies the result; the Action Panel also offers `Copy Result`
@@ -66,7 +72,9 @@ Open the built app from Xcode's Products group or from the corresponding Derived
 
 ### Stable local signing
 
-Automatic paste uses macOS Accessibility permission. Ad hoc signatures change between builds, so copy the signing template and enter your own Apple Development Team when testing paste behavior:
+Automatic paste and Input Mode Switching use macOS Accessibility permission. Ad hoc
+signatures change between builds, so copy the signing template and enter your own Apple
+Development Team when testing either feature:
 
 ```bash
 cp Config/Local.example.xcconfig Config/Local.xcconfig
@@ -74,7 +82,10 @@ cp Config/Local.example.xcconfig Config/Local.xcconfig
 
 `Config/Local.xcconfig` is intentionally ignored by Git. Never commit personal signing identifiers or provisioning data.
 
-After changing the signature, macOS may require you to remove the stale Yorozu entry from Privacy & Security → Accessibility and add the current build again. Yorozu never changes TCC data automatically.
+After changing the signature, macOS may require you to remove the stale Yorozu entry from
+Privacy & Security → Accessibility and add the current build again. Yorozu never changes
+TCC data automatically. The General settings screen shows the current permission state
+and links to the relevant System Settings pane.
 
 ## Validation
 

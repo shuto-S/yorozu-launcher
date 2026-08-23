@@ -18,6 +18,8 @@ This file applies to the entire repository. Follow the user's current request an
 - Preserve the keyboard-first interaction model while keeping all primary actions mouse-accessible.
 - Keep product-facing copy in English.
 - Keep Root Search, Clipboard History, Snippets, Aliases, AI Chat, and Settings in the existing palette.
+- Keep optional Left/Right Command-alone input-mode switching disabled by default. It uses
+  Accessibility without requiring a separate Input Monitoring grant.
 - Snippet auto-expansion, cloud sync, and distribution automation are not implemented. Do not imply otherwise in product copy or documentation.
 
 ## Repository map
@@ -52,6 +54,9 @@ This file applies to the entire repository. Follow the user's current request an
 - Do not add custom blur, fixed appearance colors, custom shadows, or unnecessary nested glass effects.
 - Keep Root Search, Clipboard History, Snippets, Aliases, AI Chat, and Settings inside the existing palette rather than creating separate utility windows.
 - Preserve Japanese IME composition. Before consuming Return, Enter, arrow, Escape, or Tab events, respect the field editor's marked-text state.
+- Preserve normal Command shortcuts and Command-clicks when input-mode switching is enabled.
+  Background monitoring must continue while Yorozu is inactive without preventing idle
+  system sleep, and must stop immediately when the feature is disabled.
 - Keep keyboard selection scrolled into view and preserve mouse selection.
 
 ## Performance and privacy

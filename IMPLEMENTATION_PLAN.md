@@ -96,7 +96,8 @@ The current target is:
 - configurable shortcuts for Yorozu and feature routes
 - current-process Accessibility status
 - optional left/right Command-alone switching to Eisu/Kana, configured only in General
-- separate signing, Accessibility, event-monitor, Command-detection, and event-posting diagnostics
+- permission-first Input Mode Switching settings limited to enablement, Accessibility
+  status, System Settings access, and manual permission refresh
 - windowless background monitoring protected from App Nap, with automatic event-tap recovery
 - keyboard-first operation with mouse-accessible primary actions
 - Japanese IME marked-text handling in search and action fields

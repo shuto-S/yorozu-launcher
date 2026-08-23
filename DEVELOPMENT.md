@@ -51,9 +51,8 @@ Accessibility trust is tied to the current code-signing identity. For stable aut
 cp Config/Local.example.xcconfig Config/Local.xcconfig
 ```
 
-Replace `YOUR_TEAM_ID` in `Config/Local.xcconfig`, then rebuild. Confirm that the
-Input Mode Switching section reports `Code Signing: Stable`. The following command
-should also list the development identity:
+Replace `YOUR_TEAM_ID` in `Config/Local.xcconfig`, then rebuild. The following command
+should list the development identity:
 
 ```bash
 security find-identity -v -p codesigning
@@ -67,6 +66,11 @@ Yorozu entry while the current build remains untrusted, or turn its switch off a
 rebuild. Use an Apple Development identity before diagnosing Accessibility-dependent
 features. Input mode switching intentionally requests Accessibility only: that privilege
 covers both listening to Command events and posting Eisu/Kana events.
+
+The General settings screen deliberately exposes only the feature toggle, current
+Accessibility state, a link to the relevant System Settings pane, and a permission refresh
+action. Code-signing and event-tap details remain implementation concerns rather than
+normal product settings.
 
 While input mode switching is enabled and authorized, Yorozu holds a user-initiated
 `ProcessInfo` activity that allows idle system sleep. This keeps the listen-only event tap
@@ -243,6 +247,21 @@ For UI or input changes, check:
 - Root arithmetic, including copy-result actions and division-by-zero handling
 - Translation with typed input, selected-text handoff, provider/model/reasoning selection,
   and copy controls
+- Input Mode Switching while Yorozu is both frontmost and inactive: Left Command alone
+  selects English, Right Command alone selects Japanese, Command shortcuts and
+  Command-clicks remain unaffected, and disabling the feature stops monitoring
+
+For focused Input Mode Switching regression coverage, run:
+
+```bash
+xcodebuild \
+  -project Yorozu.xcodeproj \
+  -scheme Yorozu \
+  -configuration Debug \
+  -destination 'platform=macOS,arch=arm64' \
+  -only-testing:YorozuTests/CommandInputModeSwitchingTests \
+  test
+```
 
 Ollama is disabled by default and has no Keychain credential. It contacts the default local
 service (`127.0.0.1:11434`) only after the provider is selected or used. Model discovery uses
