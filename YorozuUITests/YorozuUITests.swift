@@ -97,6 +97,11 @@ final class YorozuUITests: XCTestCase {
             application.buttons.matching(identifier: "Request Access").count,
             1
         )
+        XCTAssertFalse(application.staticTexts["Event Monitor"].exists)
+        XCTAssertFalse(application.staticTexts["Code Signing"].exists)
+        XCTAssertFalse(application.staticTexts["Command Detection"].exists)
+        XCTAssertFalse(application.staticTexts["Last Switch Request"].exists)
+        XCTAssertFalse(application.staticTexts["Switch Test"].exists)
         inputModeToggle.click()
         XCTAssertFalse(application.staticTexts["Permission Required"].exists)
         application.typeKey(.downArrow, modifierFlags: [])

@@ -668,124 +668,45 @@ private struct GeneralSettingsView: View {
                     .foregroundStyle(.secondary)
 
                 if inputModeController.isEnabled {
-                    LabeledContent("Runtime Status") {
-                        Text(inputModeController.runtimeStatus.title)
-                            .foregroundStyle(runtimeStatusColor)
-                            .accessibilityIdentifier(
-                                "settings.input-mode.runtime-status"
-                            )
-                    }
-
                     permissionRow(
                         title: "Accessibility",
                         isGranted: inputModeController.isAccessibilityGranted,
                         request: inputModeController.requestAccessibilityAccess
                     )
 
-                    LabeledContent("Event Monitor") {
-                        Text(inputModeController.monitorStatus.title)
-                            .foregroundStyle(monitorStatusColor)
-                            .accessibilityIdentifier(
-                                "settings.input-mode.monitor-status"
-                            )
-                    }
-
-                    LabeledContent("Code Signing") {
-                        Text(inputModeController.codeSigningStatus.title)
-                            .foregroundStyle(codeSigningStatusColor)
-                            .accessibilityIdentifier(
-                                "settings.input-mode.code-signing"
-                            )
-                    }
-
-                    LabeledContent("Command Detection") {
-                        if let detectedAt = inputModeController.lastCommandEventAt {
-                            Text(detectedAt, format: .dateTime.hour().minute().second())
-                        } else {
-                            Text("Waiting for a Command press")
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-
-                    LabeledContent("Last Switch Request") {
-                        if let action = inputModeController.lastAction {
-                            VStack(alignment: .trailing, spacing: 2) {
-                                Text(action.title)
-                                Text(postingResultTitle)
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                            }
-                        } else {
-                            Text("None")
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-
-                    LabeledContent("Switch Test") {
-                        HStack {
-                            Button("English") {
-                                inputModeController.testSwitch(.switchToEnglish)
-                            }
-                            .accessibilityIdentifier(
-                                "settings.input-mode.test-english"
-                            )
-
-                            Button("Japanese") {
-                                inputModeController.testSwitch(.switchToJapanese)
-                            }
-                            .accessibilityIdentifier(
-                                "settings.input-mode.test-japanese"
-                            )
-                        }
-                        .controlSize(.small)
-                    }
-                    .disabled(!inputModeController.isAccessibilityGranted)
-
                     HStack {
                         Button("Open Accessibility Settings") {
                             inputModeController.openAccessibilitySettings()
                         }
-
-                        Button("Reveal Current Build") {
-                            inputModeController.revealCurrentBuild()
-                        }
+                        .accessibilityIdentifier(
+                            "settings.input-mode.open-accessibility"
+                        )
 
                         Spacer()
 
                         Button("Check Again") {
                             inputModeController.refreshAuthorization()
                         }
-                    }
-
-                    if inputModeController.codeSigningStatus == .adHoc {
-                        Label {
-                            Text("This build is ad hoc signed. macOS can treat a changed build as a different app, so Accessibility permission may be lost after rebuilding. Sign local Debug builds with Apple Development for stable permission.")
-                        } icon: {
-                            Image(systemName: "exclamationmark.triangle.fill")
-                        }
-                        .foregroundStyle(.orange)
                         .accessibilityIdentifier(
-                            "settings.input-mode.ad-hoc-warning"
+                            "settings.input-mode.check-again"
                         )
                     }
 
-                    Text("Accessibility authorizes both Command-event listening and Eisu/Kana event posting; separate Input Monitoring access is not required. Use the Switch Test buttons to check posting independently from Command detection.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-
                     if !inputModeController.isAccessibilityGranted {
-                        Text("If Yorozu is missing from the Accessibility list, choose Reveal Current Build and drag Yorozu.app into the list. Permission applies to this exact signed build.")
+                        Text("Allow Yorozu in Accessibility to switch input modes while using other apps.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     } else if inputModeController.runtimeStatus == .unavailable {
-                        Text("Accessibility is allowed, but the event monitor could not start. Quit and reopen Yorozu, then use Check Again. Stable code signing may be required after a rebuild.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-
-                    Text("A Japanese input source must already be added in macOS. Permission changes may require quitting and reopening Yorozu.")
+                        Label(
+                            "Yorozu couldn’t start input mode switching. Restart the app and check again.",
+                            systemImage: "exclamationmark.triangle"
+                        )
                         .font(.caption)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(.orange)
+                        .accessibilityIdentifier(
+                            "settings.input-mode.unavailable"
+                        )
+                    }
                 }
             } header: {
                 Text("Input Mode Switching")
@@ -843,50 +764,6 @@ private struct GeneralSettingsView: View {
             )
         ) { _ in
             inputModeController.refreshAuthorization()
-        }
-    }
-
-    private var runtimeStatusColor: Color {
-        switch inputModeController.runtimeStatus {
-        case .active:
-            .green
-        case .permissionRequired, .unavailable:
-            .orange
-        case .off:
-            .secondary
-        }
-    }
-
-    private var monitorStatusColor: Color {
-        switch inputModeController.monitorStatus {
-        case .running:
-            .green
-        case .temporarilyDisabled, .creationFailed:
-            .orange
-        case .stopped:
-            .secondary
-        }
-    }
-
-    private var codeSigningStatusColor: Color {
-        switch inputModeController.codeSigningStatus {
-        case .stable:
-            .green
-        case .adHoc:
-            .orange
-        case .unknown:
-            .secondary
-        }
-    }
-
-    private var postingResultTitle: String {
-        switch inputModeController.lastPostCreatedEvents {
-        case true:
-            "Synthetic event pair created"
-        case false:
-            "Could not create events"
-        case nil:
-            "Result unavailable"
         }
     }
 
