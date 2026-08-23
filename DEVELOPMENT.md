@@ -68,10 +68,11 @@ rebuild. Use an Apple Development identity before diagnosing Accessibility-depen
 features. Input mode switching intentionally requests Accessibility only: that privilege
 covers both listening to Command events and posting Eisu/Kana events.
 
-While input mode switching is enabled and authorized, Yorozu holds a nondeferrable
-`ProcessInfo` background activity so its listen-only event tap remains responsive when the
-palette and Settings are hidden. A lightweight health check recreates an invalidated tap.
-Both are stopped immediately when the feature is disabled or the app terminates.
+While input mode switching is enabled and authorized, Yorozu holds a user-initiated
+`ProcessInfo` activity that allows idle system sleep. This keeps the listen-only event tap
+responsive when Yorozu is not frontmost without preventing the Mac from sleeping. A
+lightweight health check recreates an invalidated tap. Both are stopped immediately when
+the feature is disabled or the app terminates.
 
 The shared project must remain buildable without a personal Apple account. Never place a Development Team directly in `project.pbxproj`.
 

@@ -4,6 +4,22 @@ import XCTest
 
 @MainActor
 final class CommandInputModeSwitchingTests: XCTestCase {
+    func testBackgroundMonitorActivityRemainsResponsiveWhenAppIsInactive() {
+        let options =
+            SystemCommandInputModeBackgroundActivityManager.activityOptions
+
+        XCTAssertEqual(
+            options,
+            [
+                .userInitiatedAllowingIdleSystemSleep,
+                .automaticTerminationDisabled,
+            ]
+        )
+        XCTAssertTrue(options.contains(.userInitiatedAllowingIdleSystemSleep))
+        XCTAssertTrue(options.contains(.automaticTerminationDisabled))
+        XCTAssertFalse(options.contains(.idleSystemSleepDisabled))
+    }
+
     func testLeftAndRightCommandSinglesProduceTheirModeActions() {
         var state = CommandInputModeStateMachine()
 
@@ -346,6 +362,31 @@ final class CommandInputModeSwitchingTests: XCTestCase {
         XCTAssertEqual(controller.runtimeStatus, .active)
         XCTAssertEqual(monitor.startCount, 2)
         XCTAssertTrue(monitor.isRunning)
+        XCTAssertTrue(backgroundActivity.isActive)
+    }
+
+    func testAuthorizationRefreshWhileInactiveKeepsMonitorAndActivityRunning() {
+        let defaults = UserDefaults(suiteName: UUID().uuidString)!
+        let monitor = TestCommandInputModeMonitor()
+        let permissions = TestCommandInputModePermissionProvider(
+            isAccessibilityGranted: true
+        )
+        let backgroundActivity = TestCommandInputModeBackgroundActivityManager()
+        let controller = CommandInputModeController(
+            defaults: defaults,
+            monitor: monitor,
+            permissionProvider: permissions,
+            backgroundActivityManager: backgroundActivity
+        )
+
+        controller.isEnabled = true
+        controller.start()
+        controller.refreshAuthorization()
+
+        XCTAssertEqual(controller.runtimeStatus, .active)
+        XCTAssertEqual(monitor.startCount, 1)
+        XCTAssertTrue(monitor.isRunning)
+        XCTAssertEqual(backgroundActivity.beginCount, 1)
         XCTAssertTrue(backgroundActivity.isActive)
     }
 

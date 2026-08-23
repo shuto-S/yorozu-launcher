@@ -218,6 +218,10 @@ final class SystemCommandInputModeBackgroundActivityManager:
     CommandInputModeBackgroundActivityManaging {
     private static let reason =
         "Listening for user-enabled Command input mode shortcuts"
+    static let activityOptions: ProcessInfo.ActivityOptions = [
+        .userInitiatedAllowingIdleSystemSleep,
+        .automaticTerminationDisabled,
+    ]
 
     private let processInfo: ProcessInfo
     private var activity: (any NSObjectProtocol)?
@@ -232,12 +236,14 @@ final class SystemCommandInputModeBackgroundActivityManager:
 
     func begin() {
         guard activity == nil else { return }
-        // A listen-only event tap must respond within the system timeout even
-        // while this LSUIElement app has no visible windows. Mark the work as
-        // non-deferrable background activity and opt out of automatic
-        // termination for exactly the lifetime of the enabled monitor.
+        // This monitor exists only because the user explicitly enabled a
+        // global shortcut service. Classifying it as discretionary background
+        // work makes the process eligible for App Nap as soon as Yorozu is no
+        // longer frontmost, delaying the event tap and its posted Eisu/Kana
+        // event. Keep the user-requested activity responsive without blocking
+        // idle system sleep.
         activity = processInfo.beginActivity(
-            options: [.background, .automaticTerminationDisabled],
+            options: Self.activityOptions,
             reason: Self.reason
         )
     }
@@ -767,7 +773,11 @@ final class CommandInputModeController: ObservableObject {
             return
         }
         backgroundActivityManager.begin()
-        runtimeStatus = monitor.start() ? .active : .unavailable
+        if monitor.isRunning {
+            runtimeStatus = .active
+        } else {
+            runtimeStatus = monitor.start() ? .active : .unavailable
+        }
         startMonitoringHealthChecks()
     }
 
