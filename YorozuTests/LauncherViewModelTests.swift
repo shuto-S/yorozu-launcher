@@ -1094,7 +1094,7 @@ final class LauncherViewModelTests: XCTestCase {
 
         fixture.viewModel.start()
         try await waitUntil {
-            fixture.viewModel.results.count == 7
+            fixture.viewModel.results.count == 8
                 && fixture.viewModel.installedApplications.count == 1
         }
 
@@ -1106,6 +1106,7 @@ final class LauncherViewModelTests: XCTestCase {
                 "AI Chat: Codex",
                 "Aliases",
                 "Clipboard History",
+                "Keep Awake",
                 "Settings",
                 "Translate",
             ]
@@ -1126,6 +1127,7 @@ final class LauncherViewModelTests: XCTestCase {
                 "AI Chat: Codex",
                 "Aliases",
                 "Clipboard History",
+                "Keep Awake",
                 "Settings",
                 "Translate",
             ]
@@ -1136,7 +1138,7 @@ final class LauncherViewModelTests: XCTestCase {
         let fixture = try makeFixture(launcherShouldFail: false)
         fixture.viewModel.start()
         try await waitUntil {
-            fixture.viewModel.results.count == 7
+            fixture.viewModel.results.count == 8
                 && fixture.viewModel.installedApplications.count == 1
         }
         let firstResultID = try XCTUnwrap(fixture.viewModel.results.first?.id)
@@ -1606,6 +1608,50 @@ final class LauncherViewModelTests: XCTestCase {
             identity: FeatureCommand.clipboardHistory.preferenceIdentity
         )
         XCTAssertNotNil(preference.lastLaunchedAt)
+    }
+
+    func testKeepAwakeRootCommandTogglesWithoutLeavingRoot() async throws {
+        let fixture = try makeFixture(launcherShouldFail: false)
+        fixture.viewModel.start()
+        try await waitUntil {
+            fixture.viewModel.results.contains(where: { $0.title == "Keep Awake" })
+        }
+        fixture.viewModel.selectedID = try XCTUnwrap(
+            fixture.viewModel.results.first(where: { $0.title == "Keep Awake" })?.id
+        )
+
+        fixture.viewModel.performPrimaryAction()
+
+        XCTAssertEqual(fixture.viewModel.route, .root)
+        XCTAssertTrue(fixture.viewModel.keepAwakeController.isActive)
+        XCTAssertTrue(
+            fixture.viewModel.results.first(where: { $0.title == "Keep Awake" })?
+                .subtitle.hasPrefix("On until") == true
+        )
+        fixture.viewModel.keepAwakeController.stop()
+    }
+
+    func testKeepAwakeActionPanelSelectsSessionDuration() async throws {
+        let fixture = try makeFixture(launcherShouldFail: false)
+        fixture.viewModel.start()
+        try await waitUntil {
+            fixture.viewModel.results.contains(where: { $0.title == "Keep Awake" })
+        }
+        fixture.viewModel.selectedID = try XCTUnwrap(
+            fixture.viewModel.results.first(where: { $0.title == "Keep Awake" })?.id
+        )
+        fixture.viewModel.showActionMenu()
+
+        XCTAssertTrue(
+            fixture.viewModel.actionItems.contains(where: { $0.id == .keepAwakeSetDuration })
+        )
+        fixture.viewModel.performAction(.keepAwakeSetDuration)
+        XCTAssertEqual(fixture.viewModel.actionItems.count, 49)
+
+        fixture.viewModel.performAction(.keepAwakeDuration(.minutes(10)))
+        XCTAssertEqual(fixture.viewModel.keepAwakeController.activeDuration, .minutes(10))
+        XCTAssertFalse(fixture.viewModel.isActionPanelPresented)
+        fixture.viewModel.keepAwakeController.stop()
     }
 
     private func waitForFailedPreview(

@@ -5,7 +5,7 @@ import Observation
 import os
 import SwiftUI
 
-enum LauncherActionID: String, CaseIterable, Identifiable {
+enum LauncherActionID: Hashable, Identifiable {
     case open
     case paste
     case copy
@@ -67,8 +67,20 @@ enum LauncherActionID: String, CaseIterable, Identifiable {
     case aiToggleArchiveScope
     case aiCopyLastResponse
     case aiStopGenerating
+    case keepAwakeToggle
+    case keepAwakeSetDuration
+    case keepAwakeDuration(KeepAwakeDuration)
 
     var id: Self { self }
+
+    var rawValue: String {
+        switch self {
+        case let .keepAwakeDuration(duration):
+            "keepAwakeDuration.\(duration.storedValue)"
+        default:
+            String(describing: self)
+        }
+    }
 }
 
 struct LauncherActionItem: Identifiable, Equatable {
@@ -196,6 +208,7 @@ final class LauncherViewModel {
         }
     }
     var selectedActionID: LauncherActionID?
+    private(set) var isChoosingKeepAwakeDuration = false
     private(set) var aliasEditorMode: AliasEditorMode?
     var aliasDraft = "" {
         didSet {
@@ -235,6 +248,7 @@ final class LauncherViewModel {
     let shortcutSettings: AppShortcutSettings
     let aiChatViewModelStore: AIChatViewModelStore
     let translationViewModel: TranslationViewModel
+    let keepAwakeController: KeepAwakeController
 
     var aiProviderPreferences: AIProviderPreferences {
         aiChatViewModelStore.providerPreferences
@@ -299,6 +313,7 @@ final class LauncherViewModel {
         aiChatViewModel: AIChatViewModel? = nil,
         aiChatViewModelStore: AIChatViewModelStore? = nil,
         translationPreferences: TranslationPreferences? = nil,
+        keepAwakeController: KeepAwakeController? = nil,
         launcher: any ApplicationLaunching,
         clipboardImageDecoder: any ClipboardImageDecoding = ClipboardImageDecoder(),
         storageRecoveryNotice: StorageRecoveryNotice? = nil
@@ -334,6 +349,13 @@ final class LauncherViewModel {
             providerStore: resolvedAIStore,
             preferences: resolvedTranslationPreferences
         )
+        self.keepAwakeController = keepAwakeController ?? KeepAwakeController(
+            defaults: UserDefaults(
+                suiteName: "com.yorozu.app.keep-awake-fallback.\(UUID().uuidString)"
+            ) ?? .standard,
+            activityManager: NoOpSleepActivityManager(),
+            observesSystemNotifications: false
+        )
         self.launcher = launcher
         self.clipboardImageDecoder = clipboardImageDecoder
         self.storageRecoveryNotice = storageRecoveryNotice
@@ -341,6 +363,9 @@ final class LauncherViewModel {
         clipboardImageCache.totalCostLimit = 32 * 1_024 * 1_024
         self.aiProviderPreferences.didChange = { [weak self] in
             self?.handleAIProviderPreferencesChange()
+        }
+        self.keepAwakeController.addObserver { [weak self] in
+            self?.handleKeepAwakeChange()
         }
     }
 
@@ -469,6 +494,9 @@ final class LauncherViewModel {
     }
 
     var actionPanelTitle: String {
+        if isChoosingKeepAwakeDuration {
+            return "Set Keep Awake Duration"
+        }
         if route == .translation {
             return translationViewModel.actionPanelTitle
         }
@@ -676,6 +704,32 @@ final class LauncherViewModel {
                 ),
                 action(.editAlias, "Edit Alias", "character.cursor.ibeam", ["⌘", "E"]),
                 action(.reveal, "Show in Finder", "folder", ["⇧", "⌘", "F"]),
+            ]
+        case let .feature(feature) where feature == .keepAwake:
+            if isChoosingKeepAwakeDuration {
+                return KeepAwakeDuration.choices.map { duration in
+                    action(
+                        .keepAwakeDuration(duration),
+                        duration == keepAwakeController.activeDuration
+                            ? "✓ \(duration.title)"
+                            : duration.title,
+                        duration == .untilTurnedOff ? "infinity" : "timer",
+                        []
+                    )
+                }
+            }
+            return [
+                action(
+                    .keepAwakeToggle,
+                    keepAwakeController.isActive
+                        ? "Turn Off"
+                        : "Turn On for \(keepAwakeController.defaultDuration.title)",
+                    keepAwakeController.isActive
+                        ? "mug"
+                        : "mug.fill",
+                    ["↩"]
+                ),
+                action(.keepAwakeSetDuration, "Set Duration…", "timer", []),
             ]
         case .feature:
             return [
@@ -914,6 +968,10 @@ final class LauncherViewModel {
     func openFeature(_ feature: FeatureCommand) {
         dismissActionPanel(restoreSearchFocus: false)
         recordFeatureUse(feature)
+        if feature == .keepAwake {
+            keepAwakeController.toggle()
+            return
+        }
         resetClipboardImagePreview()
         statusMessage = nil
         focusRequest += 1
@@ -1432,6 +1490,7 @@ final class LauncherViewModel {
         isActionPanelPresented = false
         actionQuery = ""
         selectedActionID = nil
+        isChoosingKeepAwakeDuration = false
         if route.isAI {
             aiChatViewModel.cancelActionNavigation()
         } else if route == .translation {
@@ -1519,6 +1578,16 @@ final class LauncherViewModel {
         case .delete:
             dismissActionPanel()
             requestDeleteSelected()
+        case .keepAwakeToggle:
+            keepAwakeController.toggle()
+            dismissActionPanel()
+        case .keepAwakeSetDuration:
+            isChoosingKeepAwakeDuration = true
+            actionQuery = ""
+            selectedActionID = filteredActionItems.first?.id
+        case let .keepAwakeDuration(duration):
+            keepAwakeController.start(for: duration)
+            dismissActionPanel()
         case .aiOpenChat, .aiOpenInCodex, .aiNewChat,
              .translationChangeLanguage,
              .translationLanguage1, .translationLanguage2,
@@ -2034,12 +2103,18 @@ final class LauncherViewModel {
                !aiProviderPreferences.isEnabled(providerID) {
                 return nil
             }
+            let subtitle = feature == .keepAwake
+                ? keepAwakeController.statusSubtitle
+                : feature.subtitle
+            let symbolName = feature == .keepAwake && keepAwakeController.isActive
+                ? "mug.fill"
+                : feature.symbolName
             let score: Int
             if normalized.isEmpty {
                 score = 0
             } else if let matchedScore = SearchScorer.totalScore(
                 title: feature.title,
-                subtitle: feature.subtitle,
+                subtitle: subtitle,
                 preference: state.preference,
                 query: query
             ) {
@@ -2051,8 +2126,8 @@ final class LauncherViewModel {
                 id: CommandResultID(rawValue: "feature:\(feature.rawValue)"),
                 kind: .feature,
                 title: feature.title,
-                subtitle: feature.subtitle,
-                icon: .system(feature.symbolName),
+                subtitle: subtitle,
+                icon: .system(symbolName),
                 score: score,
                 isPinned: state.preference.isPinned,
                 payload: .feature(feature)
@@ -2071,6 +2146,14 @@ final class LauncherViewModel {
         if route == .root {
             refreshSearch(preserveSelection: true)
         }
+    }
+
+    private func handleKeepAwakeChange() {
+        rebuildRootDefaultResults()
+        if route == .root {
+            refreshSearch(preserveSelection: true)
+        }
+        reconcileActionSelection()
     }
 
     private func rootResults(

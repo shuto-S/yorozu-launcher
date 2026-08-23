@@ -18,6 +18,7 @@ struct AppEnvironment {
     let isolatesShortcutSettings: Bool
     let monitorsApplicationDirectories: Bool
     let startsCommandInputModeSwitching: Bool
+    let sleepActivityManager: any SleepActivityManaging
 
     static func production() -> AppEnvironment {
         let result: LauncherStoreOpenResult
@@ -42,7 +43,8 @@ struct AppEnvironment {
             registersGlobalShortcuts: true,
             isolatesShortcutSettings: false,
             monitorsApplicationDirectories: true,
-            startsCommandInputModeSwitching: true
+            startsCommandInputModeSwitching: true,
+            sleepActivityManager: ProcessInfoSleepActivityManager()
         )
     }
 
@@ -95,9 +97,21 @@ struct AppEnvironment {
             registersGlobalShortcuts: false,
             isolatesShortcutSettings: true,
             monitorsApplicationDirectories: false,
-            startsCommandInputModeSwitching: false
+            startsCommandInputModeSwitching: false,
+            sleepActivityManager: UITestSleepActivityManager()
         )
     }
+}
+
+@MainActor
+private final class UITestSleepActivityManager: SleepActivityManaging {
+    private final class Token: NSObject {}
+
+    func beginPreventingIdleSleep(reason: String) -> NSObjectProtocol {
+        Token()
+    }
+
+    func endPreventingIdleSleep(_ token: NSObjectProtocol) {}
 }
 
 private actor UITestApplicationDiscoverer: ApplicationDiscovering {
@@ -595,6 +609,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         ],
         providerPreferences: aiProviderPreferences
     )
+    private lazy var keepAwakeController = KeepAwakeController(
+        defaults: environment.defaults,
+        activityManager: environment.sleepActivityManager,
+        observesSystemNotifications: environment.usesLivePasteIntegration
+    )
 
     lazy var viewModel = LauncherViewModel(
         catalog: catalog,
@@ -609,6 +628,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         ),
         aiChatViewModelStore: aiChatViewModelStore,
         translationPreferences: translationPreferences,
+        keepAwakeController: keepAwakeController,
         launcher: environment.launcher,
         storageRecoveryNotice: storeOpenResult.recoveryNotice
     )
@@ -661,6 +681,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         _ = paletteController
         menuBarController = MenuBarController(
             viewModel: viewModel,
+            keepAwakeController: keepAwakeController,
             openPalette: { [weak self] in
                 self?.paletteController.toggle(route: .root)
             },
@@ -854,6 +875,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        keepAwakeController.invalidate()
         commandInputModeController.stop()
         if environment.registersGlobalShortcuts {
             KeyboardShortcuts.disable(

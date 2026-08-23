@@ -62,6 +62,7 @@ enum PalettePresentationOrigin: Hashable, Sendable {
 }
 
 enum FeatureCommand: Hashable, Sendable {
+    case keepAwake
     case translation
     case clipboardHistory
     case snippets
@@ -73,6 +74,7 @@ enum FeatureCommand: Hashable, Sendable {
     case settings
 
     static let all: [FeatureCommand] = [
+        .keepAwake,
         .translation,
         .clipboardHistory,
         .snippets,
@@ -86,6 +88,8 @@ enum FeatureCommand: Hashable, Sendable {
 
     var title: String {
         switch self {
+        case .keepAwake:
+            "Keep Awake"
         case .translation:
             "Translate"
         case .clipboardHistory:
@@ -109,6 +113,8 @@ enum FeatureCommand: Hashable, Sendable {
 
     var subtitle: String {
         switch self {
+        case .keepAwake:
+            "Prevent idle display and system sleep"
         case .translation:
             "Translate text with your configured AI provider"
         case .clipboardHistory:
@@ -132,6 +138,8 @@ enum FeatureCommand: Hashable, Sendable {
 
     var symbolName: String {
         switch self {
+        case .keepAwake:
+            "mug"
         case .translation:
             "character.bubble"
         case .clipboardHistory:
@@ -155,6 +163,8 @@ enum FeatureCommand: Hashable, Sendable {
 
     var route: PaletteRoute {
         switch self {
+        case .keepAwake:
+            .root
         case .translation:
             .translation
         case .clipboardHistory:
@@ -222,6 +232,7 @@ enum FeatureCommand: Hashable, Sendable {
 
     var rawValue: String {
         switch self {
+        case .keepAwake: "keepAwake"
         case .translation: "translation"
         case .clipboardHistory: "clipboardHistory"
         case .snippets: "snippets"

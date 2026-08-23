@@ -5,6 +5,7 @@ import SwiftUI
 
 private enum SettingsDestination: String, CaseIterable, Identifiable {
     case general
+    case keepAwake
     case clipboard
     case ai
     case shortcuts
@@ -15,6 +16,8 @@ private enum SettingsDestination: String, CaseIterable, Identifiable {
         switch self {
         case .general:
             "settings.sidebar.general"
+        case .keepAwake:
+            "Keep Awake"
         case .clipboard:
             "Clipboard"
         case .ai:
@@ -28,6 +31,8 @@ private enum SettingsDestination: String, CaseIterable, Identifiable {
         switch self {
         case .general:
             "gearshape"
+        case .keepAwake:
+            "mug"
         case .clipboard:
             "clipboard"
         case .ai:
@@ -83,6 +88,8 @@ struct SettingsView: View {
         switch selection ?? .general {
         case .general:
             GeneralSettingsView(viewModel: viewModel)
+        case .keepAwake:
+            KeepAwakeSettingsView(controller: viewModel.keepAwakeController)
         case .clipboard:
             ClipboardSettingsView(viewModel: viewModel)
         case .ai:
@@ -103,6 +110,64 @@ struct SettingsView: View {
         default:
             break
         }
+    }
+}
+
+private struct KeepAwakeSettingsView: View {
+    @Bindable var controller: KeepAwakeController
+
+    var body: some View {
+        Form {
+            Section {
+                Toggle("Keep Mac Awake", isOn: enabledBinding)
+                    .accessibilityIdentifier("settings.keep-awake.enabled")
+
+                Picker("Default Duration", selection: $controller.defaultDuration) {
+                    ForEach(KeepAwakeDuration.choices, id: \.self) { duration in
+                        Text(duration.title).tag(duration)
+                    }
+                }
+                .accessibilityIdentifier("settings.keep-awake.default-duration")
+
+                Toggle(
+                    "Show Separate Menu Bar Icon",
+                    isOn: $controller.showsSeparateMenuBarIcon
+                )
+                .accessibilityIdentifier("settings.keep-awake.menu-bar-icon")
+            } header: {
+                Text("Keep Awake")
+            } footer: {
+                Text("Prevents idle display and system sleep. Manual sleep, closing the lid, and system power protections can still put your Mac to sleep.")
+            }
+
+            if controller.isActive {
+                Section("Current Session") {
+                    LabeledContent("Status") {
+                        Text(controller.statusSubtitle)
+                    }
+                    LabeledContent("Duration") {
+                        Text(controller.activeDuration?.title ?? "Unknown")
+                    }
+                }
+            }
+        }
+        .formStyle(.grouped)
+        .scrollContentBackground(.hidden)
+        .background(Color.clear)
+        .accessibilityIdentifier("settings.detail.keep-awake")
+    }
+
+    private var enabledBinding: Binding<Bool> {
+        Binding(
+            get: { controller.isActive },
+            set: { isEnabled in
+                if isEnabled {
+                    controller.start(for: controller.defaultDuration)
+                } else {
+                    controller.stop()
+                }
+            }
+        )
     }
 }
 
