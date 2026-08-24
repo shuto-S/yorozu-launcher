@@ -1,6 +1,6 @@
 # Yorozu Implementation Status and Roadmap
 
-Last updated: 2026-08-23
+Last updated: 2026-08-24
 
 ## Product direction
 
@@ -117,6 +117,17 @@ The current target is:
 - built-in presentation and Clipboard-interaction performance modes
 - lazy provider credential and network initialization
 
+### Application updates and release infrastructure
+
+- Sparkle 2.9.6 pinned through Swift Package Manager
+- Release-only scheduled and user-initiated update checks using Sparkle's standard UI
+- menu-bar update check plus a GitHub Releases recovery link
+- Release Info.plist configuration for HTTPS appcast and EdDSA public-key verification
+- Hardened Runtime enabled for Release while Debug behavior remains unchanged
+- tag-driven Developer ID signing, notarization, stapling, GitHub Release, signed appcast,
+  and GitHub Pages workflow
+- Debug and UI-test update scheduling disabled by policy and covered by unit tests
+
 ## v0.1 private-dogfood milestones
 
 The v0.1 implementation includes both prerequisite hardening milestones.
@@ -206,7 +217,8 @@ Privacy and reliability requirements:
   configured credentials or local authentication.
 - Local provider conversation indexes cannot be reconstructed by enumerating all remote conversations.
 - UI automation depends on Xcode Automation permission and can fail before executing tests even when unit tests and the app are healthy.
-- There is no packaged, notarized release yet.
+- There is no verified packaged release yet. Release automation requires repository
+  credentials and a real two-version signed update test before it is considered ready.
 - No open-source license has been selected yet; public visibility should not be treated as
   a grant to redistribute the source.
 
@@ -228,10 +240,11 @@ Privacy and reliability requirements:
 
 ### Distribution
 
-- Developer ID signing and Hardened Runtime
-- notarization and stapling
-- versioned releases and release notes
-- update mechanism only after signature and rollback design are reviewed
+- configure the documented Apple and Sparkle repository credentials
+- publish the first Developer ID signed and notarized baseline release
+- publish a second release and complete the end-to-end Sparkle upgrade/restart test
+- verify cancellation, invalid EdDSA signature rejection, and data preservation on a
+  clean Mac account
 
 ## Out of scope for the current release
 

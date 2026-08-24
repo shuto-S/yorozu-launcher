@@ -6,6 +6,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     private var keepAwakeStatusItem: NSStatusItem?
     private let viewModel: LauncherViewModel
     private let keepAwakeController: KeepAwakeController
+    private let appUpdateController: AppUpdateController?
     private let openPalette: () -> Void
     private let openSettings: () -> Void
     private var keepAwakeObserverID: UUID?
@@ -14,11 +15,13 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     init(
         viewModel: LauncherViewModel,
         keepAwakeController: KeepAwakeController? = nil,
+        appUpdateController: AppUpdateController? = nil,
         openPalette: @escaping () -> Void,
         openSettings: @escaping () -> Void
     ) {
         self.viewModel = viewModel
         self.keepAwakeController = keepAwakeController ?? viewModel.keepAwakeController
+        self.appUpdateController = appUpdateController
         self.openPalette = openPalette
         self.openSettings = openSettings
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
@@ -71,6 +74,18 @@ final class MenuBarController: NSObject, NSMenuDelegate {
             symbol: "gearshape",
             keyEquivalent: ",",
             action: #selector(showSettings)
+        ))
+        let checkForUpdatesItem = item(
+            title: String(localized: "menu.check-for-updates"),
+            symbol: "arrow.down.circle",
+            action: #selector(checkForUpdates)
+        )
+        checkForUpdatesItem.isEnabled = appUpdateController?.canCheckForUpdates == true
+        menu.addItem(checkForUpdatesItem)
+        menu.addItem(item(
+            title: String(localized: "menu.view-latest-release"),
+            symbol: "safari",
+            action: #selector(viewLatestRelease)
         ))
         menu.addItem(item(
             title: String(localized: "menu.restart"),
@@ -192,6 +207,18 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     }
 
     @objc func showSettings() { openSettings() }
+
+    @objc private func checkForUpdates() {
+        appUpdateController?.checkForUpdates()
+    }
+
+    @objc private func viewLatestRelease() {
+        if let appUpdateController {
+            appUpdateController.openLatestRelease()
+        } else {
+            NSWorkspace.shared.open(AppUpdateController.latestReleaseURL)
+        }
+    }
 
     @objc private func toggleKeepAwake() {
         keepAwakeController.toggle()

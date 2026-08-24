@@ -1,0 +1,394 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+concurrency:
+  group: yorozu-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: macos-26
+    timeout-minutes: 45
+    environment:
+      name: github-pages
+      url: ${{ steps.pages.outputs.page_url }}
+    env:
+      APP_NAME: Yorozu
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+      DEVELOPER_ID_APPLICATION_P12_BASE64: ${{ secrets.DEVELOPER_ID_APPLICATION_P12_BASE64 }}
+      DEVELOPER_ID_APPLICATION_P12_PASSWORD: ${{ secrets.DEVELOPER_ID_APPLICATION_P12_PASSWORD }}
+      SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
+      SPARKLE_PUBLIC_KEY: ${{ vars.SPARKLE_PUBLIC_KEY }}
+      GH_TOKEN: ${{ github.token }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Validate release inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Expected a stable vX.Y.Z tag." >&2
+            exit 1
+          fi
+
+          missing=()
+          for name in \
+            APPLE_TEAM_ID \
+            APPLE_ID \
+            APPLE_APP_SPECIFIC_PASSWORD \
+            DEVELOPER_ID_APPLICATION_P12_BASE64 \
+            DEVELOPER_ID_APPLICATION_P12_PASSWORD \
+            SPARKLE_PRIVATE_KEY \
+            SPARKLE_PUBLIC_KEY; do
+            if [[ -z "${!name:-}" ]]; then
+              missing+=("$name")
+            fi
+          done
+          if (( ${#missing[@]} > 0 )); then
+            printf 'Missing release configuration: %s\n' "${missing[*]}" >&2
+            exit 1
+          fi
+
+          PUBLIC_KEY_PATH="$RUNNER_TEMP/sparkle-public-key"
+          if ! printf '%s' "$SPARKLE_PUBLIC_KEY" \
+            | base64 --decode > "$PUBLIC_KEY_PATH"; then
+            echo "SPARKLE_PUBLIC_KEY is not valid base64." >&2
+            exit 1
+          fi
+          if [[ "$(stat -f '%z' "$PUBLIC_KEY_PATH")" != "32" ]]; then
+            echo "SPARKLE_PUBLIC_KEY must decode to a 32-byte Ed25519 public key." >&2
+            exit 1
+          fi
+
+          BUILD_NUMBER="$GITHUB_RUN_NUMBER"
+          CURRENT_APPCAST="$RUNNER_TEMP/current-appcast.xml"
+          HTTP_STATUS="$(curl \
+            --location \
+            --silent \
+            --show-error \
+            --output "$CURRENT_APPCAST" \
+            --write-out '%{http_code}' \
+            'https://shuto-s.github.io/yorozu-launcher/appcast.xml')"
+          case "$HTTP_STATUS" in
+            200)
+              PREVIOUS_BUILD_NUMBER="$(xmllint \
+                --xpath 'string((//*[local-name()="version"])[1])' \
+                "$CURRENT_APPCAST")"
+              if [[ ! "$PREVIOUS_BUILD_NUMBER" =~ ^[0-9]+$ ]]; then
+                echo "The published appcast has no numeric sparkle:version." >&2
+                exit 1
+              fi
+              if (( BUILD_NUMBER <= PREVIOUS_BUILD_NUMBER )); then
+                BUILD_NUMBER="$((PREVIOUS_BUILD_NUMBER + 1))"
+              fi
+              ;;
+            404)
+              ;;
+            *)
+              echo "Could not verify the current appcast (HTTP $HTTP_STATUS)." >&2
+              exit 1
+              ;;
+          esac
+
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "BUILD_NUMBER=$BUILD_NUMBER" >> "$GITHUB_ENV"
+
+      - name: Unit and integration tests
+        run: |
+          xcodebuild \
+            -project Yorozu.xcodeproj \
+            -scheme Yorozu \
+            -configuration Debug \
+            -destination 'platform=macOS,arch=arm64' \
+            -derivedDataPath "$RUNNER_TEMP/DerivedData" \
+            -only-testing:YorozuTests \
+            CODE_SIGNING_ALLOWED=NO \
+            test
+
+      - name: Install Developer ID certificate
+        shell: bash
+        run: |
+          set -euo pipefail
+          CERTIFICATE_PATH="$RUNNER_TEMP/developer-id-application.p12"
+          KEYCHAIN_PATH="$RUNNER_TEMP/yorozu-release.keychain-db"
+          KEYCHAIN_PASSWORD="$(openssl rand -hex 24)"
+
+          printf '%s' "$DEVELOPER_ID_APPLICATION_P12_BASE64" \
+            | base64 --decode > "$CERTIFICATE_PATH"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security import "$CERTIFICATE_PATH" \
+            -k "$KEYCHAIN_PATH" \
+            -P "$DEVELOPER_ID_APPLICATION_P12_PASSWORD" \
+            -T /usr/bin/codesign \
+            -T /usr/bin/security
+          security set-key-partition-list \
+            -S apple-tool:,apple: \
+            -s \
+            -k "$KEYCHAIN_PASSWORD" \
+            "$KEYCHAIN_PATH"
+          security list-keychains -d user -s "$KEYCHAIN_PATH"
+          echo "RELEASE_KEYCHAIN_PATH=$KEYCHAIN_PATH" >> "$GITHUB_ENV"
+
+      - name: Archive Developer ID build
+        run: |
+          xcodebuild archive \
+            -project Yorozu.xcodeproj \
+            -scheme Yorozu \
+            -configuration Release \
+            -destination 'generic/platform=macOS' \
+            -derivedDataPath "$RUNNER_TEMP/DerivedData" \
+            -disableAutomaticPackageResolution \
+            -archivePath "$RUNNER_TEMP/Yorozu.xcarchive" \
+            ARCHS=arm64 \
+            DEVELOPMENT_TEAM="$APPLE_TEAM_ID" \
+            CODE_SIGN_STYLE=Manual \
+            CODE_SIGN_IDENTITY="Developer ID Application" \
+            OTHER_CODE_SIGN_FLAGS="--keychain $RELEASE_KEYCHAIN_PATH" \
+            CURRENT_PROJECT_VERSION="$BUILD_NUMBER" \
+            MARKETING_VERSION="$VERSION" \
+            YOROZU_SPARKLE_PUBLIC_KEY="$SPARKLE_PUBLIC_KEY"
+
+      - name: Export Developer ID application
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/export"
+          cat > "$RUNNER_TEMP/ExportOptions.plist" <<PLIST
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>method</key>
+            <string>developer-id</string>
+            <key>signingStyle</key>
+            <string>manual</string>
+            <key>teamID</key>
+            <string>${APPLE_TEAM_ID}</string>
+          </dict>
+          </plist>
+          PLIST
+          xcodebuild -exportArchive \
+            -archivePath "$RUNNER_TEMP/Yorozu.xcarchive" \
+            -exportPath "$RUNNER_TEMP/export" \
+            -exportOptionsPlist "$RUNNER_TEMP/ExportOptions.plist"
+
+      - name: Verify signature and embedded update configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP_PATH="$RUNNER_TEMP/export/Yorozu.app"
+          codesign --verify --deep --strict --verbose=2 "$APP_PATH"
+          EMBEDDED_KEY="$(/usr/libexec/PlistBuddy -c 'Print :SUPublicEDKey' "$APP_PATH/Contents/Info.plist")"
+          FEED_URL="$(/usr/libexec/PlistBuddy -c 'Print :SUFeedURL' "$APP_PATH/Contents/Info.plist")"
+          if [[ "$EMBEDDED_KEY" != "$SPARKLE_PUBLIC_KEY" ]]; then
+            echo "The embedded Sparkle public key does not match the release configuration." >&2
+            exit 1
+          fi
+          if [[ "$FEED_URL" != "https://shuto-s.github.io/yorozu-launcher/appcast.xml" ]]; then
+            echo "The embedded Sparkle feed URL is incorrect." >&2
+            exit 1
+          fi
+
+      - name: Notarize and staple
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP_PATH="$RUNNER_TEMP/export/Yorozu.app"
+          NOTARY_ARCHIVE="$RUNNER_TEMP/Yorozu-notary.zip"
+          ditto -c -k --sequesterRsrc --keepParent "$APP_PATH" "$NOTARY_ARCHIVE"
+          xcrun notarytool submit "$NOTARY_ARCHIVE" \
+            --apple-id "$APPLE_ID" \
+            --password "$APPLE_APP_SPECIFIC_PASSWORD" \
+            --team-id "$APPLE_TEAM_ID" \
+            --wait
+          xcrun stapler staple "$APP_PATH"
+          xcrun stapler validate "$APP_PATH"
+          spctl --assess --type execute --verbose=2 "$APP_PATH"
+
+      - name: Package release and notes
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/updates" "$RUNNER_TEMP/site"
+          ARCHIVE_PATH="$RUNNER_TEMP/updates/Yorozu.app.zip"
+          NOTES_PATH="$RUNNER_TEMP/updates/Yorozu.app.md"
+          ditto -c -k --sequesterRsrc --keepParent \
+            "$RUNNER_TEMP/export/Yorozu.app" \
+            "$ARCHIVE_PATH"
+
+          {
+            printf '# Yorozu %s\n\n' "$VERSION"
+            PREVIOUS_TAG="$(git describe --tags --abbrev=0 "$GITHUB_SHA^" 2>/dev/null || true)"
+            if [[ -n "$PREVIOUS_TAG" ]]; then
+              git log --pretty='- %s' "$PREVIOUS_TAG..$GITHUB_SHA"
+            else
+              git log --pretty='- %s' "$GITHUB_SHA"
+            fi
+          } > "$NOTES_PATH"
+          echo "ARCHIVE_PATH=$ARCHIVE_PATH" >> "$GITHUB_ENV"
+          echo "NOTES_PATH=$NOTES_PATH" >> "$GITHUB_ENV"
+
+      - name: Generate signed appcast
+        shell: bash
+        run: |
+          set -euo pipefail
+          SPARKLE_ARTIFACT_ROOT="$RUNNER_TEMP/DerivedData/SourcePackages/artifacts/sparkle"
+          if [[ ! -d "$SPARKLE_ARTIFACT_ROOT" ]]; then
+            echo "The resolved Sparkle binary artifact is missing." >&2
+            exit 1
+          fi
+          GENERATE_APPCAST="$(find \
+            "$SPARKLE_ARTIFACT_ROOT" \
+            -type f \
+            -path '*/bin/generate_appcast' \
+            -perm -111 \
+            -print \
+            -quit)"
+          if [[ -z "$GENERATE_APPCAST" ]]; then
+            echo "The resolved Sparkle package does not contain generate_appcast." >&2
+            exit 1
+          fi
+          SPARKLE_TOOLS="$(dirname "$GENERATE_APPCAST")"
+          if [[ ! -x "$SPARKLE_TOOLS/sign_update" ]]; then
+            echo "The resolved Sparkle package does not contain sign_update." >&2
+            exit 1
+          fi
+          printf '%s' "$SPARKLE_PRIVATE_KEY" \
+            | "$GENERATE_APPCAST" \
+                --ed-key-file - \
+                --download-url-prefix "https://github.com/$GITHUB_REPOSITORY/releases/download/$GITHUB_REF_NAME/" \
+                --link "https://github.com/$GITHUB_REPOSITORY/releases/tag/$GITHUB_REF_NAME" \
+                --embed-release-notes \
+                --maximum-versions 1 \
+                -o "$RUNNER_TEMP/site/appcast.xml" \
+                "$RUNNER_TEMP/updates"
+          echo "SPARKLE_TOOLS=$SPARKLE_TOOLS" >> "$GITHUB_ENV"
+
+      - name: Verify release archive and appcast
+        shell: bash
+        run: |
+          set -euo pipefail
+          APPCAST_PATH="$RUNNER_TEMP/site/appcast.xml"
+          ENCLOSURE_XPATH='(//*[local-name()="enclosure"])[1]'
+          APPCAST_BUILD_NUMBER="$(xmllint \
+            --xpath 'string((//*[local-name()="version"])[1])' \
+            "$APPCAST_PATH")"
+          APPCAST_SHORT_VERSION="$(xmllint \
+            --xpath 'string((//*[local-name()="shortVersionString"])[1])' \
+            "$APPCAST_PATH")"
+          APPCAST_DOWNLOAD_URL="$(xmllint \
+            --xpath "string($ENCLOSURE_XPATH/@url)" \
+            "$APPCAST_PATH")"
+          APPCAST_LENGTH="$(xmllint \
+            --xpath "string($ENCLOSURE_XPATH/@length)" \
+            "$APPCAST_PATH")"
+          ED_SIGNATURE="$(xmllint \
+            --xpath "string($ENCLOSURE_XPATH/@*[local-name()='edSignature'])" \
+            "$APPCAST_PATH")"
+          MINIMUM_SYSTEM_VERSION="$(xmllint \
+            --xpath 'string((//*[local-name()="minimumSystemVersion"])[1])' \
+            "$APPCAST_PATH")"
+          RELEASE_NOTES="$(xmllint \
+            --xpath 'string((//*[local-name()="description"])[1])' \
+            "$APPCAST_PATH")"
+
+          require_equal() {
+            if [[ "$1" != "$2" ]]; then
+              echo "$3 (expected '$2', got '$1')." >&2
+              exit 1
+            fi
+          }
+          require_nonempty() {
+            if [[ -z "$1" ]]; then
+              echo "$2 must not be empty." >&2
+              exit 1
+            fi
+          }
+
+          require_equal "$APPCAST_BUILD_NUMBER" "$BUILD_NUMBER" \
+            "Appcast build number mismatch"
+          require_equal "$APPCAST_SHORT_VERSION" "$VERSION" \
+            "Appcast short version mismatch"
+          require_equal "$APPCAST_DOWNLOAD_URL" \
+            "https://github.com/$GITHUB_REPOSITORY/releases/download/$GITHUB_REF_NAME/Yorozu.app.zip" \
+            "Appcast download URL mismatch"
+          require_equal "$APPCAST_LENGTH" "$(stat -f '%z' "$ARCHIVE_PATH")" \
+            "Appcast archive length mismatch"
+          require_equal "$MINIMUM_SYSTEM_VERSION" "26.0" \
+            "Appcast minimum system version mismatch"
+          require_nonempty "$RELEASE_NOTES" "Appcast release notes"
+          require_nonempty "$ED_SIGNATURE" "Appcast EdDSA signature"
+
+          printf '%s' "$SPARKLE_PRIVATE_KEY" \
+            | "$SPARKLE_TOOLS/sign_update" \
+                --verify \
+                --ed-key-file - \
+                "$ARCHIVE_PATH" \
+                "$ED_SIGNATURE"
+
+          if [[ "${ED_SIGNATURE:0:1}" == "A" ]]; then
+            INVALID_SIGNATURE="B${ED_SIGNATURE:1}"
+          else
+            INVALID_SIGNATURE="A${ED_SIGNATURE:1}"
+          fi
+          if printf '%s' "$SPARKLE_PRIVATE_KEY" \
+            | "$SPARKLE_TOOLS/sign_update" \
+                --verify \
+                --ed-key-file - \
+                "$ARCHIVE_PATH" \
+                "$INVALID_SIGNATURE" \
+                >/dev/null 2>&1; then
+            echo "Sparkle accepted an invalid EdDSA signature." >&2
+            exit 1
+          fi
+
+      - name: Create GitHub Release
+        shell: bash
+        run: |
+          set -euo pipefail
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" "$ARCHIVE_PATH" --clobber
+            gh release edit "$GITHUB_REF_NAME" \
+              --title "Yorozu $VERSION" \
+              --notes-file "$NOTES_PATH"
+          else
+            gh release create "$GITHUB_REF_NAME" "$ARCHIVE_PATH" \
+              --verify-tag \
+              --title "Yorozu $VERSION" \
+              --notes-file "$NOTES_PATH"
+          fi
+
+      - name: Upload GitHub Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: ${{ runner.temp }}/site
+
+      - name: Deploy appcast to GitHub Pages
+        id: pages
+        uses: actions/deploy-pages@v4
+
+      - name: Remove temporary keychain
+        if: always()
+        shell: bash
+        run: |
+          if [[ -n "${RELEASE_KEYCHAIN_PATH:-}" ]]; then
+            security delete-keychain "$RELEASE_KEYCHAIN_PATH" || true
+          fi

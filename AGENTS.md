@@ -7,6 +7,7 @@ This file applies to the entire repository. Follow the user's current request an
 - `README.md`: product overview, supported environment, and quick start.
 - `DEVELOPMENT.md`: local setup, architecture, validation, performance measurement, and Git hygiene.
 - `IMPLEMENTATION_PLAN.md`: implemented scope, current constraints, and roadmap.
+- `RELEASING.md`: Developer ID, notarization, Sparkle signing, and release operations.
 - The code and shared Xcode settings are authoritative when documentation drifts.
 
 ## Product constraints
@@ -20,7 +21,9 @@ This file applies to the entire repository. Follow the user's current request an
 - Keep Root Search, Clipboard History, Snippets, Aliases, AI Chat, and Settings in the existing palette.
 - Keep optional Left/Right Command-alone input-mode switching disabled by default. It uses
   Accessibility without requiring a separate Input Monitoring grant.
-- Snippet auto-expansion, cloud sync, and distribution automation are not implemented. Do not imply otherwise in product copy or documentation.
+- Snippet auto-expansion and cloud sync are not implemented. Release automation is
+  present but must not be described as verified until the two-version signed update gate
+  in `RELEASING.md` has passed.
 
 ## Repository map
 
@@ -47,6 +50,7 @@ This file applies to the entire repository. Follow the user's current request an
 - Keep the current dependency set pinned unless a requested change requires otherwise:
   - KeyboardShortcuts 3.0.1
   - GRDB.swift 7.11.1
+  - Sparkle 2.9.6
 
 ## UI and input
 

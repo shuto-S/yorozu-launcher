@@ -3,7 +3,7 @@
 Yorozu is a lightweight, keyboard-first launcher for macOS. It brings application launching, clipboard history, snippets, aliases, multi-provider AI chat, and settings into one native command palette.
 
 > [!NOTE]
-> Yorozu is an early, local-first development build for macOS 26 or later on Apple Silicon. The source repository is public, but there is no packaged or supported public release yet.
+> Yorozu is an early, local-first development build for macOS 26 or later on Apple Silicon. The source repository is public. Release automation exists, but no packaged release is considered supported until the signed update path has passed the two-version verification gate.
 
 ## Features
 
@@ -23,6 +23,7 @@ Yorozu is a lightweight, keyboard-first launcher for macOS. It brings applicatio
 - Keyboard-first navigation with mouse support
 - Japanese IME-safe command handling
 - Native AppKit and SwiftUI interface
+- Release-only Sparkle update checks with a GitHub Releases fallback
 
 ## Default controls
 
@@ -165,6 +166,7 @@ YorozuUITests/
 
 - [DEVELOPMENT.md](DEVELOPMENT.md): setup, architecture, validation, performance harnesses, and contribution hygiene
 - [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md): current implementation status and roadmap
+- [RELEASING.md](RELEASING.md): Developer ID, notarization, Sparkle, and GitHub Releases/Appcast operations
 - [AGENTS.md](AGENTS.md): repository constraints for coding agents
 
 ## Public repository hygiene

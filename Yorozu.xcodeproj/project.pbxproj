@@ -41,6 +41,8 @@
 		B10000000000000000000020 /* CodexAppServerServices.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000001E /* CodexAppServerServices.swift */; };
 		B10000000000000000000021 /* CommandInputModeSwitching.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000001F /* CommandInputModeSwitching.swift */; };
 		B10000000000000000000022 /* KeepAwake.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000020 /* KeepAwake.swift */; };
+		B10000000000000000000023 /* AppUpdateController.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000021 /* AppUpdateController.swift */; };
+		B10000000000000000000024 /* Sparkle in Frameworks */ = {isa = PBXBuildFile; productRef = D10000000000000000000003 /* Sparkle */; };
 		B20000000000000000000001 /* SearchScorerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000001 /* SearchScorerTests.swift */; };
 		B20000000000000000000002 /* ApplicationDiscoveryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000002 /* ApplicationDiscoveryTests.swift */; };
 		B20000000000000000000003 /* LauncherStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000003 /* LauncherStoreTests.swift */; };
@@ -49,6 +51,7 @@
 		B20000000000000000000006 /* AIChatTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000006 /* AIChatTests.swift */; };
 		B20000000000000000000007 /* CommandInputModeSwitchingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000007 /* CommandInputModeSwitchingTests.swift */; };
 		B20000000000000000000008 /* KeepAwakeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000008 /* KeepAwakeTests.swift */; };
+		B20000000000000000000009 /* AppUpdateControllerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000009 /* AppUpdateControllerTests.swift */; };
 		B30000000000000000000001 /* YorozuUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A30000000000000000000001 /* YorozuUITests.swift */; };
 /* End PBXBuildFile section */
 
@@ -102,6 +105,8 @@
 		A1000000000000000000001E /* CodexAppServerServices.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodexAppServerServices.swift; sourceTree = "<group>"; };
 		A1000000000000000000001F /* CommandInputModeSwitching.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CommandInputModeSwitching.swift; sourceTree = "<group>"; };
 		A10000000000000000000020 /* KeepAwake.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeepAwake.swift; sourceTree = "<group>"; };
+		A10000000000000000000021 /* AppUpdateController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppUpdateController.swift; sourceTree = "<group>"; };
+		A10000000000000000000022 /* Info-Release.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = "Info-Release.plist"; sourceTree = "<group>"; };
 		A20000000000000000000001 /* SearchScorerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SearchScorerTests.swift; sourceTree = "<group>"; };
 		A20000000000000000000002 /* ApplicationDiscoveryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ApplicationDiscoveryTests.swift; sourceTree = "<group>"; };
 		A20000000000000000000003 /* LauncherStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LauncherStoreTests.swift; sourceTree = "<group>"; };
@@ -110,6 +115,7 @@
 		A20000000000000000000006 /* AIChatTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AIChatTests.swift; sourceTree = "<group>"; };
 		A20000000000000000000007 /* CommandInputModeSwitchingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CommandInputModeSwitchingTests.swift; sourceTree = "<group>"; };
 		A20000000000000000000008 /* KeepAwakeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeepAwakeTests.swift; sourceTree = "<group>"; };
+		A20000000000000000000009 /* AppUpdateControllerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppUpdateControllerTests.swift; sourceTree = "<group>"; };
 		A30000000000000000000001 /* YorozuUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = YorozuUITests.swift; sourceTree = "<group>"; };
 		A40000000000000000000001 /* Yorozu.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Yorozu.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		A40000000000000000000002 /* YorozuTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = YorozuTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -125,6 +131,7 @@
 			files = (
 				B10000000000000000000013 /* KeyboardShortcuts in Frameworks */,
 				B10000000000000000000014 /* GRDB in Frameworks */,
+				B10000000000000000000024 /* Sparkle in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -226,6 +233,7 @@
 				A1000000000000000000001E /* CodexAppServerServices.swift */,
 				A1000000000000000000001F /* CommandInputModeSwitching.swift */,
 				A10000000000000000000020 /* KeepAwake.swift */,
+				A10000000000000000000021 /* AppUpdateController.swift */,
 			);
 			name = Platform;
 			path = Yorozu/Platform;
@@ -237,6 +245,7 @@
 				A10000000000000000000011 /* Localizable.xcstrings */,
 				A10000000000000000000012 /* Assets.xcassets */,
 				A10000000000000000000013 /* AppIcon.icon */,
+				A10000000000000000000022 /* Info-Release.plist */,
 			);
 			name = Resources;
 			path = Yorozu/Resources;
@@ -253,6 +262,7 @@
 				A20000000000000000000006 /* AIChatTests.swift */,
 				A20000000000000000000007 /* CommandInputModeSwitchingTests.swift */,
 				A20000000000000000000008 /* KeepAwakeTests.swift */,
+				A20000000000000000000009 /* AppUpdateControllerTests.swift */,
 			);
 			path = YorozuTests;
 			sourceTree = "<group>";
@@ -293,6 +303,7 @@
 			packageProductDependencies = (
 				D10000000000000000000001 /* KeyboardShortcuts */,
 				D10000000000000000000002 /* GRDB */,
+				D10000000000000000000003 /* Sparkle */,
 			);
 			productName = Yorozu;
 			productReference = A40000000000000000000001 /* Yorozu.app */;
@@ -369,6 +380,7 @@
 			packageReferences = (
 				D20000000000000000000001 /* XCRemoteSwiftPackageReference "KeyboardShortcuts" */,
 				D20000000000000000000002 /* XCRemoteSwiftPackageReference "GRDB.swift" */,
+				D20000000000000000000003 /* XCRemoteSwiftPackageReference "Sparkle" */,
 			);
 			productRefGroup = F20000000000000000000002 /* Products */;
 			projectDirPath = "";
@@ -442,6 +454,7 @@
 				B10000000000000000000020 /* CodexAppServerServices.swift in Sources */,
 				B10000000000000000000021 /* CommandInputModeSwitching.swift in Sources */,
 				B10000000000000000000022 /* KeepAwake.swift in Sources */,
+				B10000000000000000000023 /* AppUpdateController.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -457,6 +470,7 @@
 				B20000000000000000000006 /* AIChatTests.swift in Sources */,
 				B20000000000000000000007 /* CommandInputModeSwitchingTests.swift in Sources */,
 				B20000000000000000000008 /* KeepAwakeTests.swift in Sources */,
+				B20000000000000000000009 /* AppUpdateControllerTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -525,18 +539,15 @@
 			buildSettings = {
 				ARCHS = arm64;
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
-				CODE_SIGN_IDENTITY = "-";
+				CODE_SIGN_IDENTITY = "Developer ID Application";
 				CODE_SIGN_STYLE = Manual;
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = "";
 				ENABLE_APP_SANDBOX = NO;
-				ENABLE_HARDENED_RUNTIME = NO;
-				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_KEY_CFBundleDisplayName = Yorozu;
-				INFOPLIST_KEY_CFBundleDevelopmentRegion = en;
-				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.productivity";
-				INFOPLIST_KEY_LSUIElement = YES;
+				ENABLE_HARDENED_RUNTIME = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = "Yorozu/Resources/Info-Release.plist";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/../Frameworks",
@@ -711,6 +722,14 @@
 				version = 7.11.1;
 			};
 		};
+		D20000000000000000000003 /* XCRemoteSwiftPackageReference "Sparkle" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/sparkle-project/Sparkle";
+			requirement = {
+				kind = exactVersion;
+				version = 2.9.6;
+			};
+		};
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
@@ -723,6 +742,11 @@
 			isa = XCSwiftPackageProductDependency;
 			package = D20000000000000000000002 /* XCRemoteSwiftPackageReference "GRDB.swift" */;
 			productName = GRDB;
+		};
+		D10000000000000000000003 /* Sparkle */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = D20000000000000000000003 /* XCRemoteSwiftPackageReference "Sparkle" */;
+			productName = Sparkle;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

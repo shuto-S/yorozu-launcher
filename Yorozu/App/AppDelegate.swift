@@ -440,6 +440,14 @@ private actor UITestAIChatProvider: AIChatProvider, OpenAIAPIKeyManaging {
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private let logger = Logger(subsystem: "com.yorozu.app", category: "lifecycle")
 
+    private static let isDebugBuild: Bool = {
+        #if DEBUG
+        true
+        #else
+        false
+        #endif
+    }()
+
     private lazy var environment: AppEnvironment = {
         let arguments = ProcessInfo.processInfo.arguments
         if arguments.contains("--ui-testing")
@@ -614,6 +622,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         activityManager: environment.sleepActivityManager,
         observesSystemNotifications: environment.usesLivePasteIntegration
     )
+    private lazy var appUpdateController = AppUpdateController(
+        isDebugBuild: Self.isDebugBuild,
+        isUITesting: ProcessInfo.processInfo.arguments.contains("--ui-testing")
+            || ProcessInfo.processInfo.arguments.contains("--ui-testing-settings")
+    )
 
     lazy var viewModel = LauncherViewModel(
         catalog: catalog,
@@ -682,6 +695,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menuBarController = MenuBarController(
             viewModel: viewModel,
             keepAwakeController: keepAwakeController,
+            appUpdateController: appUpdateController,
             openPalette: { [weak self] in
                 self?.paletteController.toggle(route: .root)
             },

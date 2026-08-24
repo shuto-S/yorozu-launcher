@@ -23,8 +23,13 @@ Dependencies are resolved with Swift Package Manager and pinned in `Package.reso
 |---|---:|---|
 | KeyboardShortcuts | 3.0.1 | User-configurable global shortcuts |
 | GRDB.swift | 7.11.1 | SQLite migrations and persistence |
+| Sparkle | 2.9.6 | Release-only signed application updates |
 
 Do not add or update dependencies without reviewing the need, license, supported macOS versions, and effect on launch time and resident memory.
+
+Sparkle is linked into the app but its updater is never started in Debug or UI-test
+builds. Only a non-test Release build with a valid HTTPS `SUFeedURL` and non-empty
+`SUPublicEDKey` starts the scheduler. Normal Root Search does not perform an update check.
 
 ## Local setup
 
@@ -105,6 +110,7 @@ Yorozu/
 YorozuTests/    Unit and integration tests
 YorozuUITests/  macOS UI automation
 Config/         Shared Debug defaults and local signing template
+.github/        CI and tag-driven release automation
 ```
 
 ## Runtime architecture
@@ -161,6 +167,19 @@ Privacy invariants:
   integration only when the provider is selected or used.
 - AI message bodies, attachments, and prompt drafts are not stored in SQLite.
 - Yorozu does not implement cloud sync or telemetry.
+- Debug and UI-test builds do not start Sparkle or load the external appcast.
+
+### Application updates
+
+`AppUpdateController` owns Sparkle's standard updater and exists outside the latency-
+sensitive launcher search path. Release builds use the Info.plist feed URL and EdDSA
+public key; Debug builds contain neither entry. The menu-bar **Check for Updates…** item
+uses Sparkle's standard UI, while **View Latest Release…** provides a recovery path when
+the feed or network cannot be used.
+
+Tag-driven Developer ID signing, notarization, GitHub Release creation, EdDSA appcast
+generation, and GitHub Pages deployment are documented in [RELEASING.md](RELEASING.md).
+No private release credential belongs in the repository.
 
 Clipboard maintenance is intentionally amortized. Non-image captures perform full database retention maintenance every 32 writes; in-memory pruning still occurs for each capture. Image captures perform full maintenance immediately.
 
