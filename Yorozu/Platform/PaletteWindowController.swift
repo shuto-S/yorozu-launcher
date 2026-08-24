@@ -129,10 +129,14 @@ extension EnvironmentValues {
 
 private struct PaletteAccessibilityHost: View {
     var viewModel: LauncherViewModel
+    let appUpdateController: AppUpdateController?
     let overrides: AccessibilityDisplayOverrides
 
     var body: some View {
-        PaletteView(viewModel: viewModel)
+        PaletteView(
+            viewModel: viewModel,
+            appUpdateController: appUpdateController
+        )
             .environment(
                 \.yorozuReduceTransparencyOverride,
                 overrides.reduceTransparency
@@ -211,7 +215,11 @@ final class PaletteWindowController: NSWindowController, NSWindowDelegate {
     private var previousApplication: NSRunningApplication?
     private var keyEventMonitor: Any?
 
-    init(viewModel: LauncherViewModel, pasteCoordinator: PasteCoordinator) {
+    init(
+        viewModel: LauncherViewModel,
+        pasteCoordinator: PasteCoordinator,
+        appUpdateController: AppUpdateController? = nil
+    ) {
         self.viewModel = viewModel
         self.pasteCoordinator = pasteCoordinator
         let arguments = ProcessInfo.processInfo.arguments
@@ -243,6 +251,7 @@ final class PaletteWindowController: NSWindowController, NSWindowDelegate {
         panel.contentView = NSHostingView(
             rootView: PaletteAccessibilityHost(
                 viewModel: viewModel,
+                appUpdateController: appUpdateController,
                 overrides: accessibilityOverrides
             )
                 .environment(\.locale, Locale(identifier: "en"))

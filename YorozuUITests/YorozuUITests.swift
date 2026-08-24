@@ -138,6 +138,31 @@ final class YorozuUITests: XCTestCase {
     }
 
     @MainActor
+    func testGeneralSettingsExposeSoftwareUpdateControls() {
+        continueAfterFailure = false
+        let application = XCUIApplication()
+        application.launchArguments = ["--ui-testing-settings", "--ui-testing-sticky"]
+        application.launch()
+
+        XCTAssertTrue(
+            application.descendants(matching: .any)["launcher.settings"]
+                .waitForExistence(timeout: 5)
+        )
+
+        let checkForUpdates = application.buttons[
+            "settings.software-update.check"
+        ]
+        XCTAssertTrue(checkForUpdates.exists)
+        XCTAssertFalse(checkForUpdates.isEnabled)
+        XCTAssertTrue(
+            application.buttons["settings.software-update.latest-release"].exists
+        )
+        XCTAssertTrue(
+            application.staticTexts["settings.software-update.version"].exists
+        )
+    }
+
+    @MainActor
     func testAISettingsUsesProviderTabsInsideExistingPanel() {
         continueAfterFailure = false
         let application = XCUIApplication()

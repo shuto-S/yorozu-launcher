@@ -674,7 +674,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }()
     private lazy var paletteController = PaletteWindowController(
         viewModel: viewModel,
-        pasteCoordinator: pasteCoordinator
+        pasteCoordinator: pasteCoordinator,
+        appUpdateController: appUpdateController
     )
     private var menuBarController: MenuBarController?
     private var applicationDirectoryMonitor: ApplicationDirectoryMonitor?

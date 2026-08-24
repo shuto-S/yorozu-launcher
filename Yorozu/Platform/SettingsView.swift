@@ -45,6 +45,7 @@ private enum SettingsDestination: String, CaseIterable, Identifiable {
 
 struct SettingsView: View {
     var viewModel: LauncherViewModel
+    var appUpdateController: AppUpdateController?
     @State private var selection: SettingsDestination? = .general
     @FocusState private var isSidebarFocused: Bool
 
@@ -87,7 +88,10 @@ struct SettingsView: View {
     private var settingsDetail: some View {
         switch selection ?? .general {
         case .general:
-            GeneralSettingsView(viewModel: viewModel)
+            GeneralSettingsView(
+                viewModel: viewModel,
+                appUpdateController: appUpdateController
+            )
         case .keepAwake:
             KeepAwakeSettingsView(controller: viewModel.keepAwakeController)
         case .clipboard:
@@ -689,10 +693,15 @@ private struct AIProviderConnectionSettingsView: View {
 
 private struct GeneralSettingsView: View {
     var viewModel: LauncherViewModel
+    var appUpdateController: AppUpdateController?
     @ObservedObject private var inputModeController: CommandInputModeController
 
-    init(viewModel: LauncherViewModel) {
+    init(
+        viewModel: LauncherViewModel,
+        appUpdateController: AppUpdateController?
+    ) {
         self.viewModel = viewModel
+        self.appUpdateController = appUpdateController
         inputModeController = viewModel.commandInputModeController
     }
 
@@ -815,6 +824,60 @@ private struct GeneralSettingsView: View {
             } footer: {
                 Text("settings.general.index-footer")
             }
+
+            Section {
+                LabeledContent("Installed Version") {
+                    Text(installedVersion)
+                        .foregroundStyle(.secondary)
+                        .monospacedDigit()
+                        .accessibilityIdentifier(
+                            "settings.software-update.version"
+                        )
+                }
+
+                HStack {
+                    Button {
+                        appUpdateController?.checkForUpdates()
+                    } label: {
+                        Label(
+                            String(localized: "menu.check-for-updates"),
+                            systemImage: "arrow.down.circle"
+                        )
+                    }
+                    .disabled(appUpdateController?.canCheckForUpdates != true)
+                    .accessibilityIdentifier(
+                        "settings.software-update.check"
+                    )
+
+                    Button {
+                        if let appUpdateController {
+                            appUpdateController.openLatestRelease()
+                        } else {
+                            NSWorkspace.shared.open(
+                                AppUpdateController.latestReleaseURL
+                            )
+                        }
+                    } label: {
+                        Label(
+                            String(localized: "menu.view-latest-release"),
+                            systemImage: "safari"
+                        )
+                    }
+                    .accessibilityIdentifier(
+                        "settings.software-update.latest-release"
+                    )
+                }
+
+                if appUpdateController?.canCheckForUpdates != true {
+                    Text("Update checks are available in signed Release builds.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            } header: {
+                Text("Software Update")
+            } footer: {
+                Text("Yorozu verifies updates from its signed GitHub Releases feed before installation.")
+            }
         }
         .formStyle(.grouped)
         .scrollContentBackground(.hidden)
@@ -829,6 +892,26 @@ private struct GeneralSettingsView: View {
             )
         ) { _ in
             inputModeController.refreshAuthorization()
+        }
+    }
+
+    private var installedVersion: String {
+        let version = Bundle.main.object(
+            forInfoDictionaryKey: "CFBundleShortVersionString"
+        ) as? String
+        let build = Bundle.main.object(
+            forInfoDictionaryKey: "CFBundleVersion"
+        ) as? String
+
+        return switch (version, build) {
+        case let (.some(version), .some(build)):
+            "\(version) (\(build))"
+        case let (.some(version), .none):
+            version
+        case let (.none, .some(build)):
+            build
+        case (.none, .none):
+            "Unknown"
         }
     }
 

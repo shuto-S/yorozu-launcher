@@ -3,6 +3,7 @@ import SwiftUI
 
 struct PaletteView: View {
     @Bindable var viewModel: LauncherViewModel
+    var appUpdateController: AppUpdateController?
 
     var body: some View {
         ZStack(alignment: .bottomTrailing) {
@@ -128,7 +129,10 @@ struct PaletteView: View {
     @ViewBuilder
     private var results: some View {
         if viewModel.route == .settings {
-            SettingsView(viewModel: viewModel)
+            SettingsView(
+                viewModel: viewModel,
+                appUpdateController: appUpdateController
+            )
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else if viewModel.route == .aliases {
             aliasesSplitView
