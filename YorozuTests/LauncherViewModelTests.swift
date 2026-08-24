@@ -287,6 +287,33 @@ final class LauncherViewModelTests: XCTestCase {
         )
     }
 
+    func testPaletteDeactivationPolicyKeepsSettingsVisible() {
+        XCTAssertFalse(
+            PaletteDeactivationPolicy.shouldHide(
+                automaticallyHides: true,
+                route: .settings
+            )
+        )
+        XCTAssertTrue(
+            PaletteDeactivationPolicy.shouldHide(
+                automaticallyHides: true,
+                route: .root
+            )
+        )
+        XCTAssertTrue(
+            PaletteDeactivationPolicy.shouldHide(
+                automaticallyHides: true,
+                route: .clipboard
+            )
+        )
+        XCTAssertFalse(
+            PaletteDeactivationPolicy.shouldHide(
+                automaticallyHides: false,
+                route: .root
+            )
+        )
+    }
+
     func testPalettePresentationPerformanceReportUsesNearestRankPercentiles() {
         let report = PalettePresentationPerformanceReport(
             samples: Array(1...100).map(Double.init)

@@ -31,6 +31,15 @@ enum PaletteAnimationPolicy {
     }
 }
 
+enum PaletteDeactivationPolicy {
+    static func shouldHide(
+        automaticallyHides: Bool,
+        route: PaletteRoute
+    ) -> Bool {
+        automaticallyHides && route != .settings
+    }
+}
+
 enum PaletteKeyEventAction: Equatable {
     case passThrough
     case handleCommandShortcut
@@ -215,6 +224,13 @@ final class PaletteWindowController: NSWindowController, NSWindowDelegate {
     private var previousApplication: NSRunningApplication?
     private var keyEventMonitor: Any?
 
+    private var shouldHideWhenInactive: Bool {
+        PaletteDeactivationPolicy.shouldHide(
+            automaticallyHides: automaticallyHides,
+            route: viewModel.route
+        )
+    }
+
     init(
         viewModel: LauncherViewModel,
         pasteCoordinator: PasteCoordinator,
@@ -238,7 +254,10 @@ final class PaletteWindowController: NSWindowController, NSWindowDelegate {
         panel.titlebarAppearsTransparent = true
         panel.isMovableByWindowBackground = true
         panel.isReleasedWhenClosed = false
-        panel.hidesOnDeactivate = automaticallyHides
+        // Route-aware dismissal is handled by the delegate and application
+        // notifications below. AppKit's automatic hiding cannot distinguish
+        // Settings from the palette's transient routes.
+        panel.hidesOnDeactivate = false
         panel.level = .floating
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .transient]
         panel.animationBehavior = PaletteAnimationPolicy.behavior(
@@ -525,7 +544,7 @@ final class PaletteWindowController: NSWindowController, NSWindowDelegate {
     #endif
 
     func windowDidResignKey(_ notification: Notification) {
-        guard automaticallyHides,
+        guard shouldHideWhenInactive,
               window?.isVisible == true,
               window?.attachedSheet == nil else {
             return
@@ -535,7 +554,9 @@ final class PaletteWindowController: NSWindowController, NSWindowDelegate {
 
     @objc
     private func applicationDidResignActive(_ notification: Notification) {
-        guard automaticallyHides, window?.isVisible == true else { return }
+        guard shouldHideWhenInactive, window?.isVisible == true else {
+            return
+        }
         hide(restorePreviousApplication: false)
     }
 

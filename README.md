@@ -86,7 +86,15 @@ cp Config/Local.example.xcconfig Config/Local.xcconfig
 After changing the signature, macOS may require you to remove the stale Yorozu entry from
 Privacy & Security → Accessibility and add the current build again. Yorozu never changes
 TCC data automatically. The General settings screen shows the current permission state
-and links to the relevant System Settings pane.
+for the running executable, links to the relevant System Settings pane, and can reveal the
+exact build that must be authorized. An entry that is switched on for an older Debug or
+ad hoc build does not authorize the current app.
+
+Published updates keep `com.yorozu.app` and the same Developer ID team so macOS can retain
+the existing Accessibility grant. The release workflow rejects an unexpected bundle ID,
+team, or cdhash-only designated requirement before publication. Moving between a local
+Apple Development build and a published Developer ID build is an identity change and can
+still require one intentional re-authorization.
 
 ## Validation
 

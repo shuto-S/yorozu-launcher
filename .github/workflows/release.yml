@@ -196,6 +196,31 @@ jobs:
           set -euo pipefail
           APP_PATH="$RUNNER_TEMP/export/Yorozu.app"
           codesign --verify --deep --strict --verbose=2 "$APP_PATH"
+          SIGNING_INFORMATION="$(codesign --display --verbose=4 "$APP_PATH" 2>&1)"
+          APP_IDENTIFIER="$(printf '%s\n' "$SIGNING_INFORMATION" \
+            | sed -n 's/^Identifier=//p' \
+            | head -n 1)"
+          APP_TEAM_IDENTIFIER="$(printf '%s\n' "$SIGNING_INFORMATION" \
+            | sed -n 's/^TeamIdentifier=//p' \
+            | head -n 1)"
+          DESIGNATED_REQUIREMENT="$(codesign --display --requirements - "$APP_PATH" 2>&1)"
+          if [[ "$APP_IDENTIFIER" != "com.yorozu.app" ]]; then
+            echo "The release bundle identifier would change the macOS permission identity." >&2
+            exit 1
+          fi
+          if [[ "$APP_TEAM_IDENTIFIER" != "$APPLE_TEAM_ID" ]]; then
+            echo "The release signing team would change the macOS permission identity." >&2
+            exit 1
+          fi
+          if [[ "$DESIGNATED_REQUIREMENT" == *"cdhash"* ]]; then
+            echo "The release has an unstable cdhash-only designated requirement." >&2
+            exit 1
+          fi
+          if [[ "$DESIGNATED_REQUIREMENT" != *'identifier "com.yorozu.app"'* \
+            || "$DESIGNATED_REQUIREMENT" != *"subject.OU] = $APPLE_TEAM_ID"* ]]; then
+            echo "The release designated requirement is not stable for Yorozu and its Developer ID team." >&2
+            exit 1
+          fi
           EMBEDDED_KEY="$(/usr/libexec/PlistBuddy -c 'Print :SUPublicEDKey' "$APP_PATH/Contents/Info.plist")"
           FEED_URL="$(/usr/libexec/PlistBuddy -c 'Print :SUFeedURL' "$APP_PATH/Contents/Info.plist")"
           if [[ "$EMBEDDED_KEY" != "$SPARKLE_PUBLIC_KEY" ]]; then

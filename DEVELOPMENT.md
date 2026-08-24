@@ -72,10 +72,21 @@ rebuild. Use an Apple Development identity before diagnosing Accessibility-depen
 features. Input mode switching intentionally requests Accessibility only: that privilege
 covers both listening to Command events and posting Eisu/Kana events.
 
-The General settings screen deliberately exposes only the feature toggle, current
-Accessibility state, a link to the relevant System Settings pane, and a permission refresh
-action. Code-signing and event-tap details remain implementation concerns rather than
-normal product settings.
+Treat the permission state reported by `AXIsProcessTrusted()` in the running Yorozu process
+as authoritative. System Settings can display an enabled row for a different Yorozu build
+with the same display name. When that happens, remove the stale row, reveal the current
+build from General settings, and add that exact app once. Do not use `tccutil reset` in
+development scripts or application code.
+
+Apple Development and Developer ID Application are different TCC identities even when
+they share `com.yorozu.app`. Rebuilding repeatedly with one stable Apple Development
+identity preserves local development authorization; published updates preserve the
+Developer ID identity separately.
+
+The General settings screen deliberately exposes only the feature toggle, current-build
+Accessibility state, System Settings and current-build recovery actions, and a permission
+refresh action. An ad hoc warning appears only when that signing problem is detected.
+Event-tap details remain implementation concerns rather than normal product settings.
 
 While input mode switching is enabled and authorized, Yorozu holds a user-initiated
 `ProcessInfo` activity that allows idle system sleep. This keeps the listen-only event tap

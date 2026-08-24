@@ -2,6 +2,36 @@ import XCTest
 
 final class YorozuUITests: XCTestCase {
     @MainActor
+    func testSettingsRemainVisibleWhenApplicationDeactivates() {
+        continueAfterFailure = false
+        let application = XCUIApplication()
+        application.launchArguments = ["--ui-testing-settings"]
+        application.launch()
+
+        let settings = application.descendants(matching: .any)["launcher.settings"]
+        XCTAssertTrue(settings.waitForExistence(timeout: 5))
+
+        XCUIApplication(bundleIdentifier: "com.apple.finder").activate()
+
+        XCTAssertTrue(settings.waitForExistence(timeout: 2))
+    }
+
+    @MainActor
+    func testRootPaletteClosesWhenApplicationDeactivates() {
+        continueAfterFailure = false
+        let application = XCUIApplication()
+        application.launchArguments = ["--ui-testing"]
+        application.launch()
+
+        let searchField = application.searchFields["launcher.search"]
+        XCTAssertTrue(searchField.waitForExistence(timeout: 5))
+
+        XCUIApplication(bundleIdentifier: "com.apple.finder").activate()
+
+        XCTAssertTrue(searchField.waitForNonExistence(timeout: 2))
+    }
+
+    @MainActor
     func testLauncherShowsSearchField() {
         continueAfterFailure = false
         let application = XCUIApplication()
@@ -96,6 +126,15 @@ final class YorozuUITests: XCTestCase {
         XCTAssertGreaterThanOrEqual(
             application.buttons.matching(identifier: "Request Access").count,
             1
+        )
+        XCTAssertTrue(
+            application.staticTexts[
+                "settings.input-mode.permission-guidance"
+            ].exists
+        )
+        XCTAssertTrue(
+            application.buttons["settings.input-mode.reveal-current-build"]
+                .exists
         )
         XCTAssertFalse(application.staticTexts["Event Monitor"].exists)
         XCTAssertFalse(application.staticTexts["Code Signing"].exists)

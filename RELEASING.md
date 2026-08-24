@@ -94,6 +94,9 @@ Before announcing a release, verify all of the following from the workflow artif
 a clean Mac user account:
 
 - `codesign --verify --deep --strict` succeeds;
+- the signed identifier is `com.yorozu.app`, the TeamIdentifier matches `APPLE_TEAM_ID`,
+  and the designated requirement contains both without depending on a build-specific
+  cdhash;
 - `spctl --assess --type execute` accepts the app;
 - `stapler validate` succeeds;
 - the GitHub Release contains `Yorozu.app.zip`;
@@ -104,6 +107,14 @@ a clean Mac user account:
 - canceling a download leaves the installed application untouched;
 - an archive signed by another EdDSA key is rejected;
 - installing and restarting preserves Settings, SQLite, and Keychain data.
+- Accessibility granted to the previous published build remains granted after updating
+  in place, and automatic paste plus Command input-mode switching still work without a
+  second authorization.
+
+The workflow enforces the stable bundle ID, Developer ID team, and designated-requirement
+shape before notarization. Do not replace Developer ID signing with Apple Development or
+ad hoc signing in a published archive; that would create a different TCC identity even if
+the app name and bundle ID look unchanged.
 
 An update path has not been validated until two real Developer ID signed and notarized
 versions have been tested. Debug and UI-test builds never start Sparkle and do not contain

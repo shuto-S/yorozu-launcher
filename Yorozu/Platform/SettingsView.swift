@@ -756,6 +756,13 @@ private struct GeneralSettingsView: View {
                             "settings.input-mode.open-accessibility"
                         )
 
+                        Button("Reveal This Build") {
+                            inputModeController.revealCurrentBuild()
+                        }
+                        .accessibilityIdentifier(
+                            "settings.input-mode.reveal-current-build"
+                        )
+
                         Spacer()
 
                         Button("Check Again") {
@@ -767,9 +774,24 @@ private struct GeneralSettingsView: View {
                     }
 
                     if !inputModeController.isAccessibilityGranted {
-                        Text("Allow Yorozu in Accessibility to switch input modes while using other apps.")
+                        Text("Allow this copy of Yorozu in Accessibility to switch input modes while using other apps. If Yorozu already appears allowed, remove the older entry and add the build revealed below.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
+                            .accessibilityIdentifier(
+                                "settings.input-mode.permission-guidance"
+                            )
+
+                        if inputModeController.codeSigningStatus == .adHoc {
+                            Label(
+                                "This build uses an ad hoc signature. Accessibility permission may be lost after rebuilding.",
+                                systemImage: "signature"
+                            )
+                            .font(.caption)
+                            .foregroundStyle(.orange)
+                            .accessibilityIdentifier(
+                                "settings.input-mode.adhoc-warning"
+                            )
+                        }
                     } else if inputModeController.runtimeStatus == .unavailable {
                         Label(
                             "Yorozu couldn’t start input mode switching. Restart the app and check again.",
