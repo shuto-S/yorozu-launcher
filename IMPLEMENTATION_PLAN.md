@@ -92,7 +92,8 @@ The current target is:
 ### Settings and interaction
 
 - Settings integrated into the existing palette
-- General, Clipboard, AI, and Shortcuts sections
+- General, Keep Awake, Clipboard, AI, and Shortcuts sections
+- optional launch at login using the system-managed main-app login item
 - configurable shortcuts for Yorozu and feature routes
 - current-process Accessibility status
 - optional left/right Command-alone switching to Eisu/Kana, configured only in General

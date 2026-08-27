@@ -202,6 +202,27 @@ final class YorozuUITests: XCTestCase {
     }
 
     @MainActor
+    func testGeneralSettingsCanToggleLaunchAtLoginWithoutSystemChanges() {
+        continueAfterFailure = false
+        let application = XCUIApplication()
+        application.launchArguments = ["--ui-testing-settings", "--ui-testing-sticky"]
+        application.launch()
+
+        XCTAssertTrue(
+            application.descendants(matching: .any)["launcher.settings"]
+                .waitForExistence(timeout: 5)
+        )
+
+        let toggle = application.switches["settings.login-item.enabled"]
+        XCTAssertTrue(toggle.exists)
+        XCTAssertTrue(application.staticTexts["Off"].exists)
+
+        toggle.click()
+
+        XCTAssertTrue(application.staticTexts["On"].waitForExistence(timeout: 2))
+    }
+
+    @MainActor
     func testAISettingsUsesProviderTabsInsideExistingPanel() {
         continueAfterFailure = false
         let application = XCUIApplication()

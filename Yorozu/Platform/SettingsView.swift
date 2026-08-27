@@ -695,6 +695,7 @@ private struct GeneralSettingsView: View {
     var viewModel: LauncherViewModel
     var appUpdateController: AppUpdateController?
     @ObservedObject private var inputModeController: CommandInputModeController
+    private var launchAtLoginController: LaunchAtLoginController
 
     init(
         viewModel: LauncherViewModel,
@@ -703,6 +704,7 @@ private struct GeneralSettingsView: View {
         self.viewModel = viewModel
         self.appUpdateController = appUpdateController
         inputModeController = viewModel.commandInputModeController
+        launchAtLoginController = viewModel.launchAtLoginController
     }
 
     var body: some View {
@@ -728,6 +730,57 @@ private struct GeneralSettingsView: View {
                 } footer: {
                     Text("The previous database was preserved for manual recovery.")
                 }
+            }
+
+            Section {
+                Toggle(
+                    "Open Yorozu at Login",
+                    isOn: Binding(
+                        get: { launchAtLoginController.isEnabled },
+                        set: { launchAtLoginController.setEnabled($0) }
+                    )
+                )
+                .disabled(launchAtLoginController.isUpdating)
+                .accessibilityIdentifier("settings.login-item.enabled")
+
+                LabeledContent("Status") {
+                    Text(launchAtLoginController.status.title)
+                        .foregroundStyle(loginItemStatusColor)
+                        .accessibilityIdentifier("settings.login-item.status")
+                }
+
+                if launchAtLoginController.status == .requiresApproval {
+                    HStack {
+                        Button("Open Login Items Settings") {
+                            launchAtLoginController.openSystemSettings()
+                        }
+                        .accessibilityIdentifier(
+                            "settings.login-item.open-system-settings"
+                        )
+
+                        Spacer()
+
+                        Button("Check Again") {
+                            launchAtLoginController.refresh()
+                        }
+                        .accessibilityIdentifier("settings.login-item.check-again")
+                    }
+
+                    Text("Allow Yorozu in Login Items to start it automatically after you sign in.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                if let errorMessage = launchAtLoginController.errorMessage {
+                    Label(errorMessage, systemImage: "exclamationmark.triangle")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                        .accessibilityIdentifier("settings.login-item.error")
+                }
+            } header: {
+                Text("Login")
+            } footer: {
+                Text("Yorozu starts quietly in the menu bar. The launcher does not open until you use its shortcut.")
             }
 
             Section {
@@ -907,6 +960,7 @@ private struct GeneralSettingsView: View {
         .accessibilityIdentifier("settings.detail.general")
         .onAppear {
             inputModeController.refreshAuthorization()
+            launchAtLoginController.refresh()
         }
         .onReceive(
             NotificationCenter.default.publisher(
@@ -914,6 +968,18 @@ private struct GeneralSettingsView: View {
             )
         ) { _ in
             inputModeController.refreshAuthorization()
+            launchAtLoginController.refresh()
+        }
+    }
+
+    private var loginItemStatusColor: Color {
+        switch launchAtLoginController.status {
+        case .enabled:
+            .green
+        case .requiresApproval:
+            .orange
+        case .notRegistered, .unavailable:
+            .secondary
         }
     }
 

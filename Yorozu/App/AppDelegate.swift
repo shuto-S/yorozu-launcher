@@ -19,6 +19,7 @@ struct AppEnvironment {
     let monitorsApplicationDirectories: Bool
     let startsCommandInputModeSwitching: Bool
     let sleepActivityManager: any SleepActivityManaging
+    let launchAtLoginService: any LaunchAtLoginServicing
 
     static func production() -> AppEnvironment {
         let result: LauncherStoreOpenResult
@@ -44,7 +45,8 @@ struct AppEnvironment {
             isolatesShortcutSettings: false,
             monitorsApplicationDirectories: true,
             startsCommandInputModeSwitching: true,
-            sleepActivityManager: ProcessInfoSleepActivityManager()
+            sleepActivityManager: ProcessInfoSleepActivityManager(),
+            launchAtLoginService: SystemLaunchAtLoginService()
         )
     }
 
@@ -98,7 +100,8 @@ struct AppEnvironment {
             isolatesShortcutSettings: true,
             monitorsApplicationDirectories: false,
             startsCommandInputModeSwitching: false,
-            sleepActivityManager: UITestSleepActivityManager()
+            sleepActivityManager: UITestSleepActivityManager(),
+            launchAtLoginService: InMemoryLaunchAtLoginService()
         )
     }
 }
@@ -622,6 +625,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         activityManager: environment.sleepActivityManager,
         observesSystemNotifications: environment.usesLivePasteIntegration
     )
+    private lazy var launchAtLoginController = LaunchAtLoginController(
+        service: environment.launchAtLoginService,
+        // Reading Service Management state is deferred until General settings
+        // appears so normal launcher startup stays on its existing hot path.
+        initialStatus: .notRegistered
+    )
     private lazy var appUpdateController = AppUpdateController(
         isDebugBuild: Self.isDebugBuild,
         isUITesting: ProcessInfo.processInfo.arguments.contains("--ui-testing")
@@ -642,6 +651,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         aiChatViewModelStore: aiChatViewModelStore,
         translationPreferences: translationPreferences,
         keepAwakeController: keepAwakeController,
+        launchAtLoginController: launchAtLoginController,
         launcher: environment.launcher,
         storageRecoveryNotice: storeOpenResult.recoveryNotice
     )

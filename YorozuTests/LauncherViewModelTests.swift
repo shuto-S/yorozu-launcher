@@ -28,6 +28,9 @@ final class LauncherViewModelTests: XCTestCase {
         XCTAssertTrue(environment.isolatesShortcutSettings)
         XCTAssertFalse(environment.startsCommandInputModeSwitching)
         XCTAssertTrue(
+            environment.launchAtLoginService is InMemoryLaunchAtLoginService
+        )
+        XCTAssertTrue(
             temporaryDirectory.path.contains("com.yorozu.app-ui-tests-\(runID)")
         )
         XCTAssertFalse(

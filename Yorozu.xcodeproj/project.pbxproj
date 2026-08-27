@@ -42,6 +42,7 @@
 		B10000000000000000000021 /* CommandInputModeSwitching.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000001F /* CommandInputModeSwitching.swift */; };
 		B10000000000000000000022 /* KeepAwake.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000020 /* KeepAwake.swift */; };
 		B10000000000000000000023 /* AppUpdateController.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000021 /* AppUpdateController.swift */; };
+		B10000000000000000000025 /* LaunchAtLogin.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000023 /* LaunchAtLogin.swift */; };
 		B10000000000000000000024 /* Sparkle in Frameworks */ = {isa = PBXBuildFile; productRef = D10000000000000000000003 /* Sparkle */; };
 		B20000000000000000000001 /* SearchScorerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000001 /* SearchScorerTests.swift */; };
 		B20000000000000000000002 /* ApplicationDiscoveryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000002 /* ApplicationDiscoveryTests.swift */; };
@@ -52,6 +53,7 @@
 		B20000000000000000000007 /* CommandInputModeSwitchingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000007 /* CommandInputModeSwitchingTests.swift */; };
 		B20000000000000000000008 /* KeepAwakeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000008 /* KeepAwakeTests.swift */; };
 		B20000000000000000000009 /* AppUpdateControllerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000009 /* AppUpdateControllerTests.swift */; };
+		B2000000000000000000000A /* LaunchAtLoginTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000000A /* LaunchAtLoginTests.swift */; };
 		B30000000000000000000001 /* YorozuUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A30000000000000000000001 /* YorozuUITests.swift */; };
 /* End PBXBuildFile section */
 
@@ -107,6 +109,7 @@
 		A10000000000000000000020 /* KeepAwake.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeepAwake.swift; sourceTree = "<group>"; };
 		A10000000000000000000021 /* AppUpdateController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppUpdateController.swift; sourceTree = "<group>"; };
 		A10000000000000000000022 /* Info-Release.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = "Info-Release.plist"; sourceTree = "<group>"; };
+		A10000000000000000000023 /* LaunchAtLogin.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LaunchAtLogin.swift; sourceTree = "<group>"; };
 		A20000000000000000000001 /* SearchScorerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SearchScorerTests.swift; sourceTree = "<group>"; };
 		A20000000000000000000002 /* ApplicationDiscoveryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ApplicationDiscoveryTests.swift; sourceTree = "<group>"; };
 		A20000000000000000000003 /* LauncherStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LauncherStoreTests.swift; sourceTree = "<group>"; };
@@ -116,6 +119,7 @@
 		A20000000000000000000007 /* CommandInputModeSwitchingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CommandInputModeSwitchingTests.swift; sourceTree = "<group>"; };
 		A20000000000000000000008 /* KeepAwakeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeepAwakeTests.swift; sourceTree = "<group>"; };
 		A20000000000000000000009 /* AppUpdateControllerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppUpdateControllerTests.swift; sourceTree = "<group>"; };
+		A2000000000000000000000A /* LaunchAtLoginTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LaunchAtLoginTests.swift; sourceTree = "<group>"; };
 		A30000000000000000000001 /* YorozuUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = YorozuUITests.swift; sourceTree = "<group>"; };
 		A40000000000000000000001 /* Yorozu.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Yorozu.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		A40000000000000000000002 /* YorozuTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = YorozuTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -234,6 +238,7 @@
 				A1000000000000000000001F /* CommandInputModeSwitching.swift */,
 				A10000000000000000000020 /* KeepAwake.swift */,
 				A10000000000000000000021 /* AppUpdateController.swift */,
+				A10000000000000000000023 /* LaunchAtLogin.swift */,
 			);
 			name = Platform;
 			path = Yorozu/Platform;
@@ -263,6 +268,7 @@
 				A20000000000000000000007 /* CommandInputModeSwitchingTests.swift */,
 				A20000000000000000000008 /* KeepAwakeTests.swift */,
 				A20000000000000000000009 /* AppUpdateControllerTests.swift */,
+				A2000000000000000000000A /* LaunchAtLoginTests.swift */,
 			);
 			path = YorozuTests;
 			sourceTree = "<group>";
@@ -455,6 +461,7 @@
 				B10000000000000000000021 /* CommandInputModeSwitching.swift in Sources */,
 				B10000000000000000000022 /* KeepAwake.swift in Sources */,
 				B10000000000000000000023 /* AppUpdateController.swift in Sources */,
+				B10000000000000000000025 /* LaunchAtLogin.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -471,6 +478,7 @@
 				B20000000000000000000007 /* CommandInputModeSwitchingTests.swift in Sources */,
 				B20000000000000000000008 /* KeepAwakeTests.swift in Sources */,
 				B20000000000000000000009 /* AppUpdateControllerTests.swift in Sources */,
+				B2000000000000000000000A /* LaunchAtLoginTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

@@ -249,6 +249,7 @@ final class LauncherViewModel {
     let aiChatViewModelStore: AIChatViewModelStore
     let translationViewModel: TranslationViewModel
     let keepAwakeController: KeepAwakeController
+    let launchAtLoginController: LaunchAtLoginController
 
     var aiProviderPreferences: AIProviderPreferences {
         aiChatViewModelStore.providerPreferences
@@ -314,6 +315,7 @@ final class LauncherViewModel {
         aiChatViewModelStore: AIChatViewModelStore? = nil,
         translationPreferences: TranslationPreferences? = nil,
         keepAwakeController: KeepAwakeController? = nil,
+        launchAtLoginController: LaunchAtLoginController? = nil,
         launcher: any ApplicationLaunching,
         clipboardImageDecoder: any ClipboardImageDecoding = ClipboardImageDecoder(),
         storageRecoveryNotice: StorageRecoveryNotice? = nil
@@ -356,6 +358,7 @@ final class LauncherViewModel {
             activityManager: NoOpSleepActivityManager(),
             observesSystemNotifications: false
         )
+        self.launchAtLoginController = launchAtLoginController ?? .disabled()
         self.launcher = launcher
         self.clipboardImageDecoder = clipboardImageDecoder
         self.storageRecoveryNotice = storageRecoveryNotice

@@ -19,6 +19,7 @@ Yorozu is a lightweight, keyboard-first launcher for macOS. It brings applicatio
 - Claude Messages API chat with streaming and local title indexing (enable it and add an Anthropic API key in Settings)
 - Ollama chat with locally installed models discovered from the local Ollama service (enable it in Settings; no API key is required)
 - Configurable global shortcuts
+- Optional launch at login using the macOS Login Items service
 - Optional Left/Right Command-alone input-mode switching for English and Japanese
 - Keyboard-first navigation with mouse support
 - Japanese IME-safe command handling
