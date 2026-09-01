@@ -244,6 +244,7 @@ final class LauncherViewModel {
 
     let clipboardPreferences: ClipboardPreferences
     let commandInputModeController: CommandInputModeController
+    let windowControlController: WindowControlController
     let urlPreviewService: URLPreviewService
     let shortcutSettings: AppShortcutSettings
     let aiChatViewModelStore: AIChatViewModelStore
@@ -309,6 +310,7 @@ final class LauncherViewModel {
         snippetCatalog: SnippetCatalog,
         clipboardPreferences: ClipboardPreferences,
         commandInputModeController: CommandInputModeController,
+        windowControlController: WindowControlController,
         urlPreviewService: URLPreviewService,
         shortcutSettings: AppShortcutSettings = AppShortcutSettings(),
         aiChatViewModel: AIChatViewModel? = nil,
@@ -326,6 +328,7 @@ final class LauncherViewModel {
         self.snippetCatalog = snippetCatalog
         self.clipboardPreferences = clipboardPreferences
         self.commandInputModeController = commandInputModeController
+        self.windowControlController = windowControlController
         self.urlPreviewService = urlPreviewService
         self.shortcutSettings = shortcutSettings
         let resolvedAIStore: AIChatViewModelStore

@@ -21,6 +21,7 @@ Yorozu is a lightweight, keyboard-first launcher for macOS. It brings applicatio
 - Configurable global shortcuts
 - Optional launch at login using the macOS Login Items service
 - Optional Left/Right Command-alone input-mode switching for English and Japanese
+- Optional modifier-drag window moving and bottom-right resizing
 - Keyboard-first navigation with mouse support
 - Japanese IME-safe command handling
 - Native AppKit and SwiftUI interface
@@ -42,7 +43,13 @@ Feature-specific global shortcuts can be configured in Settings.
 Input Mode Switching is disabled by default. Enable it from **Settings → General** to
 use Left Command alone for English and Right Command alone for Japanese. It requires
 macOS Accessibility permission, but not a separate Input Monitoring grant. Command
-shortcuts and regular Command-clicks continue to work normally.
+shortcuts and regular Command-clicks continue to work normally. Once enabled, the
+listen-only monitor remains available while Yorozu is not the active application.
+
+Window Control is also disabled by default. Configure two different modifier-key
+combinations in **Settings → Window Control**, then hold one combination while dragging
+with the left mouse button. Move and resize gestures use Accessibility, run only while
+the feature is enabled, and allow normal idle system sleep.
 
 When Root Search recognizes a supported arithmetic expression, the result is shown as a
 copyable command. `Return` copies the result; the Action Panel also offers `Copy Result`
@@ -74,9 +81,9 @@ Open the built app from Xcode's Products group or from the corresponding Derived
 
 ### Stable local signing
 
-Automatic paste and Input Mode Switching use macOS Accessibility permission. Ad hoc
-signatures change between builds, so copy the signing template and enter your own Apple
-Development Team when testing either feature:
+Automatic paste, Input Mode Switching, and Window Control use macOS Accessibility
+permission. Ad hoc signatures change between builds, so copy the signing template and
+enter your own Apple Development Team when testing these features:
 
 ```bash
 cp Config/Local.example.xcconfig Config/Local.xcconfig

@@ -46,7 +46,8 @@ xcodebuild \
 
 ### Apple Development signing
 
-Accessibility trust is tied to the current code-signing identity. For stable automatic-paste and Command input-mode switching tests, create an ignored local override:
+Accessibility trust is tied to the current code-signing identity. For stable automatic-paste,
+Command input-mode switching, and Window Control tests, create an ignored local override:
 
 1. In Xcode, open **Settings → Accounts** and add an Apple Account.
 2. Select the account, open **Manage Certificates**, and create an **Apple Development** certificate if one is not already available.
@@ -90,9 +91,17 @@ Event-tap details remain implementation concerns rather than normal product sett
 
 While input mode switching is enabled and authorized, Yorozu holds a user-initiated
 `ProcessInfo` activity that allows idle system sleep. This keeps the listen-only event tap
-responsive when Yorozu is not frontmost without preventing the Mac from sleeping. A
-lightweight health check recreates an invalidated tap. Both are stopped immediately when
-the feature is disabled or the app terminates.
+responsive when Yorozu is not frontmost without preventing the Mac from sleeping. The
+event tap runs on its own named thread and run loop, so delivery does not depend on the
+main AppKit run loop or the application being active. A lightweight health check recreates
+an invalidated tap. Monitoring, the health check, and the activity are all stopped
+immediately when the feature is disabled or the app terminates.
+
+Window Control follows the same permission and signing rules. Its active event tap is
+created only after the feature is enabled, two distinct modifier combinations are set,
+and the current process is trusted. It listens only for modifier changes and left-mouse
+drag events, performs Accessibility work only for a matching gesture, and uses a
+user-initiated activity that still permits idle system sleep.
 
 The shared project must remain buildable without a personal Apple account. Never place a Development Team directly in `project.pbxproj`.
 

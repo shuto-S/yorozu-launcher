@@ -92,14 +92,16 @@ The current target is:
 ### Settings and interaction
 
 - Settings integrated into the existing palette
-- General, Keep Awake, Clipboard, AI, and Shortcuts sections
+- General, Window Control, Keep Awake, Clipboard, AI, and Shortcuts sections
 - optional launch at login using the system-managed main-app login item
 - configurable shortcuts for Yorozu and feature routes
 - current-process Accessibility status
 - optional left/right Command-alone switching to Eisu/Kana, configured only in General
+- optional modifier-drag window moving and bottom-right resizing, configured in Window Control
 - permission-first Input Mode Switching settings limited to enablement, Accessibility
   status, System Settings access, and manual permission refresh
-- windowless background monitoring protected from App Nap, with automatic event-tap recovery
+- windowless background monitoring on a dedicated run-loop thread, protected from App Nap,
+  with automatic event-tap recovery
 - keyboard-first operation with mouse-accessible primary actions
 - Japanese IME marked-text handling in search and action fields
 - outside-click dismissal and menu-bar restart

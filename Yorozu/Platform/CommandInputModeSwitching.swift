@@ -169,8 +169,7 @@ struct CommandInputModeStateMachine: Sendable {
     }
 }
 
-@MainActor
-protocol CommandInputModeEventPosting: AnyObject {
+protocol CommandInputModeEventPosting: AnyObject, Sendable {
     @discardableResult
     func post(_ action: CommandInputModeAction) -> Bool
 }
@@ -269,8 +268,8 @@ final class NoOpCommandInputModeBackgroundActivityManager:
     }
 }
 
-@MainActor
-final class SystemCommandInputModeEventPoster: CommandInputModeEventPosting {
+final class SystemCommandInputModeEventPoster:
+    CommandInputModeEventPosting, @unchecked Sendable {
     func post(_ action: CommandInputModeAction) -> Bool {
         let keyCode = action.keyCode
         guard let source = CGEventSource(stateID: .hidSystemState),
@@ -384,152 +383,286 @@ final class SystemCommandInputModeCodeSigningStatusProvider:
     }
 }
 
-@MainActor
-final class CommandInputModeMonitor: CommandInputModeMonitoring {
-    private let eventPoster: any CommandInputModeEventPosting
-    private var eventTap: CFMachPort?
-    private var runLoopSource: CFRunLoopSource?
-    private var stateMachine = CommandInputModeStateMachine()
-    private var eventTapGeneration: UInt = 0
-    var diagnosticsDidChange: (() -> Void)?
-    private(set) var status: CommandInputModeMonitorStatus = .stopped
-    private(set) var lastCommandEventAt: Date?
-    private(set) var lastAction: CommandInputModeAction?
-    private(set) var lastActionAt: Date?
-    private(set) var lastPostCreatedEvents: Bool?
+private struct CommandInputModeMonitorDiagnostics: Sendable {
+    let sequence: UInt64
+    let status: CommandInputModeMonitorStatus
+    let lastCommandEventAt: Date?
+    let lastAction: CommandInputModeAction?
+    let lastActionAt: Date?
+    let lastPostCreatedEvents: Bool?
+}
 
-    init(eventPoster: any CommandInputModeEventPosting = SystemCommandInputModeEventPoster()) {
+private final class CommandInputModeEventTapWorker: @unchecked Sendable {
+    private final class StartResult: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value: Bool?
+
+        func complete(_ result: Bool) {
+            lock.lock()
+            value = result
+            lock.unlock()
+        }
+
+        func read() -> Bool? {
+            lock.lock()
+            defer { lock.unlock() }
+            return value
+        }
+    }
+
+    private static let eventMask: CGEventMask = [
+        CGEventType.flagsChanged,
+        .keyDown,
+        .keyUp,
+        .leftMouseDown,
+        .leftMouseUp,
+        .leftMouseDragged,
+        .rightMouseDown,
+        .rightMouseUp,
+        .rightMouseDragged,
+        .otherMouseDown,
+        .otherMouseUp,
+        .otherMouseDragged,
+        .scrollWheel,
+    ].reduce(CGEventMask(0)) {
+        $0 | (CGEventMask(1) << CGEventMask($1.rawValue))
+    }
+
+    private let lock = NSLock()
+    private let eventPoster: any CommandInputModeEventPosting
+    private let diagnosticsHandler: @Sendable (
+        CommandInputModeMonitorDiagnostics
+    ) -> Void
+    private var runLoop: CFRunLoop?
+    private var eventTap: CFMachPort?
+    private var thread: Thread?
+    private var running = false
+    private var stopRequested = false
+    private var status: CommandInputModeMonitorStatus = .stopped
+    private var diagnosticsSequence: UInt64 = 0
+    private var lastCommandEventAt: Date?
+    private var lastAction: CommandInputModeAction?
+    private var lastActionAt: Date?
+    private var lastPostCreatedEvents: Bool?
+    private var stateMachine = CommandInputModeStateMachine()
+
+    init(
+        eventPoster: any CommandInputModeEventPosting,
+        diagnosticsHandler: @escaping @Sendable (
+            CommandInputModeMonitorDiagnostics
+        ) -> Void
+    ) {
         self.eventPoster = eventPoster
+        self.diagnosticsHandler = diagnosticsHandler
     }
 
     var isRunning: Bool {
-        guard let eventTap else { return false }
-        return CFMachPortIsValid(eventTap)
-            && CGEvent.tapIsEnabled(tap: eventTap)
+        lock.lock()
+        defer { lock.unlock() }
+        return running
+    }
+
+    var diagnostics: CommandInputModeMonitorDiagnostics {
+        lock.lock()
+        defer { lock.unlock() }
+        return makeDiagnosticsLocked()
     }
 
     func start() -> Bool {
-        if isRunning {
-            status = .running
+        lock.lock()
+        if running {
+            lock.unlock()
             return true
         }
-        if eventTap != nil || runLoopSource != nil {
-            tearDownEventTap()
-        }
-
-        let eventTypes: [CGEventType] = [
-            .flagsChanged,
-            .keyDown,
-            .keyUp,
-            .leftMouseDown,
-            .leftMouseUp,
-            .leftMouseDragged,
-            .rightMouseDown,
-            .rightMouseUp,
-            .rightMouseDragged,
-            .otherMouseDown,
-            .otherMouseUp,
-            .otherMouseDragged,
-            .scrollWheel,
-        ]
-        var eventMask: CGEventMask = 0
-        for eventType in eventTypes {
-            eventMask |= CGEventMask(1) << CGEventMask(eventType.rawValue)
-        }
-
-        let userInfo = Unmanaged.passUnretained(self).toOpaque()
-        guard let tap = CGEvent.tapCreate(
-            tap: .cgSessionEventTap,
-            place: .headInsertEventTap,
-            options: .listenOnly,
-            eventsOfInterest: eventMask,
-            callback: { _, type, event, userInfo in
-                guard let userInfo else {
-                    return Unmanaged.passUnretained(event)
-                }
-                let monitor = Unmanaged<CommandInputModeMonitor>
-                    .fromOpaque(userInfo)
-                    .takeUnretainedValue()
-                MainActor.assumeIsolated {
-                    monitor.handle(type: type, event: event)
-                }
-                return Unmanaged.passUnretained(event)
-            },
-            userInfo: userInfo
-        ) else {
-            status = .creationFailed
-            notifyDiagnosticsDidChange()
+        guard thread == nil else {
+            lock.unlock()
             return false
         }
+        stopRequested = false
+        let semaphore = DispatchSemaphore(value: 0)
+        let result = StartResult()
+        let thread = Thread { [weak self] in
+            autoreleasepool {
+                self?.runEventTap(result: result, semaphore: semaphore)
+            }
+        }
+        thread.name = "com.yorozu.app.input-mode-switching"
+        thread.qualityOfService = .userInteractive
+        self.thread = thread
+        lock.unlock()
 
-        guard let source = CFMachPortCreateRunLoopSource(
-            kCFAllocatorDefault,
-            tap,
-            0
-        ) else {
-            CFMachPortInvalidate(tap)
-            status = .creationFailed
-            notifyDiagnosticsDidChange()
+        thread.start()
+        guard semaphore.wait(timeout: .now() + 1) == .success else {
+            stop()
             return false
         }
-
-        eventTap = tap
-        runLoopSource = source
-        eventTapGeneration &+= 1
-        CFRunLoopAddSource(
-            CFRunLoopGetMain(),
-            source,
-            .commonModes
-        )
-        CGEvent.tapEnable(tap: tap, enable: true)
-        let started = isRunning
-        stateMachine.synchronizePressedCommands(
-            Self.currentlyPressedCommandSides()
-        )
-        status = started ? .running : .creationFailed
-        notifyDiagnosticsDidChange()
-        return started
+        return result.read() == true
     }
 
     func stop() {
-        stateMachine.reset()
-        tearDownEventTap()
+        lock.lock()
+        stopRequested = true
+        running = false
         status = .stopped
-        notifyDiagnosticsDidChange()
+        diagnosticsSequence &+= 1
+        let diagnostics = makeDiagnosticsLocked()
+        let runLoop = runLoop
+        lock.unlock()
+
+        diagnosticsHandler(diagnostics)
+        if let runLoop {
+            CFRunLoopStop(runLoop)
+            CFRunLoopWakeUp(runLoop)
+        }
     }
 
+    @discardableResult
     func postForTesting(_ action: CommandInputModeAction) -> Bool {
         post(action)
     }
 
-    private func tearDownEventTap() {
-        eventTapGeneration &+= 1
-        if let source = runLoopSource {
-            CFRunLoopRemoveSource(CFRunLoopGetMain(), source, .commonModes)
+    private func runEventTap(
+        result: StartResult,
+        semaphore: DispatchSemaphore
+    ) {
+        let userInfo = Unmanaged.passUnretained(self).toOpaque()
+        guard let eventTap = CGEvent.tapCreate(
+            tap: .cgSessionEventTap,
+            place: .headInsertEventTap,
+            options: .listenOnly,
+            eventsOfInterest: Self.eventMask,
+            callback: { _, type, event, userInfo in
+                guard let userInfo else {
+                    return Unmanaged.passUnretained(event)
+                }
+                let worker = Unmanaged<CommandInputModeEventTapWorker>
+                    .fromOpaque(userInfo)
+                    .takeUnretainedValue()
+                worker.handle(type: type, event: event)
+                return Unmanaged.passUnretained(event)
+            },
+            userInfo: userInfo
+        ) else {
+            completeStart(
+                false,
+                status: .creationFailed,
+                result: result,
+                semaphore: semaphore
+            )
+            return
         }
-        if let tap = eventTap {
-            CGEvent.tapEnable(tap: tap, enable: false)
-            CFMachPortInvalidate(tap)
+        guard let source = CFMachPortCreateRunLoopSource(
+            kCFAllocatorDefault,
+            eventTap,
+            0
+        ) else {
+            CFMachPortInvalidate(eventTap)
+            completeStart(
+                false,
+                status: .creationFailed,
+                result: result,
+                semaphore: semaphore
+            )
+            return
         }
-        runLoopSource = nil
-        eventTap = nil
+
+        let currentRunLoop = CFRunLoopGetCurrent()
+        lock.lock()
+        guard !stopRequested else {
+            lock.unlock()
+            CFMachPortInvalidate(eventTap)
+            completeStart(
+                false,
+                status: .stopped,
+                result: result,
+                semaphore: semaphore
+            )
+            return
+        }
+        runLoop = currentRunLoop
+        self.eventTap = eventTap
+        lock.unlock()
+
+        CFRunLoopAddSource(currentRunLoop, source, .commonModes)
+        CGEvent.tapEnable(tap: eventTap, enable: true)
+        stateMachine.synchronizePressedCommands(
+            Self.currentlyPressedCommandSides()
+        )
+
+        lock.lock()
+        let started = !stopRequested
+            && CFMachPortIsValid(eventTap)
+            && CGEvent.tapIsEnabled(tap: eventTap)
+        running = started
+        status = started ? .running : .creationFailed
+        diagnosticsSequence &+= 1
+        let diagnostics = makeDiagnosticsLocked()
+        lock.unlock()
+
+        diagnosticsHandler(diagnostics)
+        result.complete(started)
+        semaphore.signal()
+        if started {
+            CFRunLoopRun()
+        }
+
+        stateMachine.reset()
+        CGEvent.tapEnable(tap: eventTap, enable: false)
+        CFRunLoopRemoveSource(currentRunLoop, source, .commonModes)
+        CFMachPortInvalidate(eventTap)
+
+        lock.lock()
+        running = false
+        status = stopRequested ? .stopped : .temporarilyDisabled
+        runLoop = nil
+        self.eventTap = nil
+        thread = nil
+        diagnosticsSequence &+= 1
+        let stoppedDiagnostics = makeDiagnosticsLocked()
+        lock.unlock()
+        diagnosticsHandler(stoppedDiagnostics)
+    }
+
+    private func completeStart(
+        _ started: Bool,
+        status: CommandInputModeMonitorStatus,
+        result: StartResult,
+        semaphore: DispatchSemaphore
+    ) {
+        lock.lock()
+        running = false
+        self.status = stopRequested ? .stopped : status
+        thread = nil
+        diagnosticsSequence &+= 1
+        let diagnostics = makeDiagnosticsLocked()
+        lock.unlock()
+        diagnosticsHandler(diagnostics)
+        result.complete(started)
+        semaphore.signal()
     }
 
     private func handle(type: CGEventType, event: CGEvent) {
+        lock.lock()
+        let shouldIgnore = stopRequested
+        let currentEventTap = eventTap
+        lock.unlock()
+        guard !shouldIgnore else { return }
+
         switch type {
         case .flagsChanged:
             let keyCode = CGKeyCode(
                 event.getIntegerValueField(.keyboardEventKeycode)
             )
             if keyCode == 55 || keyCode == 54 {
-                lastCommandEventAt = Date()
-                notifyDiagnosticsDidChange()
+                publishDiagnostics {
+                    lastCommandEventAt = Date()
+                }
             }
             if let action = stateMachine.handleFlagsChanged(
                 keyCode: keyCode,
                 flags: event.flags
             ) {
-                schedulePost(action)
+                _ = post(action)
             }
         case .keyDown, .keyUp:
             stateMachine.handleKeyboardActivity()
@@ -540,32 +673,55 @@ final class CommandInputModeMonitor: CommandInputModeMonitoring {
             stateMachine.handleMouseActivity()
         case .tapDisabledByTimeout, .tapDisabledByUserInput:
             stateMachine.reset()
-            status = .temporarilyDisabled
-            if let eventTap {
-                CGEvent.tapEnable(tap: eventTap, enable: true)
-                status = CGEvent.tapIsEnabled(tap: eventTap)
-                    ? .running
-                    : .temporarilyDisabled
+            publishDiagnostics {
+                status = .temporarilyDisabled
+            }
+            if let currentEventTap {
+                CGEvent.tapEnable(tap: currentEventTap, enable: true)
+                let recovered = CGEvent.tapIsEnabled(tap: currentEventTap)
+                lock.lock()
+                running = recovered
+                lock.unlock()
+                publishDiagnostics {
+                    status = recovered ? .running : .temporarilyDisabled
+                }
             }
             stateMachine.synchronizePressedCommands(
                 Self.currentlyPressedCommandSides()
             )
-            notifyDiagnosticsDidChange()
         default:
             stateMachine.reset()
         }
     }
 
-    private func schedulePost(_ action: CommandInputModeAction) {
-        let scheduledGeneration = eventTapGeneration
-        DispatchQueue.main.async { [weak self] in
-            guard let self,
-                  self.eventTapGeneration == scheduledGeneration,
-                  self.isRunning else {
-                return
-            }
-            _ = post(action)
+    private func post(_ action: CommandInputModeAction) -> Bool {
+        let createdEvents = eventPoster.post(action)
+        publishDiagnostics {
+            lastAction = action
+            lastActionAt = Date()
+            lastPostCreatedEvents = createdEvents
         }
+        return createdEvents
+    }
+
+    private func publishDiagnostics(_ update: () -> Void) {
+        lock.lock()
+        update()
+        diagnosticsSequence &+= 1
+        let diagnostics = makeDiagnosticsLocked()
+        lock.unlock()
+        diagnosticsHandler(diagnostics)
+    }
+
+    private func makeDiagnosticsLocked() -> CommandInputModeMonitorDiagnostics {
+        CommandInputModeMonitorDiagnostics(
+            sequence: diagnosticsSequence,
+            status: status,
+            lastCommandEventAt: lastCommandEventAt,
+            lastAction: lastAction,
+            lastActionAt: lastActionAt,
+            lastPostCreatedEvents: lastPostCreatedEvents
+        )
     }
 
     private static func currentlyPressedCommandSides() -> Set<
@@ -580,17 +736,63 @@ final class CommandInputModeMonitor: CommandInputModeMonitoring {
         }
         return sides
     }
+}
 
-    private func post(_ action: CommandInputModeAction) -> Bool {
-        let createdEvents = eventPoster.post(action)
-        lastAction = action
-        lastActionAt = Date()
-        lastPostCreatedEvents = createdEvents
-        notifyDiagnosticsDidChange()
-        return createdEvents
+@MainActor
+final class CommandInputModeMonitor: CommandInputModeMonitoring {
+    private let eventPoster: any CommandInputModeEventPosting
+    private lazy var worker = CommandInputModeEventTapWorker(
+        eventPoster: eventPoster
+    ) { [weak self] diagnostics in
+        Task { @MainActor [weak self] in
+            self?.apply(diagnostics)
+        }
+    }
+    private var lastDiagnosticsSequence: UInt64?
+    var diagnosticsDidChange: (() -> Void)?
+    private(set) var status: CommandInputModeMonitorStatus = .stopped
+    private(set) var lastCommandEventAt: Date?
+    private(set) var lastAction: CommandInputModeAction?
+    private(set) var lastActionAt: Date?
+    private(set) var lastPostCreatedEvents: Bool?
+
+    init(
+        eventPoster: any CommandInputModeEventPosting =
+            SystemCommandInputModeEventPoster()
+    ) {
+        self.eventPoster = eventPoster
     }
 
-    private func notifyDiagnosticsDidChange() {
+    var isRunning: Bool { worker.isRunning }
+
+    func start() -> Bool {
+        let started = worker.start()
+        apply(worker.diagnostics)
+        return started
+    }
+
+    func stop() {
+        worker.stop()
+        apply(worker.diagnostics)
+    }
+
+    func postForTesting(_ action: CommandInputModeAction) -> Bool {
+        let posted = worker.postForTesting(action)
+        apply(worker.diagnostics)
+        return posted
+    }
+
+    private func apply(_ diagnostics: CommandInputModeMonitorDiagnostics) {
+        if let lastDiagnosticsSequence,
+           diagnostics.sequence <= lastDiagnosticsSequence {
+            return
+        }
+        lastDiagnosticsSequence = diagnostics.sequence
+        status = diagnostics.status
+        lastCommandEventAt = diagnostics.lastCommandEventAt
+        lastAction = diagnostics.lastAction
+        lastActionAt = diagnostics.lastActionAt
+        lastPostCreatedEvents = diagnostics.lastPostCreatedEvents
         diagnosticsDidChange?()
     }
 }
@@ -841,7 +1043,7 @@ private final class DisabledCommandInputModePermissionProvider: CommandInputMode
 }
 
 @MainActor
-private final class FixedCommandInputModeCodeSigningStatusProvider:
+final class FixedCommandInputModeCodeSigningStatusProvider:
     CommandInputModeCodeSigningStatusProviding {
     let status: CommandInputModeCodeSigningStatus
 

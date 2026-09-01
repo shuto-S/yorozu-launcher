@@ -18,6 +18,7 @@ struct AppEnvironment {
     let isolatesShortcutSettings: Bool
     let monitorsApplicationDirectories: Bool
     let startsCommandInputModeSwitching: Bool
+    let startsWindowControl: Bool
     let sleepActivityManager: any SleepActivityManaging
     let launchAtLoginService: any LaunchAtLoginServicing
 
@@ -45,6 +46,7 @@ struct AppEnvironment {
             isolatesShortcutSettings: false,
             monitorsApplicationDirectories: true,
             startsCommandInputModeSwitching: true,
+            startsWindowControl: true,
             sleepActivityManager: ProcessInfoSleepActivityManager(),
             launchAtLoginService: SystemLaunchAtLoginService()
         )
@@ -100,6 +102,7 @@ struct AppEnvironment {
             isolatesShortcutSettings: true,
             monitorsApplicationDirectories: false,
             startsCommandInputModeSwitching: false,
+            startsWindowControl: false,
             sleepActivityManager: UITestSleepActivityManager(),
             launchAtLoginService: InMemoryLaunchAtLoginService()
         )
@@ -487,6 +490,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         return .disabled(defaults: environment.defaults)
     }()
+    private lazy var windowControlController: WindowControlController = {
+        if environment.startsWindowControl {
+            return .live(defaults: environment.defaults)
+        }
+        return .disabled(defaults: environment.defaults)
+    }()
     private lazy var urlPreviewService = URLPreviewService(
         store: store,
         networkEnabled: environment.allowsURLPreviewNetwork
@@ -644,6 +653,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         snippetCatalog: snippetCatalog,
         clipboardPreferences: clipboardPreferences,
         commandInputModeController: commandInputModeController,
+        windowControlController: windowControlController,
         urlPreviewService: urlPreviewService,
         shortcutSettings: AppShortcutSettings(
             usesIsolatedStorage: environment.isolatesShortcutSettings
@@ -765,6 +775,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if environment.startsCommandInputModeSwitching {
             commandInputModeController.start()
         }
+        if environment.startsWindowControl {
+            windowControlController.start()
+        }
 
         #if DEBUG
         if arguments.contains("--performance-testing-clipboard-interaction") {
@@ -852,6 +865,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidBecomeActive(_ notification: Notification) {
         commandInputModeController.refreshAuthorization()
+        windowControlController.refreshAuthorization()
     }
 
     func applicationDidResignActive(_ notification: Notification) {
@@ -860,6 +874,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // settings panel or palette is no longer visible.
         DispatchQueue.main.async { [weak self] in
             self?.commandInputModeController.refreshAuthorization()
+            self?.windowControlController.refreshAuthorization()
         }
     }
 
@@ -880,6 +895,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         applicationDirectoryMonitor?.stop()
         applicationDirectoryMonitor = nil
         commandInputModeController.stop()
+        windowControlController.stop()
         viewModel.shutdown()
         let clipboardMonitor = self.clipboardMonitor
         let store = store
@@ -902,6 +918,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         keepAwakeController.invalidate()
         commandInputModeController.stop()
+        windowControlController.stop()
         if environment.registersGlobalShortcuts {
             KeyboardShortcuts.disable(
                 .toggleLauncher,

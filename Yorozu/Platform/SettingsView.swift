@@ -5,6 +5,7 @@ import SwiftUI
 
 private enum SettingsDestination: String, CaseIterable, Identifiable {
     case general
+    case windowControl
     case keepAwake
     case clipboard
     case ai
@@ -16,6 +17,8 @@ private enum SettingsDestination: String, CaseIterable, Identifiable {
         switch self {
         case .general:
             "settings.sidebar.general"
+        case .windowControl:
+            "Window Control"
         case .keepAwake:
             "Keep Awake"
         case .clipboard:
@@ -31,6 +34,8 @@ private enum SettingsDestination: String, CaseIterable, Identifiable {
         switch self {
         case .general:
             "gearshape"
+        case .windowControl:
+            "macwindow"
         case .keepAwake:
             "cup.and.saucer"
         case .clipboard:
@@ -92,6 +97,10 @@ struct SettingsView: View {
                 viewModel: viewModel,
                 appUpdateController: appUpdateController
             )
+        case .windowControl:
+            WindowControlSettingsView(
+                controller: viewModel.windowControlController
+            )
         case .keepAwake:
             KeepAwakeSettingsView(controller: viewModel.keepAwakeController)
         case .clipboard:
@@ -114,6 +123,260 @@ struct SettingsView: View {
         default:
             break
         }
+    }
+}
+
+private struct WindowControlSettingsView: View {
+    @ObservedObject var controller: WindowControlController
+
+    var body: some View {
+        Form {
+            Section {
+                Toggle(
+                    "Enable Window Control",
+                    isOn: $controller.isEnabled
+                )
+                .disabled(
+                    !controller.isConfigurationValid && !controller.isEnabled
+                )
+                .accessibilityIdentifier("settings.window-control.enabled")
+
+                LabeledContent("Status") {
+                    Text(controller.runtimeStatus.title)
+                        .foregroundStyle(statusColor)
+                        .accessibilityIdentifier(
+                            "settings.window-control.status"
+                        )
+                }
+
+                if !controller.isConfigurationValid {
+                    Text("Set different key combinations for Move Window and Resize Window before enabling this feature.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            } header: {
+                Text("Window Control")
+            } footer: {
+                Text("Hold the configured keys and drag with the left mouse button. The target application is brought to the front when the gesture begins.")
+            }
+
+            Section("Gestures") {
+                modifierRow(for: .move)
+                modifierRow(for: .resize)
+
+                if let validationMessage = controller.validationMessage {
+                    Label(
+                        validationMessage,
+                        systemImage: "exclamationmark.triangle"
+                    )
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                    .accessibilityIdentifier(
+                        "settings.window-control.validation"
+                    )
+                }
+            }
+
+            Section {
+                LabeledContent("Accessibility") {
+                    Label(
+                        controller.isAccessibilityGranted
+                            ? "Allowed"
+                            : "Not Allowed",
+                        systemImage: controller.isAccessibilityGranted
+                            ? "checkmark.circle.fill"
+                            : "exclamationmark.triangle.fill"
+                    )
+                    .foregroundStyle(
+                        controller.isAccessibilityGranted
+                            ? AnyShapeStyle(.green)
+                            : AnyShapeStyle(.orange)
+                    )
+                }
+
+                HStack {
+                    if !controller.isAccessibilityGranted {
+                        Button("Request Access") {
+                            controller.requestAccessibilityAccess()
+                        }
+                    }
+
+                    Button("Open Accessibility Settings") {
+                        controller.openAccessibilitySettings()
+                    }
+
+                    Button("Reveal This Build") {
+                        controller.revealCurrentBuild()
+                    }
+
+                    Spacer()
+
+                    Button("Check Again") {
+                        controller.refreshAuthorization()
+                    }
+                }
+
+                if !controller.isAccessibilityGranted,
+                   controller.codeSigningStatus == .adHoc {
+                    Label(
+                        "This build uses an ad hoc signature. Accessibility permission may be lost after rebuilding.",
+                        systemImage: "signature"
+                    )
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                }
+            } header: {
+                Text("Permission")
+            } footer: {
+                Text("Window Control uses Accessibility to identify and update the window under the pointer. It does not require a separate Input Monitoring permission.")
+            }
+        }
+        .formStyle(.grouped)
+        .scrollContentBackground(.hidden)
+        .background(Color.clear)
+        .accessibilityIdentifier("settings.detail.window-control")
+    }
+
+    @ViewBuilder
+    private func modifierRow(for operation: WindowControlOperation) -> some View {
+        LabeledContent(operation.title) {
+            HStack(spacing: 8) {
+                WindowControlModifierRecorder(
+                    chord: Binding(
+                        get: {
+                            controller.configuration.chord(for: operation)
+                        },
+                        set: { chord in
+                            controller.setChord(chord, for: operation)
+                        }
+                    )
+                )
+                .accessibilityIdentifier(
+                    "settings.window-control.\(operation.rawValue)-recorder"
+                )
+
+                Button("Clear") {
+                    controller.setChord(nil, for: operation)
+                }
+                .disabled(
+                    controller.configuration.chord(for: operation) == nil
+                )
+                .accessibilityIdentifier(
+                    "settings.window-control.\(operation.rawValue)-clear"
+                )
+            }
+        }
+    }
+
+    private var statusColor: Color {
+        switch controller.runtimeStatus {
+        case .active:
+            .green
+        case .permissionRequired, .unavailable:
+            .orange
+        case .off, .needsConfiguration:
+            .secondary
+        }
+    }
+}
+
+@MainActor
+private final class WindowControlModifierCapture: ObservableObject {
+    @Published private(set) var isRecording = false
+    private var eventMonitor: Any?
+    private var pendingChord: WindowControlModifierChord?
+    private var completion: ((WindowControlModifierChord?) -> Void)?
+
+    func begin(
+        completion: @escaping (WindowControlModifierChord?) -> Void
+    ) {
+        stop()
+        self.completion = completion
+        pendingChord = nil
+        isRecording = true
+        eventMonitor = NSEvent.addLocalMonitorForEvents(
+            matching: [.flagsChanged, .keyDown]
+        ) { [weak self] event in
+            self?.handle(event)
+        }
+    }
+
+    func stop() {
+        if let eventMonitor {
+            NSEvent.removeMonitor(eventMonitor)
+        }
+        eventMonitor = nil
+        pendingChord = nil
+        completion = nil
+        isRecording = false
+    }
+
+    private func handle(_ event: NSEvent) -> NSEvent? {
+        switch event.type {
+        case .flagsChanged:
+            let chord = WindowControlModifierChord(
+                eventFlags: event.modifierFlags.cgEventFlags
+            )
+            if chord.isEmpty {
+                if let pendingChord {
+                    let completion = completion
+                    stop()
+                    completion?(pendingChord)
+                }
+            } else if chord.rawValue.nonzeroBitCount
+                >= (pendingChord?.rawValue.nonzeroBitCount ?? 0) {
+                pendingChord = chord
+            }
+            return nil
+
+        case .keyDown where event.keyCode == 53:
+            stop()
+            return nil
+
+        case .keyDown where event.keyCode == 51 || event.keyCode == 117:
+            let completion = completion
+            stop()
+            completion?(nil)
+            return nil
+
+        default:
+            return event
+        }
+    }
+
+}
+
+private struct WindowControlModifierRecorder: View {
+    @Binding var chord: WindowControlModifierChord?
+    @StateObject private var capture = WindowControlModifierCapture()
+
+    var body: some View {
+        Button(capture.isRecording ? "Press Modifier Keys…" : chordTitle) {
+            capture.begin { value in
+                chord = value
+            }
+        }
+        .onDisappear {
+            capture.stop()
+        }
+        .accessibilityLabel("Modifier key combination")
+        .accessibilityValue(chordTitle)
+    }
+
+    private var chordTitle: String {
+        chord?.displayTitle ?? "Not Set"
+    }
+}
+
+private extension NSEvent.ModifierFlags {
+    var cgEventFlags: CGEventFlags {
+        var flags: CGEventFlags = []
+        if contains(.control) { flags.insert(.maskControl) }
+        if contains(.option) { flags.insert(.maskAlternate) }
+        if contains(.shift) { flags.insert(.maskShift) }
+        if contains(.command) { flags.insert(.maskCommand) }
+        if contains(.function) { flags.insert(.maskSecondaryFn) }
+        return flags
     }
 }
 

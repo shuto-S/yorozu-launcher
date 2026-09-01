@@ -177,6 +177,53 @@ final class YorozuUITests: XCTestCase {
     }
 
     @MainActor
+    func testWindowControlSettingsExposeSafeDisabledConfiguration() {
+        continueAfterFailure = false
+        let application = XCUIApplication()
+        application.launchArguments = [
+            "--ui-testing-settings",
+            "--ui-testing-sticky",
+        ]
+        application.launch()
+
+        XCTAssertTrue(
+            application.descendants(matching: .any)["launcher.settings"]
+                .waitForExistence(timeout: 5)
+        )
+
+        let destination = application
+            .descendants(matching: .any)[
+                "settings.destination.windowControl"
+            ]
+        XCTAssertTrue(destination.waitForExistence(timeout: 2))
+        destination.click()
+
+        XCTAssertTrue(
+            application.descendants(matching: .any)[
+                "settings.detail.window-control"
+            ].waitForExistence(timeout: 2)
+        )
+        XCTAssertTrue(
+            application.descendants(matching: .any)[
+                "settings.window-control.move-recorder"
+            ].exists
+        )
+        XCTAssertTrue(
+            application.descendants(matching: .any)[
+                "settings.window-control.resize-recorder"
+            ].exists
+        )
+
+        let enableToggle = application.switches[
+            "settings.window-control.enabled"
+        ]
+        XCTAssertTrue(enableToggle.exists)
+        XCTAssertFalse(enableToggle.isEnabled)
+        XCTAssertTrue(application.staticTexts["Set Both Key Combinations"].exists)
+        XCTAssertTrue(application.staticTexts["Not Allowed"].exists)
+    }
+
+    @MainActor
     func testGeneralSettingsExposeSoftwareUpdateControls() {
         continueAfterFailure = false
         let application = XCUIApplication()
