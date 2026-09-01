@@ -72,6 +72,10 @@ struct CommandInputSourceCandidate: Equatable, Sendable {
     let isKeyboardSource: Bool
 }
 
+// Text Input Source Services communicates with the per-user text input
+// session. Keep every TIS query and mutation on the main actor so a Command
+// release cannot race that session from Swift's generic executor.
+@MainActor
 protocol CommandInputSourceSystem: Sendable {
     func currentSourceID() -> String?
     func candidates() -> [CommandInputSourceCandidate]
@@ -129,7 +133,8 @@ enum CommandInputSourceResolver {
     }
 }
 
-actor SystemCommandInputSourceSwitcher: CommandInputSourceSwitching {
+@MainActor
+final class SystemCommandInputSourceSwitcher: CommandInputSourceSwitching {
     private let system: any CommandInputSourceSystem
 
     init(system: any CommandInputSourceSystem = SystemCommandInputSourceSystem()) {
@@ -225,8 +230,8 @@ actor SystemCommandInputSourceSwitcher: CommandInputSourceSwitching {
     }
 }
 
-final class SystemCommandInputSourceSystem:
-    CommandInputSourceSystem, @unchecked Sendable {
+@MainActor
+final class SystemCommandInputSourceSystem: CommandInputSourceSystem {
     func currentSourceID() -> String? {
         guard let source = TISCopyCurrentKeyboardInputSource()?
             .takeRetainedValue() else {
@@ -289,37 +294,29 @@ final class SystemCommandInputSourceSystem:
     }
 
     private func sourceID(of source: TISInputSource) -> String? {
-        guard let pointer = TISGetInputSourceProperty(
-            source,
-            kTISPropertyInputSourceID
-        ) else {
-            return nil
-        }
-        return Unmanaged<CFString>.fromOpaque(pointer)
-            .takeUnretainedValue() as String
+        stringProperty(kTISPropertyInputSourceID, of: source)
     }
 
     private func languages(of source: TISInputSource) -> [String] {
-        guard let pointer = TISGetInputSourceProperty(
-            source,
-            kTISPropertyInputSourceLanguages
-        ) else {
+        guard let value = property(
+            kTISPropertyInputSourceLanguages,
+            of: source
+        ), CFGetTypeID(value) == CFArrayGetTypeID() else {
             return []
         }
-        return Unmanaged<CFArray>.fromOpaque(pointer)
-            .takeUnretainedValue() as? [String] ?? []
+        return value as? [String] ?? []
     }
 
     private func booleanProperty(
         _ key: CFString,
         of source: TISInputSource
     ) -> Bool {
-        guard let pointer = TISGetInputSourceProperty(source, key) else {
+        guard let value = property(key, of: source),
+              CFGetTypeID(value) == CFBooleanGetTypeID(),
+              let boolean = value as? Bool else {
             return false
         }
-        return CFBooleanGetValue(
-            Unmanaged<CFBoolean>.fromOpaque(pointer).takeUnretainedValue()
-        )
+        return boolean
     }
 
     private func isKeyboardSource(_ source: TISInputSource) -> Bool {
@@ -341,11 +338,22 @@ final class SystemCommandInputSourceSystem:
         _ key: CFString,
         of source: TISInputSource
     ) -> String? {
+        guard let value = property(key, of: source),
+              CFGetTypeID(value) == CFStringGetTypeID() else {
+            return nil
+        }
+        return value as? String
+    }
+
+    private func property(
+        _ key: CFString,
+        of source: TISInputSource
+    ) -> CFTypeRef? {
         guard let pointer = TISGetInputSourceProperty(source, key) else {
             return nil
         }
-        return Unmanaged<CFString>.fromOpaque(pointer)
-            .takeUnretainedValue() as String
+        return Unmanaged<CFTypeRef>.fromOpaque(pointer)
+            .takeUnretainedValue()
     }
 }
 

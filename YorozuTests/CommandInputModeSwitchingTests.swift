@@ -82,6 +82,25 @@ final class CommandInputModeSwitchingTests: XCTestCase {
         XCTAssertEqual(system.selectedSourceIDs, ["japanese"])
     }
 
+    func testInputSourceSwitcherMarshalsDetachedCallsToMainThread() async {
+        let system = TestCommandInputSourceSystem(
+            currentSourceID: "english",
+            candidates: [
+                candidate(id: "english", ascii: true),
+                candidate(id: "japanese", languages: ["ja"]),
+            ],
+            preferred: [.switchToJapanese: "japanese"]
+        )
+        let switcher = SystemCommandInputSourceSwitcher(system: system)
+
+        let report = await Task.detached {
+            await switcher.switchInputMode(.switchToJapanese)
+        }.value
+
+        XCTAssertEqual(report.result, .switched(sourceID: "japanese"))
+        XCTAssertTrue(system.allCallsWereOnMainThread)
+    }
+
     func testInputSourceSwitcherReportsUnavailableWithoutSelecting() async {
         let system = TestCommandInputSourceSystem(
             currentSourceID: "english",
@@ -680,6 +699,7 @@ private final class TestCommandInputSourceSystem:
     private let selectSucceeds: Bool
     private let updatesCurrentSourceOnSelect: Bool
     private var selectedIDs: [String] = []
+    private var callsWereOnMainThread = true
 
     init(
         currentSourceID: String?,
@@ -699,25 +719,40 @@ private final class TestCommandInputSourceSystem:
         lock.withLock { selectedIDs }
     }
 
+    var allCallsWereOnMainThread: Bool {
+        lock.withLock { callsWereOnMainThread }
+    }
+
     func currentSourceID() -> String? {
-        lock.withLock { currentID }
+        recordSystemCall()
+        return lock.withLock { currentID }
     }
 
     func candidates() -> [CommandInputSourceCandidate] {
-        availableCandidates
+        recordSystemCall()
+        return availableCandidates
     }
 
     func preferredSourceID(for action: CommandInputModeAction) -> String? {
-        preferred[action]
+        recordSystemCall()
+        return preferred[action]
     }
 
     func selectSource(id: String) -> Bool {
-        lock.withLock {
+        recordSystemCall()
+        return lock.withLock {
             selectedIDs.append(id)
             if selectSucceeds, updatesCurrentSourceOnSelect {
                 currentID = id
             }
             return selectSucceeds
+        }
+    }
+
+    private func recordSystemCall() {
+        guard !Thread.isMainThread else { return }
+        lock.withLock {
+            callsWereOnMainThread = false
         }
     }
 }
