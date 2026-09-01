@@ -96,10 +96,10 @@ The current target is:
 - optional launch at login using the system-managed main-app login item
 - configurable shortcuts for Yorozu and feature routes
 - current-process Accessibility status
-- optional left/right Command-alone switching to Eisu/Kana, configured only in General
+- optional left/right Command-alone switching to English/Japanese input sources, configured only in General
 - optional modifier-drag window moving and bottom-right resizing, configured in Window Control
-- permission-first Input Mode Switching settings limited to enablement, Accessibility
-  status, System Settings access, and manual permission refresh
+- permission-first Input Mode Switching settings with Input Monitoring status, System
+  Settings access, manual refresh, and bounded source-selection diagnostics
 - windowless background monitoring on a dedicated run-loop thread, protected from App Nap,
   with automatic event-tap recovery
 - keyboard-first operation with mouse-accessible primary actions
@@ -207,8 +207,8 @@ Privacy and reliability requirements:
 - Clipboard History is disabled by default.
 - Automatic paste requires current-process Accessibility trust and stable local signing.
 - Command input-mode switching is disabled by default. It requires current-process
-  Accessibility trust, stable local signing across rebuilds, and an existing Japanese
-  input source in macOS.
+  Input Monitoring trust, stable local signing across rebuilds, and enabled selectable
+  English and Japanese input sources in macOS.
 - Non-image database retention cleanup is batched; expired rows can remain on disk until the next maintenance pass or explicit settings prune.
 - A URL preview that fails is not retried again during the same app process.
 - Codex requires an installed compatible `codex` executable and an authenticated ChatGPT account.

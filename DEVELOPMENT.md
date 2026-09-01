@@ -46,8 +46,9 @@ xcodebuild \
 
 ### Apple Development signing
 
-Accessibility trust is tied to the current code-signing identity. For stable automatic-paste,
-Command input-mode switching, and Window Control tests, create an ignored local override:
+Accessibility and Input Monitoring trust are tied to the current code-signing identity.
+For stable automatic-paste, Command input-mode switching, and Window Control tests,
+create an ignored local override:
 
 1. In Xcode, open **Settings → Accounts** and add an Apple Account.
 2. Select the account, open **Manage Certificates**, and create an **Apple Development** certificate if one is not already available.
@@ -69,25 +70,28 @@ other personal signing data.
 
 An ad hoc signature changes when the executable changes. macOS can therefore show an old
 Yorozu entry while the current build remains untrusted, or turn its switch off after a
-rebuild. Use an Apple Development identity before diagnosing Accessibility-dependent
-features. Input mode switching intentionally requests Accessibility only: that privilege
-covers both listening to Command events and posting Eisu/Kana events.
+rebuild. Use an Apple Development identity before diagnosing TCC-dependent features.
+Input mode switching requires Input Monitoring for its listen-only event tap. It selects
+the resolved TIS input source directly and does not post Eisu/Kana keyboard events;
+Accessibility and event-posting access are shown only as diagnostics for this feature.
 
-Treat the permission state reported by `AXIsProcessTrusted()` in the running Yorozu process
-as authoritative. System Settings can display an enabled row for a different Yorozu build
-with the same display name. When that happens, remove the stale row, reveal the current
-build from General settings, and add that exact app once. Do not use `tccutil reset` in
-development scripts or application code.
+Treat `AXIsProcessTrusted()` as authoritative for Accessibility features and
+`CGPreflightListenEventAccess()` as authoritative for Input Mode Switching. System
+Settings can display an enabled row for a different Yorozu build with the same display
+name. When that happens, remove the stale row, reveal the current build from General
+settings, and add that exact app once. Do not use `tccutil reset` in development scripts
+or application code.
 
 Apple Development and Developer ID Application are different TCC identities even when
 they share `com.yorozu.app`. Rebuilding repeatedly with one stable Apple Development
 identity preserves local development authorization; published updates preserve the
 Developer ID identity separately.
 
-The General settings screen deliberately exposes only the feature toggle, current-build
-Accessibility state, System Settings and current-build recovery actions, and a permission
-refresh action. An ad hoc warning appears only when that signing problem is detected.
-Event-tap details remain implementation concerns rather than normal product settings.
+The General settings screen exposes the feature toggle, current-build Input Monitoring
+state, System Settings and current-build recovery actions, permission refresh, and bounded
+diagnostics for the monitor and last switch. An ad hoc warning appears only when that
+signing problem is detected. English and Japanese sources are resolved automatically from
+enabled, select-capable macOS input sources; there is no separate source picker.
 
 While input mode switching is enabled and authorized, Yorozu holds a user-initiated
 `ProcessInfo` activity that allows idle system sleep. This keeps the listen-only event tap
@@ -288,7 +292,8 @@ For UI or input changes, check:
   and copy controls
 - Input Mode Switching while Yorozu is both frontmost and inactive: Left Command alone
   selects English, Right Command alone selects Japanese, Command shortcuts and
-  Command-clicks remain unaffected, and disabling the feature stops monitoring
+  Command-clicks remain unaffected, disabling the feature stops monitoring, and Settings
+  reports the actual source transition or a specific missing-source/selection error
 
 For focused Input Mode Switching regression coverage, run:
 

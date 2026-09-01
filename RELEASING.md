@@ -107,9 +107,9 @@ a clean Mac user account:
 - canceling a download leaves the installed application untouched;
 - an archive signed by another EdDSA key is rejected;
 - installing and restarting preserves Settings, SQLite, and Keychain data.
-- Accessibility granted to the previous published build remains granted after updating
-  in place, and automatic paste plus Command input-mode switching still work without a
-  second authorization.
+- Accessibility and Input Monitoring grants from the previous published build remain
+  granted after updating in place, and automatic paste plus Command input-mode switching
+  still work without a second authorization.
 
 The workflow enforces the stable bundle ID, Developer ID team, and designated-requirement
 shape before notarization. Do not replace Developer ID signing with Apple Development or

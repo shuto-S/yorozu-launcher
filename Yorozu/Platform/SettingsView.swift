@@ -1059,17 +1059,17 @@ private struct GeneralSettingsView: View {
 
                 if inputModeController.isEnabled {
                     permissionRow(
-                        title: "Accessibility",
-                        isGranted: inputModeController.isAccessibilityGranted,
-                        request: inputModeController.requestAccessibilityAccess
+                        title: "Input Monitoring",
+                        isGranted: inputModeController.isInputMonitoringGranted,
+                        request: inputModeController.requestInputMonitoringAccess
                     )
 
                     HStack {
-                        Button("Open Accessibility Settings") {
-                            inputModeController.openAccessibilitySettings()
+                        Button("Open Input Monitoring Settings") {
+                            inputModeController.openInputMonitoringSettings()
                         }
                         .accessibilityIdentifier(
-                            "settings.input-mode.open-accessibility"
+                            "settings.input-mode.open-input-monitoring"
                         )
 
                         Button("Reveal This Build") {
@@ -1089,8 +1089,8 @@ private struct GeneralSettingsView: View {
                         )
                     }
 
-                    if !inputModeController.isAccessibilityGranted {
-                        Text("Allow this copy of Yorozu in Accessibility to switch input modes while using other apps. If Yorozu already appears allowed, remove the older entry and add the build revealed below.")
+                    if !inputModeController.isInputMonitoringGranted {
+                        Text("Allow this copy of Yorozu in Input Monitoring so the Command keys can be detected while other apps are active. If Yorozu already appears allowed, remove the older entry and add the build revealed below.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                             .accessibilityIdentifier(
@@ -1099,7 +1099,7 @@ private struct GeneralSettingsView: View {
 
                         if inputModeController.codeSigningStatus == .adHoc {
                             Label(
-                                "This build uses an ad hoc signature. Accessibility permission may be lost after rebuilding.",
+                                "This build uses an ad hoc signature. Input Monitoring permission may be lost after rebuilding.",
                                 systemImage: "signature"
                             )
                             .font(.caption)
@@ -1119,11 +1119,77 @@ private struct GeneralSettingsView: View {
                             "settings.input-mode.unavailable"
                         )
                     }
+
+                    if let report = inputModeController.lastSwitchReport {
+                        LabeledContent("Last Switch") {
+                            Text(report.result.title)
+                                .foregroundStyle(
+                                    inputModeSwitchResultColor(report.result)
+                                )
+                        }
+                        LabeledContent("Input Source") {
+                            Text(inputModeSourceTransition(report))
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                                .foregroundStyle(.secondary)
+                        }
+
+                        switch report.result {
+                        case let .sourceUnavailable(action):
+                            Label(
+                                "No enabled \(action.title) input source is available. Add one in Keyboard settings, then try again.",
+                                systemImage: "keyboard.badge.ellipsis"
+                            )
+                            .font(.caption)
+                            .foregroundStyle(.orange)
+                        case .selectionFailed, .verificationTimedOut:
+                            Label(
+                                "Yorozu detected the Command key but macOS did not select the requested input source. Check the available input sources and try again.",
+                                systemImage: "exclamationmark.triangle"
+                            )
+                            .font(.caption)
+                            .foregroundStyle(.orange)
+                        case .switched, .alreadySelected, .cancelled:
+                            EmptyView()
+                        }
+                    }
+
+                    LabeledContent("Accessibility") {
+                        Text(
+                            inputModeController.isAccessibilityGranted
+                                ? "Allowed" : "Not Allowed"
+                        )
+                        .foregroundStyle(.secondary)
+                    }
+                    LabeledContent("Event Posting") {
+                        Text(
+                            inputModeController.isEventPostingGranted
+                                ? "Allowed" : "Not Allowed"
+                        )
+                        .foregroundStyle(.secondary)
+                    }
+                    LabeledContent("Monitor") {
+                        Text(inputModeController.monitorStatus.title)
+                            .foregroundStyle(.secondary)
+                    }
+                    if let lastCommandEventAt =
+                        inputModeController.lastCommandEventAt {
+                        LabeledContent("Last Command Event") {
+                            Text(lastCommandEventAt, format: .dateTime)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    if let lastAction = inputModeController.lastAction {
+                        LabeledContent("Last Action") {
+                            Text(lastAction.title)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
                 }
             } header: {
                 Text("Input Mode Switching")
             } footer: {
-                Text("Command shortcuts and regular Command clicks continue to work normally.")
+                Text("Input Monitoring is required for the listen-only Command monitor. Yorozu selects enabled macOS input sources directly; it does not synthesize Eisu or Kana key events. Command shortcuts and regular Command clicks continue to work normally.")
             }
 
             Section {
@@ -1264,6 +1330,27 @@ private struct GeneralSettingsView: View {
         case (.none, .none):
             "Unknown"
         }
+    }
+
+    private func inputModeSwitchResultColor(
+        _ result: CommandInputModeSwitchResult
+    ) -> Color {
+        switch result {
+        case .switched, .alreadySelected:
+            .green
+        case .cancelled:
+            .secondary
+        case .sourceUnavailable, .selectionFailed, .verificationTimedOut:
+            .orange
+        }
+    }
+
+    private func inputModeSourceTransition(
+        _ report: CommandInputModeSwitchReport
+    ) -> String {
+        let before = report.sourceIDBefore ?? "Unknown"
+        let after = report.sourceIDAfter ?? "Unknown"
+        return "\(before) → \(after)"
     }
 
     private func permissionRow(

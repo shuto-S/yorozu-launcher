@@ -42,9 +42,10 @@ Feature-specific global shortcuts can be configured in Settings.
 
 Input Mode Switching is disabled by default. Enable it from **Settings → General** to
 use Left Command alone for English and Right Command alone for Japanese. It requires
-macOS Accessibility permission, but not a separate Input Monitoring grant. Command
-shortcuts and regular Command-clicks continue to work normally. Once enabled, the
-listen-only monitor remains available while Yorozu is not the active application.
+macOS Input Monitoring permission. Yorozu then selects an enabled English or Japanese
+input source directly through macOS rather than posting synthetic Eisu/Kana key events.
+Command shortcuts and regular Command-clicks continue to work normally. Once enabled,
+the listen-only monitor remains available while Yorozu is not the active application.
 
 Window Control is also disabled by default. Configure two different modifier-key
 combinations in **Settings → Window Control**, then hold one combination while dragging
@@ -81,8 +82,9 @@ Open the built app from Xcode's Products group or from the corresponding Derived
 
 ### Stable local signing
 
-Automatic paste, Input Mode Switching, and Window Control use macOS Accessibility
-permission. Ad hoc signatures change between builds, so copy the signing template and
+Automatic paste and Window Control use macOS Accessibility permission. Input Mode
+Switching uses Input Monitoring. These TCC permissions are tied to the signed app
+identity. Ad hoc signatures change between builds, so copy the signing template and
 enter your own Apple Development Team when testing these features:
 
 ```bash
@@ -91,18 +93,18 @@ cp Config/Local.example.xcconfig Config/Local.xcconfig
 
 `Config/Local.xcconfig` is intentionally ignored by Git. Never commit personal signing identifiers or provisioning data.
 
-After changing the signature, macOS may require you to remove the stale Yorozu entry from
-Privacy & Security → Accessibility and add the current build again. Yorozu never changes
-TCC data automatically. The General settings screen shows the current permission state
-for the running executable, links to the relevant System Settings pane, and can reveal the
-exact build that must be authorized. An entry that is switched on for an older Debug or
-ad hoc build does not authorize the current app.
+After changing the signature, macOS may require you to remove a stale Yorozu entry from
+the relevant Privacy & Security pane and add the current build again. Yorozu never changes
+TCC data automatically. The General settings screen shows the current Input Monitoring
+state for the running executable, links to the relevant System Settings pane, and can
+reveal the exact build that must be authorized. An entry that is switched on for an older
+Debug or ad hoc build does not authorize the current app.
 
 Published updates keep `com.yorozu.app` and the same Developer ID team so macOS can retain
-the existing Accessibility grant. The release workflow rejects an unexpected bundle ID,
-team, or cdhash-only designated requirement before publication. Moving between a local
-Apple Development build and a published Developer ID build is an identity change and can
-still require one intentional re-authorization.
+existing Accessibility and Input Monitoring grants. The release workflow rejects an
+unexpected bundle ID, team, or cdhash-only designated requirement before publication.
+Moving between a local Apple Development build and a published Developer ID build is an
+identity change and can still require one intentional re-authorization.
 
 ## Validation
 

@@ -1,5 +1,6 @@
 import AppKit
 @preconcurrency import ApplicationServices
+@preconcurrency import Carbon
 import Combine
 import CoreGraphics
 import Foundation
@@ -8,18 +9,9 @@ import Security
 private nonisolated(unsafe) let commandInputModeAccessibilityPromptKey =
     kAXTrustedCheckOptionPrompt.takeUnretainedValue()
 
-enum CommandInputModeAction: Equatable, Sendable {
+enum CommandInputModeAction: Hashable, Sendable {
     case switchToEnglish
     case switchToJapanese
-
-    var keyCode: CGKeyCode {
-        switch self {
-        case .switchToEnglish:
-            102
-        case .switchToJapanese:
-            104
-        }
-    }
 
     var title: String {
         switch self {
@@ -28,6 +20,332 @@ enum CommandInputModeAction: Equatable, Sendable {
         case .switchToJapanese:
             "Japanese"
         }
+    }
+}
+
+enum CommandInputModeSwitchResult: Equatable, Sendable {
+    case switched(sourceID: String)
+    case alreadySelected(sourceID: String)
+    case sourceUnavailable(CommandInputModeAction)
+    case selectionFailed
+    case verificationTimedOut
+    case cancelled
+
+    var title: String {
+        switch self {
+        case .switched:
+            "Switched"
+        case .alreadySelected:
+            "Already Selected"
+        case .sourceUnavailable:
+            "Input Source Unavailable"
+        case .selectionFailed:
+            "Selection Failed"
+        case .verificationTimedOut:
+            "Verification Timed Out"
+        case .cancelled:
+            "Cancelled"
+        }
+    }
+}
+
+struct CommandInputModeSwitchReport: Equatable, Sendable {
+    let action: CommandInputModeAction
+    let result: CommandInputModeSwitchResult
+    let sourceIDBefore: String?
+    let sourceIDAfter: String?
+    let completedAt: Date
+}
+
+struct CommandInputModeAuthorizationSnapshot: Equatable, Sendable {
+    let accessibilityGranted: Bool
+    let listenEventGranted: Bool
+    let postEventGranted: Bool
+}
+
+struct CommandInputSourceCandidate: Equatable, Sendable {
+    let id: String
+    let languages: [String]
+    let isASCIICapable: Bool
+    let isEnabled: Bool
+    let isSelectCapable: Bool
+    let isKeyboardSource: Bool
+}
+
+protocol CommandInputSourceSystem: Sendable {
+    func currentSourceID() -> String?
+    func candidates() -> [CommandInputSourceCandidate]
+    func preferredSourceID(for action: CommandInputModeAction) -> String?
+    func selectSource(id: String) -> Bool
+}
+
+protocol CommandInputSourceSwitching: Sendable {
+    func switchInputMode(
+        _ action: CommandInputModeAction
+    ) async -> CommandInputModeSwitchReport
+}
+
+enum CommandInputSourceResolver {
+    private static let appleABCSourceID = "com.apple.keylayout.ABC"
+    private static let appleJapaneseSourceID =
+        "com.apple.inputmethod.Kotoeri.RomajiTyping.Japanese"
+
+    static func sourceID(
+        for action: CommandInputModeAction,
+        candidates: [CommandInputSourceCandidate],
+        preferredSourceID: String?
+    ) -> String? {
+        let selectable = candidates.filter {
+            $0.isEnabled && $0.isSelectCapable && $0.isKeyboardSource
+        }
+        let matching: [CommandInputSourceCandidate]
+        let appleFallbackID: String
+        switch action {
+        case .switchToEnglish:
+            matching = selectable.filter(\.isASCIICapable)
+            appleFallbackID = appleABCSourceID
+        case .switchToJapanese:
+            matching = selectable.filter { candidate in
+                candidate.languages.contains(where: isJapaneseLanguage)
+            }
+            appleFallbackID = appleJapaneseSourceID
+        }
+
+        if let preferredSourceID,
+           matching.contains(where: { $0.id == preferredSourceID }) {
+            return preferredSourceID
+        }
+        if matching.contains(where: { $0.id == appleFallbackID }) {
+            return appleFallbackID
+        }
+        return matching.map(\.id).sorted().first
+    }
+
+    private static func isJapaneseLanguage(_ language: String) -> Bool {
+        let normalized = language.lowercased()
+        return normalized == "ja"
+            || normalized.hasPrefix("ja-")
+            || normalized.hasPrefix("ja_")
+    }
+}
+
+actor SystemCommandInputSourceSwitcher: CommandInputSourceSwitching {
+    private let system: any CommandInputSourceSystem
+
+    init(system: any CommandInputSourceSystem = SystemCommandInputSourceSystem()) {
+        self.system = system
+    }
+
+    func switchInputMode(
+        _ action: CommandInputModeAction
+    ) async -> CommandInputModeSwitchReport {
+        let sourceIDBefore = system.currentSourceID()
+        let targetSourceID = CommandInputSourceResolver.sourceID(
+            for: action,
+            candidates: system.candidates(),
+            preferredSourceID: system.preferredSourceID(for: action)
+        )
+        guard let targetSourceID else {
+            return report(
+                action: action,
+                result: .sourceUnavailable(action),
+                before: sourceIDBefore,
+                after: system.currentSourceID()
+            )
+        }
+        if sourceIDBefore == targetSourceID {
+            return report(
+                action: action,
+                result: .alreadySelected(sourceID: targetSourceID),
+                before: sourceIDBefore,
+                after: sourceIDBefore
+            )
+        }
+        guard system.selectSource(id: targetSourceID) else {
+            return report(
+                action: action,
+                result: .selectionFailed,
+                before: sourceIDBefore,
+                after: system.currentSourceID()
+            )
+        }
+
+        for attempt in 0 ..< 3 {
+            guard !Task.isCancelled else {
+                return report(
+                    action: action,
+                    result: .cancelled,
+                    before: sourceIDBefore,
+                    after: system.currentSourceID()
+                )
+            }
+            let sourceIDAfter = system.currentSourceID()
+            if sourceIDAfter == targetSourceID {
+                return report(
+                    action: action,
+                    result: .switched(sourceID: targetSourceID),
+                    before: sourceIDBefore,
+                    after: sourceIDAfter
+                )
+            }
+            if attempt < 2 {
+                do {
+                    try await Task.sleep(for: .milliseconds(50))
+                } catch {
+                    return report(
+                        action: action,
+                        result: .cancelled,
+                        before: sourceIDBefore,
+                        after: system.currentSourceID()
+                    )
+                }
+            }
+        }
+        return report(
+            action: action,
+            result: .verificationTimedOut,
+            before: sourceIDBefore,
+            after: system.currentSourceID()
+        )
+    }
+
+    private func report(
+        action: CommandInputModeAction,
+        result: CommandInputModeSwitchResult,
+        before: String?,
+        after: String?
+    ) -> CommandInputModeSwitchReport {
+        CommandInputModeSwitchReport(
+            action: action,
+            result: result,
+            sourceIDBefore: before,
+            sourceIDAfter: after,
+            completedAt: Date()
+        )
+    }
+}
+
+final class SystemCommandInputSourceSystem:
+    CommandInputSourceSystem, @unchecked Sendable {
+    func currentSourceID() -> String? {
+        guard let source = TISCopyCurrentKeyboardInputSource()?
+            .takeRetainedValue() else {
+            return nil
+        }
+        return sourceID(of: source)
+    }
+
+    func candidates() -> [CommandInputSourceCandidate] {
+        guard let rawSources = TISCreateInputSourceList(nil, false)?
+            .takeRetainedValue() as? [TISInputSource] else {
+            return []
+        }
+        return rawSources.compactMap { source in
+            guard let id = sourceID(of: source) else { return nil }
+            return CommandInputSourceCandidate(
+                id: id,
+                languages: languages(of: source),
+                isASCIICapable: booleanProperty(
+                    kTISPropertyInputSourceIsASCIICapable,
+                    of: source
+                ),
+                isEnabled: booleanProperty(
+                    kTISPropertyInputSourceIsEnabled,
+                    of: source
+                ),
+                isSelectCapable: booleanProperty(
+                    kTISPropertyInputSourceIsSelectCapable,
+                    of: source
+                ),
+                isKeyboardSource: isKeyboardSource(source)
+            )
+        }
+    }
+
+    func preferredSourceID(for action: CommandInputModeAction) -> String? {
+        let source: TISInputSource?
+        switch action {
+        case .switchToEnglish:
+            source = TISCopyCurrentASCIICapableKeyboardInputSource()?
+                .takeRetainedValue()
+        case .switchToJapanese:
+            source = TISCopyInputSourceForLanguage("ja" as CFString)?
+                .takeRetainedValue()
+        }
+        guard let source else { return nil }
+        return sourceID(of: source)
+    }
+
+    func selectSource(id: String) -> Bool {
+        let properties = [
+            kTISPropertyInputSourceID as String: id,
+        ] as CFDictionary
+        guard let sources = TISCreateInputSourceList(properties, false)?
+            .takeRetainedValue() as? [TISInputSource],
+            let source = sources.first(where: { sourceID(of: $0) == id }) else {
+            return false
+        }
+        return TISSelectInputSource(source) == noErr
+    }
+
+    private func sourceID(of source: TISInputSource) -> String? {
+        guard let pointer = TISGetInputSourceProperty(
+            source,
+            kTISPropertyInputSourceID
+        ) else {
+            return nil
+        }
+        return Unmanaged<CFString>.fromOpaque(pointer)
+            .takeUnretainedValue() as String
+    }
+
+    private func languages(of source: TISInputSource) -> [String] {
+        guard let pointer = TISGetInputSourceProperty(
+            source,
+            kTISPropertyInputSourceLanguages
+        ) else {
+            return []
+        }
+        return Unmanaged<CFArray>.fromOpaque(pointer)
+            .takeUnretainedValue() as? [String] ?? []
+    }
+
+    private func booleanProperty(
+        _ key: CFString,
+        of source: TISInputSource
+    ) -> Bool {
+        guard let pointer = TISGetInputSourceProperty(source, key) else {
+            return false
+        }
+        return CFBooleanGetValue(
+            Unmanaged<CFBoolean>.fromOpaque(pointer).takeUnretainedValue()
+        )
+    }
+
+    private func isKeyboardSource(_ source: TISInputSource) -> Bool {
+        guard stringProperty(
+            kTISPropertyInputSourceCategory,
+            of: source
+        ) == kTISCategoryKeyboardInputSource as String else {
+            return false
+        }
+        let sourceType = stringProperty(
+            kTISPropertyInputSourceType,
+            of: source
+        )
+        return sourceType == kTISTypeKeyboardLayout as String
+            || sourceType == kTISTypeKeyboardInputMode as String
+    }
+
+    private func stringProperty(
+        _ key: CFString,
+        of source: TISInputSource
+    ) -> String? {
+        guard let pointer = TISGetInputSourceProperty(source, key) else {
+            return nil
+        }
+        return Unmanaged<CFString>.fromOpaque(pointer)
+            .takeUnretainedValue() as String
     }
 }
 
@@ -169,11 +487,6 @@ struct CommandInputModeStateMachine: Sendable {
     }
 }
 
-protocol CommandInputModeEventPosting: AnyObject, Sendable {
-    @discardableResult
-    func post(_ action: CommandInputModeAction) -> Bool
-}
-
 @MainActor
 protocol CommandInputModeMonitoring: AnyObject {
     var isRunning: Bool { get }
@@ -181,22 +494,37 @@ protocol CommandInputModeMonitoring: AnyObject {
     var lastCommandEventAt: Date? { get }
     var lastAction: CommandInputModeAction? { get }
     var lastActionAt: Date? { get }
-    var lastPostCreatedEvents: Bool? { get }
+    var lastSwitchReport: CommandInputModeSwitchReport? { get }
     var diagnosticsDidChange: (() -> Void)? { get set }
 
     func start() -> Bool
     func stop()
-    @discardableResult
-    func postForTesting(_ action: CommandInputModeAction) -> Bool
+    func switchForTesting(_ action: CommandInputModeAction)
 }
 
 @MainActor
 protocol CommandInputModePermissionProviding: AnyObject {
     var isAccessibilityGranted: Bool { get }
+    var authorizationSnapshot: CommandInputModeAuthorizationSnapshot { get }
 
     func requestAccessibilityAccess()
     func openAccessibilitySettings()
+    func requestInputMonitoringAccess()
+    func openInputMonitoringSettings()
     func revealCurrentBuild()
+}
+
+extension CommandInputModePermissionProviding {
+    var authorizationSnapshot: CommandInputModeAuthorizationSnapshot {
+        CommandInputModeAuthorizationSnapshot(
+            accessibilityGranted: isAccessibilityGranted,
+            listenEventGranted: false,
+            postEventGranted: false
+        )
+    }
+
+    func requestInputMonitoringAccess() {}
+    func openInputMonitoringSettings() {}
 }
 
 @MainActor
@@ -238,9 +566,9 @@ final class SystemCommandInputModeBackgroundActivityManager:
         // This monitor exists only because the user explicitly enabled a
         // global shortcut service. Classifying it as discretionary background
         // work makes the process eligible for App Nap as soon as Yorozu is no
-        // longer frontmost, delaying the event tap and its posted Eisu/Kana
-        // event. Keep the user-requested activity responsive without blocking
-        // idle system sleep.
+        // longer frontmost, delaying the event tap and the subsequent TIS
+        // selection. Keep the user-requested activity responsive without
+        // blocking idle system sleep.
         activity = processInfo.beginActivity(
             options: Self.activityOptions,
             reason: Self.reason
@@ -268,43 +596,24 @@ final class NoOpCommandInputModeBackgroundActivityManager:
     }
 }
 
-final class SystemCommandInputModeEventPoster:
-    CommandInputModeEventPosting, @unchecked Sendable {
-    func post(_ action: CommandInputModeAction) -> Bool {
-        let keyCode = action.keyCode
-        guard let source = CGEventSource(stateID: .hidSystemState),
-              let keyDown = CGEvent(
-            keyboardEventSource: source,
-            virtualKey: keyCode,
-            keyDown: true
-        ), let keyUp = CGEvent(
-            keyboardEventSource: source,
-            virtualKey: keyCode,
-            keyDown: false
-        ) else {
-            return false
-        }
-
-        keyDown.flags = []
-        keyUp.flags = []
-        keyDown.post(tap: .cghidEventTap)
-        keyUp.post(tap: .cghidEventTap)
-        return true
-    }
-}
-
 @MainActor
 final class SystemCommandInputModePermissionProvider: CommandInputModePermissionProviding {
     var isAccessibilityGranted: Bool {
         AXIsProcessTrusted()
     }
 
+    var authorizationSnapshot: CommandInputModeAuthorizationSnapshot {
+        CommandInputModeAuthorizationSnapshot(
+            accessibilityGranted: AXIsProcessTrusted(),
+            listenEventGranted: CGPreflightListenEventAccess(),
+            postEventGranted: CGPreflightPostEventAccess()
+        )
+    }
+
     func requestAccessibilityAccess() {
         let promptKey = commandInputModeAccessibilityPromptKey as String
         let options = [promptKey: true] as CFDictionary
         _ = AXIsProcessTrustedWithOptions(options)
-        // Give the system prompt time to register this exact executable with
-        // TCC before showing its settings pane.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
             self?.openAccessibilitySettings()
         }
@@ -313,6 +622,22 @@ final class SystemCommandInputModePermissionProvider: CommandInputModePermission
     func openAccessibilitySettings() {
         guard let url = URL(
             string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
+        ) else {
+            return
+        }
+        NSWorkspace.shared.open(url)
+    }
+
+    func requestInputMonitoringAccess() {
+        _ = CGRequestListenEventAccess()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
+            self?.openInputMonitoringSettings()
+        }
+    }
+
+    func openInputMonitoringSettings() {
+        guard let url = URL(
+            string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent"
         ) else {
             return
         }
@@ -389,7 +714,7 @@ private struct CommandInputModeMonitorDiagnostics: Sendable {
     let lastCommandEventAt: Date?
     let lastAction: CommandInputModeAction?
     let lastActionAt: Date?
-    let lastPostCreatedEvents: Bool?
+    let lastSwitchReport: CommandInputModeSwitchReport?
 }
 
 private final class CommandInputModeEventTapWorker: @unchecked Sendable {
@@ -429,7 +754,7 @@ private final class CommandInputModeEventTapWorker: @unchecked Sendable {
     }
 
     private let lock = NSLock()
-    private let eventPoster: any CommandInputModeEventPosting
+    private let inputSourceSwitcher: any CommandInputSourceSwitching
     private let diagnosticsHandler: @Sendable (
         CommandInputModeMonitorDiagnostics
     ) -> Void
@@ -443,16 +768,18 @@ private final class CommandInputModeEventTapWorker: @unchecked Sendable {
     private var lastCommandEventAt: Date?
     private var lastAction: CommandInputModeAction?
     private var lastActionAt: Date?
-    private var lastPostCreatedEvents: Bool?
+    private var lastSwitchReport: CommandInputModeSwitchReport?
+    private var switchGeneration: UInt64 = 0
+    private var switchTask: Task<Void, Never>?
     private var stateMachine = CommandInputModeStateMachine()
 
     init(
-        eventPoster: any CommandInputModeEventPosting,
+        inputSourceSwitcher: any CommandInputSourceSwitching,
         diagnosticsHandler: @escaping @Sendable (
             CommandInputModeMonitorDiagnostics
         ) -> Void
     ) {
-        self.eventPoster = eventPoster
+        self.inputSourceSwitcher = inputSourceSwitcher
         self.diagnosticsHandler = diagnosticsHandler
     }
 
@@ -502,6 +829,9 @@ private final class CommandInputModeEventTapWorker: @unchecked Sendable {
     func stop() {
         lock.lock()
         stopRequested = true
+        switchGeneration &+= 1
+        let switchTask = switchTask
+        self.switchTask = nil
         running = false
         status = .stopped
         diagnosticsSequence &+= 1
@@ -509,6 +839,7 @@ private final class CommandInputModeEventTapWorker: @unchecked Sendable {
         let runLoop = runLoop
         lock.unlock()
 
+        switchTask?.cancel()
         diagnosticsHandler(diagnostics)
         if let runLoop {
             CFRunLoopStop(runLoop)
@@ -516,9 +847,8 @@ private final class CommandInputModeEventTapWorker: @unchecked Sendable {
         }
     }
 
-    @discardableResult
-    func postForTesting(_ action: CommandInputModeAction) -> Bool {
-        post(action)
+    func switchForTesting(_ action: CommandInputModeAction) {
+        beginSwitch(action)
     }
 
     private func runEventTap(
@@ -662,7 +992,7 @@ private final class CommandInputModeEventTapWorker: @unchecked Sendable {
                 keyCode: keyCode,
                 flags: event.flags
             ) {
-                _ = post(action)
+                enqueueSwitchAfterCallback(action)
             }
         case .keyDown, .keyUp:
             stateMachine.handleKeyboardActivity()
@@ -694,14 +1024,72 @@ private final class CommandInputModeEventTapWorker: @unchecked Sendable {
         }
     }
 
-    private func post(_ action: CommandInputModeAction) -> Bool {
-        let createdEvents = eventPoster.post(action)
+    private func enqueueSwitchAfterCallback(_ action: CommandInputModeAction) {
+        lock.lock()
+        let runLoop = runLoop
+        let shouldIgnore = stopRequested
+        lock.unlock()
+        guard let runLoop, !shouldIgnore else { return }
+
+        // TIS selection is intentionally deferred until the event-tap callback
+        // returns. Performing input-source work inside the callback can delay
+        // the tap and cause macOS to disable it.
+        CFRunLoopPerformBlock(
+            runLoop,
+            CFRunLoopMode.commonModes.rawValue as CFString
+        ) { [weak self] in
+            self?.beginSwitch(action)
+        }
+        CFRunLoopWakeUp(runLoop)
+    }
+
+    private func beginSwitch(_ action: CommandInputModeAction) {
+        lock.lock()
+        guard !stopRequested else {
+            lock.unlock()
+            return
+        }
+        switchGeneration &+= 1
+        let generation = switchGeneration
+        let previousTask = switchTask
+        lock.unlock()
+
+        previousTask?.cancel()
         publishDiagnostics {
             lastAction = action
             lastActionAt = Date()
-            lastPostCreatedEvents = createdEvents
         }
-        return createdEvents
+
+        let inputSourceSwitcher = inputSourceSwitcher
+        let task = Task { [weak self] in
+            let report = await inputSourceSwitcher.switchInputMode(action)
+            self?.finishSwitch(report, generation: generation)
+        }
+        lock.lock()
+        if generation == switchGeneration, !stopRequested {
+            switchTask = task
+            lock.unlock()
+        } else {
+            lock.unlock()
+            task.cancel()
+        }
+    }
+
+    private func finishSwitch(
+        _ report: CommandInputModeSwitchReport,
+        generation: UInt64
+    ) {
+        lock.lock()
+        guard generation == switchGeneration, !stopRequested else {
+            lock.unlock()
+            return
+        }
+        switchTask = nil
+        lastSwitchReport = report
+        diagnosticsSequence &+= 1
+        let diagnostics = makeDiagnosticsLocked()
+        lock.unlock()
+        diagnosticsHandler(diagnostics)
     }
 
     private func publishDiagnostics(_ update: () -> Void) {
@@ -720,7 +1108,7 @@ private final class CommandInputModeEventTapWorker: @unchecked Sendable {
             lastCommandEventAt: lastCommandEventAt,
             lastAction: lastAction,
             lastActionAt: lastActionAt,
-            lastPostCreatedEvents: lastPostCreatedEvents
+            lastSwitchReport: lastSwitchReport
         )
     }
 
@@ -740,9 +1128,9 @@ private final class CommandInputModeEventTapWorker: @unchecked Sendable {
 
 @MainActor
 final class CommandInputModeMonitor: CommandInputModeMonitoring {
-    private let eventPoster: any CommandInputModeEventPosting
+    private let inputSourceSwitcher: any CommandInputSourceSwitching
     private lazy var worker = CommandInputModeEventTapWorker(
-        eventPoster: eventPoster
+        inputSourceSwitcher: inputSourceSwitcher
     ) { [weak self] diagnostics in
         Task { @MainActor [weak self] in
             self?.apply(diagnostics)
@@ -754,13 +1142,13 @@ final class CommandInputModeMonitor: CommandInputModeMonitoring {
     private(set) var lastCommandEventAt: Date?
     private(set) var lastAction: CommandInputModeAction?
     private(set) var lastActionAt: Date?
-    private(set) var lastPostCreatedEvents: Bool?
+    private(set) var lastSwitchReport: CommandInputModeSwitchReport?
 
     init(
-        eventPoster: any CommandInputModeEventPosting =
-            SystemCommandInputModeEventPoster()
+        inputSourceSwitcher: any CommandInputSourceSwitching =
+            SystemCommandInputSourceSwitcher()
     ) {
-        self.eventPoster = eventPoster
+        self.inputSourceSwitcher = inputSourceSwitcher
     }
 
     var isRunning: Bool { worker.isRunning }
@@ -776,10 +1164,9 @@ final class CommandInputModeMonitor: CommandInputModeMonitoring {
         apply(worker.diagnostics)
     }
 
-    func postForTesting(_ action: CommandInputModeAction) -> Bool {
-        let posted = worker.postForTesting(action)
+    func switchForTesting(_ action: CommandInputModeAction) {
+        worker.switchForTesting(action)
         apply(worker.diagnostics)
-        return posted
     }
 
     private func apply(_ diagnostics: CommandInputModeMonitorDiagnostics) {
@@ -792,7 +1179,7 @@ final class CommandInputModeMonitor: CommandInputModeMonitoring {
         lastCommandEventAt = diagnostics.lastCommandEventAt
         lastAction = diagnostics.lastAction
         lastActionAt = diagnostics.lastActionAt
-        lastPostCreatedEvents = diagnostics.lastPostCreatedEvents
+        lastSwitchReport = diagnostics.lastSwitchReport
         diagnosticsDidChange?()
     }
 }
@@ -832,13 +1219,15 @@ final class CommandInputModeController: ObservableObject {
         }
     }
     @Published private(set) var isAccessibilityGranted = false
+    @Published private(set) var isInputMonitoringGranted = false
+    @Published private(set) var isEventPostingGranted = false
     @Published private(set) var runtimeStatus: RuntimeStatus = .off
     @Published private(set) var monitorStatus: CommandInputModeMonitorStatus = .stopped
     @Published private(set) var codeSigningStatus: CommandInputModeCodeSigningStatus
     @Published private(set) var lastCommandEventAt: Date?
     @Published private(set) var lastAction: CommandInputModeAction?
     @Published private(set) var lastActionAt: Date?
-    @Published private(set) var lastPostCreatedEvents: Bool?
+    @Published private(set) var lastSwitchReport: CommandInputModeSwitchReport?
 
     private let defaults: UserDefaults
     private let monitor: any CommandInputModeMonitoring
@@ -914,19 +1303,22 @@ final class CommandInputModeController: ObservableObject {
     }
 
     func refreshAuthorization() {
-        isAccessibilityGranted = permissionProvider.isAccessibilityGranted
+        let authorization = permissionProvider.authorizationSnapshot
+        isAccessibilityGranted = authorization.accessibilityGranted
+        isInputMonitoringGranted = authorization.listenEventGranted
+        isEventPostingGranted = authorization.postEventGranted
         codeSigningStatus = codeSigningStatusProvider.status
         reconcile()
         refreshDiagnostics()
     }
 
-    func requestAccessibilityAccess() {
-        permissionProvider.requestAccessibilityAccess()
+    func requestInputMonitoringAccess() {
+        permissionProvider.requestInputMonitoringAccess()
         refreshAuthorization()
     }
 
-    func openAccessibilitySettings() {
-        permissionProvider.openAccessibilitySettings()
+    func openInputMonitoringSettings() {
+        permissionProvider.openInputMonitoringSettings()
     }
 
     func revealCurrentBuild() {
@@ -934,13 +1326,13 @@ final class CommandInputModeController: ObservableObject {
     }
 
     func testSwitch(_ action: CommandInputModeAction) {
-        guard isEnabled, isAccessibilityGranted else { return }
-        _ = monitor.postForTesting(action)
+        guard isEnabled, isInputMonitoringGranted else { return }
+        monitor.switchForTesting(action)
         refreshDiagnostics()
     }
 
     func recoverMonitoringIfNeeded() {
-        guard hasStarted, isEnabled, isAccessibilityGranted else { return }
+        guard hasStarted, isEnabled, isInputMonitoringGranted else { return }
         guard !monitor.isRunning else {
             runtimeStatus = .active
             refreshDiagnostics()
@@ -964,10 +1356,10 @@ final class CommandInputModeController: ObservableObject {
             runtimeStatus = .off
             return
         }
-        // Accessibility grants both event listening and posting. Requiring the
-        // narrower Input Monitoring privilege as well creates a redundant TCC
-        // dependency and can leave the app waiting for two separate grants.
-        guard isAccessibilityGranted else {
+        // This listen-only event tap is governed by Input Monitoring. TIS
+        // selects the source directly, so Accessibility and event-posting
+        // access are diagnostics rather than runtime gates.
+        guard isInputMonitoringGranted else {
             monitor.stop()
             stopMonitoringHealthChecks()
             backgroundActivityManager.end()
@@ -1007,7 +1399,7 @@ final class CommandInputModeController: ObservableObject {
         lastCommandEventAt = monitor.lastCommandEventAt
         lastAction = monitor.lastAction
         lastActionAt = monitor.lastActionAt
-        lastPostCreatedEvents = monitor.lastPostCreatedEvents
+        lastSwitchReport = monitor.lastSwitchReport
     }
 }
 
@@ -1018,7 +1410,7 @@ private final class DisabledCommandInputModeMonitor: CommandInputModeMonitoring 
     var lastCommandEventAt: Date?
     var lastAction: CommandInputModeAction?
     var lastActionAt: Date?
-    var lastPostCreatedEvents: Bool?
+    var lastSwitchReport: CommandInputModeSwitchReport?
     var diagnosticsDidChange: (() -> Void)?
 
     func start() -> Bool {
@@ -1030,15 +1422,22 @@ private final class DisabledCommandInputModeMonitor: CommandInputModeMonitoring 
         status = .stopped
     }
 
-    func postForTesting(_ action: CommandInputModeAction) -> Bool { false }
+    func switchForTesting(_ action: CommandInputModeAction) {}
 }
 
 @MainActor
 private final class DisabledCommandInputModePermissionProvider: CommandInputModePermissionProviding {
     var isAccessibilityGranted = false
+    var authorizationSnapshot = CommandInputModeAuthorizationSnapshot(
+        accessibilityGranted: false,
+        listenEventGranted: false,
+        postEventGranted: false
+    )
 
     func requestAccessibilityAccess() {}
     func openAccessibilitySettings() {}
+    func requestInputMonitoringAccess() {}
+    func openInputMonitoringSettings() {}
     func revealCurrentBuild() {}
 }
 
