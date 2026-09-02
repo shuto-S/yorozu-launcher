@@ -167,7 +167,7 @@ private struct WindowControlSettingsView: View {
             } header: {
                 Text("Window Control")
             } footer: {
-                Text("Hold the configured keys and move the pointer. No click is required. The window under the pointer is brought to the front when tracking begins.")
+                Text("Hold the configured keys and move the pointer. No click is required. Push a moving window to the top edge to maximize it, or to the left or right edge to fill that half of the screen.")
             }
 
             Section("Gestures") {

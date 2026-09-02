@@ -105,8 +105,10 @@ Window Control follows the same permission and signing rules. Its active event t
 created only after the feature is enabled, two distinct modifier combinations are set,
 and the current process is trusted. It listens only for modifier changes and pointer
 movement, then coalesces matching gestures before performing Accessibility work on a
-dedicated serial queue. It uses a user-initiated activity that still permits idle system
-sleep.
+dedicated serial queue. Move gestures use cached screen snapshots and snap at the top,
+left, and right edges against `NSScreen.visibleFrame`; screen snapshots refresh only when
+the display configuration changes. It uses a user-initiated activity that still permits
+idle system sleep.
 
 The shared project must remain buildable without a personal Apple account. Never place a Development Team directly in `project.pbxproj`.
 

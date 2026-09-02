@@ -82,6 +82,80 @@ final class WindowControlTests: XCTestCase {
         )
     }
 
+    func testSnapGeometryUsesVisibleFrameAndDoesNotSnapAtBottom() throws {
+        let screen = WindowControlScreen(
+            frame: CGRect(x: 0, y: 0, width: 1440, height: 900),
+            visibleFrame: CGRect(x: 0, y: 25, width: 1440, height: 835)
+        )
+
+        XCTAssertEqual(
+            try XCTUnwrap(
+                WindowControlSnapGeometry.destination(
+                    at: CGPoint(x: 720, y: 5),
+                    on: screen
+                )
+            ),
+            WindowControlSnapDestination(
+                zone: .maximize,
+                frame: screen.visibleFrame
+            )
+        )
+        XCTAssertEqual(
+            try XCTUnwrap(
+                WindowControlSnapGeometry.destination(
+                    at: CGPoint(x: 5, y: 450),
+                    on: screen
+                )
+            ),
+            WindowControlSnapDestination(
+                zone: .leftHalf,
+                frame: CGRect(x: 0, y: 25, width: 720, height: 835)
+            )
+        )
+        XCTAssertEqual(
+            try XCTUnwrap(
+                WindowControlSnapGeometry.destination(
+                    at: CGPoint(x: 1435, y: 450),
+                    on: screen
+                )
+            ),
+            WindowControlSnapDestination(
+                zone: .rightHalf,
+                frame: CGRect(x: 720, y: 25, width: 720, height: 835)
+            )
+        )
+        XCTAssertNil(
+            WindowControlSnapGeometry.destination(
+                at: CGPoint(x: 720, y: 895),
+                on: screen
+            )
+        )
+        XCTAssertEqual(
+            WindowControlSnapGeometry.destination(
+                at: CGPoint(x: 5, y: 5),
+                on: screen
+            )?.zone,
+            .maximize
+        )
+    }
+
+    func testScreenFrameConversionSupportsDisplaysAboveAndBelowPrimary() {
+        XCTAssertEqual(
+            WindowControlSnapGeometry.accessibilityFrame(
+                from: CGRect(x: 0, y: 900, width: 1440, height: 900),
+                primaryScreenMaxY: 900
+            ),
+            CGRect(x: 0, y: -900, width: 1440, height: 900)
+        )
+        XCTAssertEqual(
+            WindowControlSnapGeometry.accessibilityFrame(
+                from: CGRect(x: 0, y: -768, width: 1024, height: 768),
+                primaryScreenMaxY: 900
+            ),
+            CGRect(x: 0, y: 900, width: 1024, height: 768)
+        )
+    }
+
     func testGestureTracksPointerUntilReset() throws {
         let target = testTarget()
         var session = WindowControlGestureSession()
@@ -166,6 +240,117 @@ final class WindowControlTests: XCTestCase {
         XCTAssertEqual(
             accessor.movedPositions,
             [CGPoint(x: 130, y: 140)]
+        )
+    }
+
+    func testPointerCoordinatorSnapsOnceAndRestoresFreeMoveSize() {
+        let accessor = TestWindowAccessor(target: testTarget())
+        let screen = WindowControlScreen(
+            frame: CGRect(x: 0, y: 0, width: 1000, height: 800),
+            visibleFrame: CGRect(x: 0, y: 24, width: 1000, height: 776)
+        )
+        let coordinator = WindowControlPointerCoordinator(
+            windowAccessor: accessor,
+            screenProvider: TestWindowControlScreenProvider(screen: screen)
+        )
+
+        _ = coordinator.process(
+            WindowControlPointerSample(
+                operation: .move,
+                location: CGPoint(x: 300, y: 300)
+            )
+        )
+        _ = coordinator.process(
+            WindowControlPointerSample(
+                operation: .move,
+                location: CGPoint(x: 5, y: 300)
+            )
+        )
+        _ = coordinator.process(
+            WindowControlPointerSample(
+                operation: .move,
+                location: CGPoint(x: 3, y: 320)
+            )
+        )
+
+        XCTAssertEqual(
+            accessor.setFrames,
+            [CGRect(x: 0, y: 24, width: 500, height: 776)]
+        )
+
+        _ = coordinator.process(
+            WindowControlPointerSample(
+                operation: .move,
+                location: CGPoint(x: 100, y: 320)
+            )
+        )
+        XCTAssertEqual(
+            accessor.setFrames,
+            [
+                CGRect(x: 0, y: 24, width: 500, height: 776),
+                CGRect(x: -100, y: 120, width: 400, height: 300),
+            ]
+        )
+    }
+
+    func testResizeAndNonResizableMoveDoNotUseSnapFrames() {
+        let screen = WindowControlScreen(
+            frame: CGRect(x: 0, y: 0, width: 1000, height: 800),
+            visibleFrame: CGRect(x: 0, y: 24, width: 1000, height: 776)
+        )
+        let screenProvider = TestWindowControlScreenProvider(screen: screen)
+
+        let resizeAccessor = TestWindowAccessor(target: testTarget())
+        let resizeCoordinator = WindowControlPointerCoordinator(
+            windowAccessor: resizeAccessor,
+            screenProvider: screenProvider
+        )
+        _ = resizeCoordinator.process(
+            WindowControlPointerSample(
+                operation: .resize,
+                location: CGPoint(x: 100, y: 100)
+            )
+        )
+        _ = resizeCoordinator.process(
+            WindowControlPointerSample(
+                operation: .resize,
+                location: CGPoint(x: 5, y: 120)
+            )
+        )
+        XCTAssertTrue(resizeAccessor.setFrames.isEmpty)
+        XCTAssertEqual(
+            resizeAccessor.resizedSizes,
+            [CGSize(width: 305, height: 320)]
+        )
+
+        let fixedTarget = WindowControlTarget(
+            element: NSObject(),
+            processIdentifier: 123,
+            initialPosition: CGPoint(x: 100, y: 100),
+            initialSize: CGSize(width: 400, height: 300),
+            supportsResizing: false
+        )
+        let moveAccessor = TestWindowAccessor(target: fixedTarget)
+        let moveCoordinator = WindowControlPointerCoordinator(
+            windowAccessor: moveAccessor,
+            screenProvider: screenProvider
+        )
+        _ = moveCoordinator.process(
+            WindowControlPointerSample(
+                operation: .move,
+                location: CGPoint(x: 100, y: 100)
+            )
+        )
+        _ = moveCoordinator.process(
+            WindowControlPointerSample(
+                operation: .move,
+                location: CGPoint(x: 5, y: 100)
+            )
+        )
+        XCTAssertTrue(moveAccessor.setFrames.isEmpty)
+        XCTAssertEqual(
+            moveAccessor.movedPositions,
+            [CGPoint(x: 5, y: 100)]
         )
     }
 
@@ -390,6 +575,7 @@ private final class TestWindowAccessor: WindowAccessing, @unchecked Sendable {
     private(set) var raiseCount = 0
     private(set) var movedPositions: [CGPoint] = []
     private(set) var resizedSizes: [CGSize] = []
+    private(set) var setFrames: [CGRect] = []
 
     init(target: WindowControlTarget?) {
         targetValue = target
@@ -415,6 +601,31 @@ private final class TestWindowAccessor: WindowAccessing, @unchecked Sendable {
     func resize(_ target: WindowControlTarget, to size: CGSize) -> Bool {
         resizedSizes.append(size)
         return acceptsUpdates
+    }
+
+    func setFrame(_ target: WindowControlTarget, to frame: CGRect) -> Bool {
+        setFrames.append(frame)
+        return acceptsUpdates
+    }
+}
+
+private final class TestWindowControlScreenProvider:
+    WindowControlScreenProviding, @unchecked Sendable {
+    let screen: WindowControlScreen?
+
+    init(screen: WindowControlScreen?) {
+        self.screen = screen
+    }
+
+    func screen(containing point: CGPoint) -> WindowControlScreen? {
+        guard let screen,
+              point.x >= screen.frame.minX,
+              point.x <= screen.frame.maxX,
+              point.y >= screen.frame.minY,
+              point.y <= screen.frame.maxY else {
+            return nil
+        }
+        return screen
     }
 }
 

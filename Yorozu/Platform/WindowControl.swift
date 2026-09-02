@@ -95,22 +95,26 @@ struct WindowControlTarget: @unchecked Sendable {
     let processIdentifier: pid_t
     let initialPosition: CGPoint
     let initialSize: CGSize
+    let supportsResizing: Bool
 
     init(
         element: AnyObject,
         processIdentifier: pid_t,
         initialPosition: CGPoint,
-        initialSize: CGSize
+        initialSize: CGSize,
+        supportsResizing: Bool = true
     ) {
         self.element = element
         self.processIdentifier = processIdentifier
         self.initialPosition = initialPosition
         self.initialSize = initialSize
+        self.supportsResizing = supportsResizing
     }
 }
 
 enum WindowControlGeometry {
     static let minimumSize = CGSize(width: 160, height: 120)
+    static let snapEdgeThreshold: CGFloat = 10
 
     static func movedPosition(
         initialPosition: CGPoint,
@@ -139,6 +143,169 @@ enum WindowControlGeometry {
             )
         )
     }
+}
+
+enum WindowControlSnapZone: Equatable, Sendable {
+    case maximize
+    case leftHalf
+    case rightHalf
+}
+
+struct WindowControlScreen: Equatable, Sendable {
+    let frame: CGRect
+    let visibleFrame: CGRect
+}
+
+struct WindowControlSnapDestination: Equatable, Sendable {
+    let zone: WindowControlSnapZone
+    let frame: CGRect
+}
+
+enum WindowControlSnapGeometry {
+    static func destination(
+        at pointer: CGPoint,
+        on screen: WindowControlScreen,
+        edgeThreshold: CGFloat = WindowControlGeometry.snapEdgeThreshold
+    ) -> WindowControlSnapDestination? {
+        guard screen.frame.containsInclusive(pointer),
+              edgeThreshold >= 0 else { return nil }
+
+        let zone: WindowControlSnapZone?
+        if pointer.y <= screen.frame.minY + edgeThreshold {
+            zone = .maximize
+        } else if pointer.x <= screen.frame.minX + edgeThreshold {
+            zone = .leftHalf
+        } else if pointer.x >= screen.frame.maxX - edgeThreshold {
+            zone = .rightHalf
+        } else {
+            zone = nil
+        }
+
+        guard let zone else { return nil }
+        return WindowControlSnapDestination(
+            zone: zone,
+            frame: frame(for: zone, visibleFrame: screen.visibleFrame)
+        )
+    }
+
+    static func accessibilityFrame(
+        from appKitFrame: CGRect,
+        primaryScreenMaxY: CGFloat
+    ) -> CGRect {
+        CGRect(
+            x: appKitFrame.minX,
+            y: primaryScreenMaxY - appKitFrame.maxY,
+            width: appKitFrame.width,
+            height: appKitFrame.height
+        )
+    }
+
+    private static func frame(
+        for zone: WindowControlSnapZone,
+        visibleFrame: CGRect
+    ) -> CGRect {
+        switch zone {
+        case .maximize:
+            return visibleFrame
+        case .leftHalf:
+            return CGRect(
+                x: visibleFrame.minX,
+                y: visibleFrame.minY,
+                width: visibleFrame.width / 2,
+                height: visibleFrame.height
+            )
+        case .rightHalf:
+            let halfWidth = visibleFrame.width / 2
+            return CGRect(
+                x: visibleFrame.minX + halfWidth,
+                y: visibleFrame.minY,
+                width: visibleFrame.width - halfWidth,
+                height: visibleFrame.height
+            )
+        }
+    }
+}
+
+private extension CGRect {
+    func containsInclusive(_ point: CGPoint) -> Bool {
+        point.x >= minX && point.x <= maxX
+            && point.y >= minY && point.y <= maxY
+    }
+}
+
+protocol WindowControlScreenProviding: AnyObject, Sendable {
+    func screen(containing point: CGPoint) -> WindowControlScreen?
+}
+
+final class SystemWindowControlScreenProvider:
+    WindowControlScreenProviding, @unchecked Sendable {
+    private let lock = NSLock()
+    private var screens: [WindowControlScreen] = []
+
+    @MainActor
+    func refresh() {
+        let appKitScreens = NSScreen.screens
+        guard let primaryScreenMaxY = appKitScreens.first?.frame.maxY else {
+            replaceScreens([])
+            return
+        }
+        replaceScreens(
+            appKitScreens.map { screen in
+                WindowControlScreen(
+                    frame: WindowControlSnapGeometry.accessibilityFrame(
+                        from: screen.frame,
+                        primaryScreenMaxY: primaryScreenMaxY
+                    ),
+                    visibleFrame: WindowControlSnapGeometry.accessibilityFrame(
+                        from: screen.visibleFrame,
+                        primaryScreenMaxY: primaryScreenMaxY
+                    )
+                )
+            }
+        )
+    }
+
+    func screen(containing point: CGPoint) -> WindowControlScreen? {
+        lock.lock()
+        let currentScreens = screens
+        lock.unlock()
+        return currentScreens.first { $0.frame.containsInclusive(point) }
+    }
+
+    private func replaceScreens(_ screens: [WindowControlScreen]) {
+        lock.lock()
+        self.screens = screens
+        lock.unlock()
+    }
+}
+
+private final class WindowControlScreenParametersObserver:
+    @unchecked Sendable {
+    private var token: (any NSObjectProtocol)?
+
+    @MainActor
+    init(screenProvider: SystemWindowControlScreenProvider?) {
+        token = NotificationCenter.default.addObserver(
+            forName: NSApplication.didChangeScreenParametersNotification,
+            object: nil,
+            queue: .main
+        ) { [weak screenProvider] _ in
+            Task { @MainActor in
+                screenProvider?.refresh()
+            }
+        }
+    }
+
+    deinit {
+        if let token {
+            NotificationCenter.default.removeObserver(token)
+        }
+    }
+}
+
+final class EmptyWindowControlScreenProvider:
+    WindowControlScreenProviding, @unchecked Sendable {
+    func screen(containing point: CGPoint) -> WindowControlScreen? { nil }
 }
 
 enum WindowControlGestureUpdate {
@@ -237,6 +404,7 @@ protocol WindowAccessing: AnyObject, Sendable {
     func raiseAndActivate(_ target: WindowControlTarget)
     func move(_ target: WindowControlTarget, to position: CGPoint) -> Bool
     func resize(_ target: WindowControlTarget, to size: CGSize) -> Bool
+    func setFrame(_ target: WindowControlTarget, to frame: CGRect) -> Bool
 }
 
 final class SystemWindowAccessor: WindowAccessing, @unchecked Sendable {
@@ -277,13 +445,21 @@ final class SystemWindowAccessor: WindowAccessing, @unchecked Sendable {
             return nil
         }
 
-        let writableAttribute = switch operation {
-        case .move:
+        let positionIsSettable = isSettable(
+            window,
             kAXPositionAttribute as CFString
-        case .resize:
+        )
+        let sizeIsSettable = isSettable(
+            window,
             kAXSizeAttribute as CFString
+        )
+        let supportsOperation = switch operation {
+        case .move:
+            positionIsSettable
+        case .resize:
+            sizeIsSettable
         }
-        guard isSettable(window, writableAttribute) else {
+        guard supportsOperation else {
             return nil
         }
 
@@ -291,7 +467,8 @@ final class SystemWindowAccessor: WindowAccessing, @unchecked Sendable {
             element: window,
             processIdentifier: pid,
             initialPosition: position,
-            initialSize: size
+            initialSize: size,
+            supportsResizing: sizeIsSettable
         )
     }
 
@@ -328,6 +505,18 @@ final class SystemWindowAccessor: WindowAccessing, @unchecked Sendable {
             kAXSizeAttribute as CFString,
             value
         ) == .success
+    }
+
+    func setFrame(_ target: WindowControlTarget, to frame: CGRect) -> Bool {
+        // macOS can constrain the first resize to the window's current display.
+        // Reapply it after moving so cross-display snaps reach the requested size.
+        guard target.supportsResizing,
+              resize(target, to: frame.size),
+              move(target, to: frame.origin),
+              resize(target, to: frame.size) else {
+            return false
+        }
+        return true
     }
 
     private func resolveWindow(from element: AXUIElement) -> AXUIElement? {
@@ -468,10 +657,17 @@ struct WindowControlPointerSample: Equatable, Sendable {
 
 final class WindowControlPointerCoordinator: @unchecked Sendable {
     private let windowAccessor: any WindowAccessing
+    private let screenProvider: any WindowControlScreenProviding
     private var gestureSession = WindowControlGestureSession()
+    private var activeSnapDestination: WindowControlSnapDestination?
 
-    init(windowAccessor: any WindowAccessing) {
+    init(
+        windowAccessor: any WindowAccessing,
+        screenProvider: any WindowControlScreenProviding =
+            EmptyWindowControlScreenProvider()
+    ) {
         self.windowAccessor = windowAccessor
+        self.screenProvider = screenProvider
     }
 
     func process(_ sample: WindowControlPointerSample) -> WindowControlActivity {
@@ -495,18 +691,24 @@ final class WindowControlPointerCoordinator: @unchecked Sendable {
             operation: sample.operation,
             pointer: sample.location
         ) else {
-            gestureSession.reset()
+            reset()
             return process(sample)
         }
 
-        let succeeded = switch update {
+        let succeeded: Bool
+        switch update {
         case let .move(target, position):
-            windowAccessor.move(target, to: position)
+            succeeded = processMove(
+                target: target,
+                position: position,
+                pointer: sample.location
+            )
         case let .resize(target, size):
-            windowAccessor.resize(target, to: size)
+            activeSnapDestination = nil
+            succeeded = windowAccessor.resize(target, to: size)
         }
         guard succeeded else {
-            gestureSession.reset()
+            reset()
             return .updateRejected(sample.operation)
         }
         return .tracking(sample.operation)
@@ -514,6 +716,46 @@ final class WindowControlPointerCoordinator: @unchecked Sendable {
 
     func reset() {
         gestureSession.reset()
+        activeSnapDestination = nil
+    }
+
+    private func processMove(
+        target: WindowControlTarget,
+        position: CGPoint,
+        pointer: CGPoint
+    ) -> Bool {
+        let destination = target.supportsResizing
+            ? screenProvider.screen(containing: pointer).flatMap {
+                WindowControlSnapGeometry.destination(
+                    at: pointer,
+                    on: $0
+                )
+            }
+            : nil
+
+        if let destination {
+            guard destination != activeSnapDestination else { return true }
+            guard windowAccessor.setFrame(
+                target,
+                to: destination.frame
+            ) else { return false }
+            activeSnapDestination = destination
+            return true
+        }
+
+        if activeSnapDestination != nil {
+            let restoredFrame = CGRect(
+                origin: position,
+                size: target.initialSize
+            )
+            guard windowAccessor.setFrame(target, to: restoredFrame) else {
+                return false
+            }
+            activeSnapDestination = nil
+            return true
+        }
+
+        return windowAccessor.move(target, to: position)
     }
 }
 
@@ -541,9 +783,13 @@ private final class WindowControlPointerProcessor: @unchecked Sendable {
 
     init(
         windowAccessor: any WindowAccessing,
+        screenProvider: any WindowControlScreenProviding,
         activityHandler: @escaping @MainActor @Sendable (WindowControlActivity) -> Void
     ) {
-        coordinator = WindowControlPointerCoordinator(windowAccessor: windowAccessor)
+        coordinator = WindowControlPointerCoordinator(
+            windowAccessor: windowAccessor,
+            screenProvider: screenProvider
+        )
         self.activityHandler = activityHandler
     }
 
@@ -666,11 +912,13 @@ private final class WindowControlEventTapWorker: @unchecked Sendable {
     init(
         configuration: WindowControlConfiguration,
         windowAccessor: any WindowAccessing,
+        screenProvider: any WindowControlScreenProviding,
         activityHandler: @escaping @MainActor @Sendable (WindowControlActivity) -> Void
     ) {
         self.configuration = configuration
         pointerProcessor = WindowControlPointerProcessor(
             windowAccessor: windowAccessor,
+            screenProvider: screenProvider,
             activityHandler: activityHandler
         )
     }
@@ -860,12 +1108,26 @@ private final class WindowControlEventTapWorker: @unchecked Sendable {
 @MainActor
 final class WindowControlMonitor: WindowControlMonitoring {
     private let windowAccessor: any WindowAccessing
+    private let screenProvider: any WindowControlScreenProviding
+    private let screenParametersObserver: WindowControlScreenParametersObserver
     private var worker: WindowControlEventTapWorker?
     private var activityHandler:
         (@MainActor @Sendable (WindowControlActivity) -> Void)?
 
-    init(windowAccessor: any WindowAccessing = SystemWindowAccessor()) {
+    init(
+        windowAccessor: any WindowAccessing = SystemWindowAccessor(),
+        screenProvider: (any WindowControlScreenProviding)? = nil
+    ) {
         self.windowAccessor = windowAccessor
+        let resolvedScreenProvider = screenProvider
+            ?? SystemWindowControlScreenProvider()
+        self.screenProvider = resolvedScreenProvider
+        let systemScreenProvider = resolvedScreenProvider
+            as? SystemWindowControlScreenProvider
+        systemScreenProvider?.refresh()
+        screenParametersObserver = WindowControlScreenParametersObserver(
+            screenProvider: systemScreenProvider
+        )
     }
 
     var isRunning: Bool {
@@ -887,6 +1149,7 @@ final class WindowControlMonitor: WindowControlMonitoring {
         let worker = WindowControlEventTapWorker(
             configuration: configuration,
             windowAccessor: windowAccessor,
+            screenProvider: screenProvider,
             activityHandler: activityHandler
         )
         self.worker = worker
