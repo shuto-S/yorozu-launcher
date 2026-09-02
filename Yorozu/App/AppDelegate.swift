@@ -683,7 +683,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             suppressClipboardMonitor: { _ in },
             dependencies: PasteCoordinatorDependencies(
                 isAccessibilityTrusted: { false },
-                postPasteShortcut: { false },
+                postPasteShortcut: { _ in false },
                 sleep: { _ in },
                 activationPollInterval: .zero,
                 activationPollAttempts: 0,

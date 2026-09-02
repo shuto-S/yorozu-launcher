@@ -222,6 +222,7 @@ final class PaletteWindowController: NSWindowController, NSWindowDelegate {
     private let automaticallyHides: Bool
     private let accessibilityOverrides: AccessibilityDisplayOverrides
     private var previousApplication: NSRunningApplication?
+    private var lastExternalApplication: NSRunningApplication?
     private var keyEventMonitor: Any?
 
     private var shouldHideWhenInactive: Bool {
@@ -277,6 +278,7 @@ final class PaletteWindowController: NSWindowController, NSWindowDelegate {
         )
 
         super.init(window: panel)
+        rememberExternalApplication(NSWorkspace.shared.frontmostApplication)
         panel.delegate = self
         bindViewModel()
         installKeyMonitor()
@@ -290,6 +292,12 @@ final class PaletteWindowController: NSWindowController, NSWindowDelegate {
             self,
             selector: #selector(accessibilityDisplayOptionsDidChange(_:)),
             name: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification,
+            object: nil
+        )
+        NSWorkspace.shared.notificationCenter.addObserver(
+            self,
+            selector: #selector(workspaceApplicationDidActivate(_:)),
+            name: NSWorkspace.didActivateApplicationNotification,
             object: nil
         )
     }
@@ -308,6 +316,11 @@ final class PaletteWindowController: NSWindowController, NSWindowDelegate {
         NSWorkspace.shared.notificationCenter.removeObserver(
             self,
             name: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification,
+            object: nil
+        )
+        NSWorkspace.shared.notificationCenter.removeObserver(
+            self,
+            name: NSWorkspace.didActivateApplicationNotification,
             object: nil
         )
         if let keyEventMonitor {
@@ -345,9 +358,9 @@ final class PaletteWindowController: NSWindowController, NSWindowDelegate {
         let startedAt = ProcessInfo.processInfo.systemUptime
         if !panel.isVisible {
             let frontmost = NSWorkspace.shared.frontmostApplication
-            if frontmost?.bundleIdentifier != Bundle.main.bundleIdentifier {
-                previousApplication = frontmost
-            }
+            rememberExternalApplication(frontmost)
+            previousApplication = externalApplication(frontmost)
+                ?? validLastExternalApplication
         }
 
         position(window: panel)
@@ -558,6 +571,39 @@ final class PaletteWindowController: NSWindowController, NSWindowDelegate {
             return
         }
         hide(restorePreviousApplication: false)
+    }
+
+    @objc
+    private func workspaceApplicationDidActivate(_ notification: Notification) {
+        rememberExternalApplication(
+            notification.userInfo?[NSWorkspace.applicationUserInfoKey]
+                as? NSRunningApplication
+        )
+    }
+
+    private var validLastExternalApplication: NSRunningApplication? {
+        guard let lastExternalApplication,
+              !lastExternalApplication.isTerminated else {
+            return nil
+        }
+        return lastExternalApplication
+    }
+
+    private func externalApplication(
+        _ application: NSRunningApplication?
+    ) -> NSRunningApplication? {
+        guard let application,
+              application.processIdentifier != ProcessInfo.processInfo.processIdentifier,
+              application.bundleIdentifier != Bundle.main.bundleIdentifier,
+              !application.isTerminated else {
+            return nil
+        }
+        return application
+    }
+
+    private func rememberExternalApplication(_ application: NSRunningApplication?) {
+        guard let application = externalApplication(application) else { return }
+        lastExternalApplication = application
     }
 
     private func bindViewModel() {

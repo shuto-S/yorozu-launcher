@@ -1302,7 +1302,9 @@ final class SystemPasteboardAccessor: PasteboardAccessing {
 
 @MainActor
 protocol PasteTargetApplication: AnyObject {
+    var processIdentifier: pid_t { get }
     var isActive: Bool { get }
+    var isFrontmost: Bool { get }
     var isTerminated: Bool { get }
     @discardableResult
     func activate() -> Bool
@@ -1316,8 +1318,16 @@ final class RunningApplicationPasteTarget: PasteTargetApplication {
         self.application = application
     }
 
+    var processIdentifier: pid_t {
+        application.processIdentifier
+    }
+
     var isActive: Bool {
         application.isActive
+    }
+
+    var isFrontmost: Bool {
+        NSWorkspace.shared.frontmostApplication?.processIdentifier == processIdentifier
     }
 
     var isTerminated: Bool {
@@ -1326,14 +1336,17 @@ final class RunningApplicationPasteTarget: PasteTargetApplication {
 
     @discardableResult
     func activate() -> Bool {
-        application.activate(options: [])
+        // The palette currently owns activation. Yield it explicitly before
+        // requesting the target so AppKit can perform a coordinated handoff.
+        NSApp.yieldActivation(to: application)
+        return application.activate(from: .current, options: [])
     }
 }
 
 @MainActor
 struct PasteCoordinatorDependencies {
     var isAccessibilityTrusted: () -> Bool
-    var postPasteShortcut: () -> Bool
+    var postPasteShortcut: (pid_t) -> Bool
     var sleep: (Duration) async -> Void
     var activationPollInterval: Duration
     var activationPollAttempts: Int
@@ -1344,8 +1357,9 @@ struct PasteCoordinatorDependencies {
         isAccessibilityTrusted: {
             AXIsProcessTrusted()
         },
-        postPasteShortcut: {
-            guard let source = CGEventSource(stateID: .hidSystemState),
+        postPasteShortcut: { processIdentifier in
+            guard processIdentifier > 0,
+                  let source = CGEventSource(stateID: .combinedSessionState),
                   let keyDown = CGEvent(
                       keyboardEventSource: source,
                       virtualKey: 0x09,
@@ -1360,16 +1374,19 @@ struct PasteCoordinatorDependencies {
             }
             keyDown.flags = .maskCommand
             keyUp.flags = .maskCommand
-            keyDown.post(tap: .cghidEventTap)
-            keyUp.post(tap: .cghidEventTap)
+            // Route the shortcut to the verified target process. Posting to
+            // the global HID stream can race with focus handoff and deliver
+            // Command-V back to Yorozu or another newly active application.
+            keyDown.postToPid(processIdentifier)
+            keyUp.postToPid(processIdentifier)
             return true
         },
         sleep: { duration in
             try? await Task.sleep(for: duration)
         },
-        activationPollInterval: .milliseconds(16),
-        activationPollAttempts: 20,
-        activationGracePeriod: .milliseconds(8),
+        activationPollInterval: .milliseconds(25),
+        activationPollAttempts: 40,
+        activationGracePeriod: .milliseconds(50),
         restorationDelay: .milliseconds(800)
     )
 }
@@ -1478,10 +1495,10 @@ final class PasteCoordinator {
         guard !targetApplication.isTerminated else {
             return .copiedBecauseTargetUnavailable
         }
-        guard targetApplication.isActive else {
+        guard isReadyForPaste(targetApplication) else {
             return .copiedBecauseActivationFailed
         }
-        guard dependencies.postPasteShortcut() else {
+        guard dependencies.postPasteShortcut(targetApplication.processIdentifier) else {
             return .failed
         }
 
@@ -1505,7 +1522,7 @@ final class PasteCoordinator {
     private func waitForActivation(
         of targetApplication: any PasteTargetApplication
     ) async -> ActivationWaitResult {
-        if targetApplication.isActive {
+        if isReadyForPaste(targetApplication) {
             return .active
         }
 
@@ -1514,11 +1531,17 @@ final class PasteCoordinator {
                 return .unavailable
             }
             await dependencies.sleep(dependencies.activationPollInterval)
-            if targetApplication.isActive {
+            if isReadyForPaste(targetApplication) {
                 return .active
             }
         }
 
         return targetApplication.isTerminated ? .unavailable : .timedOut
+    }
+
+    private func isReadyForPaste(
+        _ targetApplication: any PasteTargetApplication
+    ) -> Bool {
+        targetApplication.isActive && targetApplication.isFrontmost
     }
 }

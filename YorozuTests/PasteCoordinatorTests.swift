@@ -15,6 +15,7 @@ final class PasteCoordinatorTests: XCTestCase {
 
         XCTAssertEqual(result, .pasted)
         XCTAssertEqual(fixture.events.postPasteCount, 1)
+        XCTAssertEqual(fixture.events.postedProcessIdentifiers, [fixture.target.processIdentifier])
         XCTAssertEqual(fixture.pasteboard.restoreCount, 1)
         XCTAssertEqual(fixture.suppression.count, 2)
     }
@@ -64,6 +65,26 @@ final class PasteCoordinatorTests: XCTestCase {
         fixture.events.onSleep = {
             if fixture.events.sleepCount == 2 {
                 fixture.target.isActive = true
+                fixture.target.isFrontmost = true
+            }
+        }
+
+        let result = await fixture.coordinator.performPaste(
+            .text("private clipboard content"),
+            into: fixture.target
+        )
+
+        XCTAssertEqual(result, .pasted)
+        XCTAssertGreaterThanOrEqual(fixture.events.sleepCount, 3)
+        XCTAssertEqual(fixture.events.postPasteCount, 1)
+    }
+
+    func testActiveTargetWaitsUntilItIsFrontmostBeforePostingPaste() async {
+        let fixture = makeFixture()
+        fixture.target.isActive = true
+        fixture.events.onSleep = {
+            if fixture.events.sleepCount == 2 {
+                fixture.target.isFrontmost = true
             }
         }
 
@@ -309,8 +330,9 @@ final class PasteCoordinatorTests: XCTestCase {
             isAccessibilityTrusted: {
                 isAccessibilityTrusted
             },
-            postPasteShortcut: {
+            postPasteShortcut: { processIdentifier in
                 events.postPasteCount += 1
+                events.postedProcessIdentifiers.append(processIdentifier)
                 return events.postPasteSucceeds
             },
             sleep: { _ in
@@ -350,9 +372,11 @@ private struct PasteCoordinatorFixture {
 
 @MainActor
 private final class FakePasteTarget: PasteTargetApplication {
+    let processIdentifier: pid_t = 4_242
     var activationSucceeds = true
     var becomesActiveWhenActivated = false
     var isActive = false
+    var isFrontmost = false
     var isTerminated = false
     private(set) var activateCount = 0
 
@@ -361,6 +385,7 @@ private final class FakePasteTarget: PasteTargetApplication {
         activateCount += 1
         if activationSucceeds && becomesActiveWhenActivated {
             isActive = true
+            isFrontmost = true
         }
         return activationSucceeds
     }
@@ -421,6 +446,7 @@ private final class FakePasteboard: PasteboardAccessing {
 private final class PasteEventSpy {
     let postPasteSucceeds: Bool
     var postPasteCount = 0
+    var postedProcessIdentifiers: [pid_t] = []
     var sleepCount = 0
     var onSleep: (() -> Void)?
 
