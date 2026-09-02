@@ -1,3 +1,4 @@
+import AppKit
 import CoreGraphics
 import XCTest
 @testable import Yorozu
@@ -191,6 +192,39 @@ final class CommandInputModeSwitchingTests: XCTestCase {
         let report = await task.value
 
         XCTAssertEqual(report.result, .cancelled)
+    }
+
+    func testInputSourceStatusProviderTracksSelectionNotifications() {
+        let system = TestCommandInputSourceSystem(
+            currentSourceID: "english",
+            candidates: [
+                candidate(id: "english", ascii: true),
+                candidate(id: "japanese", languages: ["ja"]),
+            ]
+        )
+        let provider = SystemCommandInputSourceStatusProvider(system: system)
+        var observedSourceIDs: [String?] = []
+        provider.currentSourceDidChange = {
+            observedSourceIDs.append(provider.currentSourceID)
+        }
+
+        provider.start()
+        XCTAssertTrue(system.selectSource(id: "japanese"))
+        NotificationCenter.default.post(
+            name: NSTextInputContext.keyboardSelectionDidChangeNotification,
+            object: nil
+        )
+
+        XCTAssertEqual(provider.currentSourceID, "japanese")
+        XCTAssertEqual(observedSourceIDs, ["english", "japanese"])
+
+        provider.stop()
+        XCTAssertTrue(system.selectSource(id: "english"))
+        NotificationCenter.default.post(
+            name: NSTextInputContext.keyboardSelectionDidChangeNotification,
+            object: nil
+        )
+        XCTAssertEqual(provider.currentSourceID, "japanese")
     }
 
     func testBackgroundMonitorActivityRemainsResponsiveWhenAppIsInactive() {
@@ -553,7 +587,7 @@ final class CommandInputModeSwitchingTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(backgroundActivity.endCount, 1)
     }
 
-    func testControllerRecoversAnInvalidatedMonitorWhileBackgrounded() {
+    func testControllerRecoversAnInvalidatedMonitorWhileBackgrounded() async {
         let defaults = UserDefaults(suiteName: UUID().uuidString)!
         let monitor = TestCommandInputModeMonitor()
         let permissions = TestCommandInputModePermissionProvider(
@@ -570,12 +604,70 @@ final class CommandInputModeSwitchingTests: XCTestCase {
         controller.isEnabled = true
         controller.start()
         monitor.simulateInvalidation()
-        controller.recoverMonitoringIfNeeded()
+        await controller.recoverMonitoringIfNeeded()
 
         XCTAssertEqual(controller.runtimeStatus, .active)
-        XCTAssertEqual(monitor.startCount, 2)
+        XCTAssertEqual(monitor.recoverRequests, [false])
         XCTAssertTrue(monitor.isRunning)
         XCTAssertTrue(backgroundActivity.isActive)
+    }
+
+    func testControllerRecreatesMonitorAfterWorkspaceWake() async {
+        let defaults = UserDefaults(suiteName: UUID().uuidString)!
+        let monitor = TestCommandInputModeMonitor()
+        let permissions = TestCommandInputModePermissionProvider(
+            isInputMonitoringGranted: true
+        )
+        let notificationCenter = NotificationCenter()
+        let controller = CommandInputModeController(
+            defaults: defaults,
+            monitor: monitor,
+            permissionProvider: permissions,
+            workspaceNotificationCenter: notificationCenter
+        )
+
+        controller.isEnabled = true
+        controller.start()
+        notificationCenter.post(
+            name: NSWorkspace.didWakeNotification,
+            object: nil
+        )
+
+        for _ in 0 ..< 20 where monitor.recoverRequests.isEmpty {
+            await Task.yield()
+        }
+
+        XCTAssertEqual(monitor.recoverRequests, [true])
+        XCTAssertEqual(controller.runtimeStatus, .active)
+    }
+
+    func testControllerTracksCurrentInputSourceChangesIndependentlyOfLastSwitch() {
+        let defaults = UserDefaults(suiteName: UUID().uuidString)!
+        let monitor = TestCommandInputModeMonitor()
+        let permissions = TestCommandInputModePermissionProvider(
+            isInputMonitoringGranted: true
+        )
+        let sourceStatus = TestCommandInputSourceStatusProvider(
+            currentSourceID: "english"
+        )
+        let controller = CommandInputModeController(
+            defaults: defaults,
+            monitor: monitor,
+            permissionProvider: permissions,
+            inputSourceStatusProvider: sourceStatus
+        )
+
+        controller.isEnabled = true
+        controller.start()
+        controller.testSwitch(.switchToJapanese)
+        sourceStatus.simulateChange(to: "japanese")
+        sourceStatus.simulateChange(to: "english")
+
+        XCTAssertEqual(controller.currentInputSourceID, "english")
+        XCTAssertEqual(
+            controller.lastSwitchReport?.result,
+            .switched(sourceID: "japanese")
+        )
     }
 
     func testAuthorizationRefreshWhileInactiveKeepsMonitorAndActivityRunning() {
@@ -769,6 +861,7 @@ private final class TestCommandInputModeMonitor: CommandInputModeMonitoring {
     private(set) var startCount = 0
     private(set) var stopCount = 0
     private(set) var testSwitchCount = 0
+    private(set) var recoverRequests: [Bool] = []
     private let startResult: Bool
 
     init(startResult: Bool = true) {
@@ -788,6 +881,14 @@ private final class TestCommandInputModeMonitor: CommandInputModeMonitoring {
         isRunning = false
         status = .stopped
         diagnosticsDidChange?()
+    }
+
+    func recover(recreate: Bool) async -> Bool {
+        recoverRequests.append(recreate)
+        isRunning = startResult
+        status = startResult ? .running : .creationFailed
+        diagnosticsDidChange?()
+        return startResult
     }
 
     func switchForTesting(_ action: CommandInputModeAction) {
@@ -813,6 +914,29 @@ private final class TestCommandInputModeMonitor: CommandInputModeMonitoring {
         isRunning = false
         status = .temporarilyDisabled
         diagnosticsDidChange?()
+    }
+}
+
+@MainActor
+private final class TestCommandInputSourceStatusProvider:
+    CommandInputSourceStatusProviding {
+    private(set) var currentSourceID: String?
+    var currentSourceDidChange: (() -> Void)?
+
+    init(currentSourceID: String?) {
+        self.currentSourceID = currentSourceID
+    }
+
+    func start() {
+        currentSourceDidChange?()
+    }
+
+    func stop() {}
+    func refresh() {}
+
+    func simulateChange(to sourceID: String?) {
+        currentSourceID = sourceID
+        currentSourceDidChange?()
     }
 }
 

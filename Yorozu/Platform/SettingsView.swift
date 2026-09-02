@@ -1068,6 +1068,20 @@ private struct GeneralSettingsView: View {
                     .foregroundStyle(.secondary)
 
                 if inputModeController.isEnabled {
+                    LabeledContent("Current Input Source") {
+                        Text(
+                            inputModeController.currentInputSourceName
+                                ?? inputModeController.currentInputSourceID
+                                ?? "Unavailable"
+                        )
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .foregroundStyle(.secondary)
+                    }
+                    .accessibilityIdentifier(
+                        "settings.input-mode.current-source"
+                    )
+
                     permissionRow(
                         title: "Input Monitoring",
                         isGranted: inputModeController.isInputMonitoringGranted,

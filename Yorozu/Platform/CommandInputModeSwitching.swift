@@ -89,6 +89,16 @@ protocol CommandInputSourceSwitching: Sendable {
     ) async -> CommandInputModeSwitchReport
 }
 
+@MainActor
+protocol CommandInputSourceStatusProviding: AnyObject {
+    var currentSourceID: String? { get }
+    var currentSourceDidChange: (() -> Void)? { get set }
+
+    func start()
+    func stop()
+    func refresh()
+}
+
 enum CommandInputSourceResolver {
     private static let appleABCSourceID = "com.apple.keylayout.ABC"
     private static let appleJapaneseSourceID =
@@ -357,6 +367,50 @@ final class SystemCommandInputSourceSystem: CommandInputSourceSystem {
     }
 }
 
+@MainActor
+final class SystemCommandInputSourceStatusProvider:
+    CommandInputSourceStatusProviding {
+    private let system: any CommandInputSourceSystem
+    private var notificationToken: (any NSObjectProtocol)?
+    private(set) var currentSourceID: String?
+    var currentSourceDidChange: (() -> Void)?
+
+    init(system: any CommandInputSourceSystem = SystemCommandInputSourceSystem()) {
+        self.system = system
+    }
+
+    func start() {
+        guard notificationToken == nil else {
+            refresh()
+            return
+        }
+        notificationToken = NotificationCenter.default.addObserver(
+            forName: NSTextInputContext.keyboardSelectionDidChangeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.refresh()
+            }
+        }
+        refresh()
+    }
+
+    func stop() {
+        if let notificationToken {
+            NotificationCenter.default.removeObserver(notificationToken)
+            self.notificationToken = nil
+        }
+    }
+
+    func refresh() {
+        let nextSourceID = system.currentSourceID()
+        guard nextSourceID != currentSourceID else { return }
+        currentSourceID = nextSourceID
+        currentSourceDidChange?()
+    }
+}
+
 enum CommandInputModeMonitorStatus: Equatable, Sendable {
     case stopped
     case running
@@ -507,6 +561,7 @@ protocol CommandInputModeMonitoring: AnyObject {
 
     func start() -> Bool
     func stop()
+    func recover(recreate: Bool) async -> Bool
     func switchForTesting(_ action: CommandInputModeAction)
 }
 
@@ -793,8 +848,18 @@ private final class CommandInputModeEventTapWorker: @unchecked Sendable {
 
     var isRunning: Bool {
         lock.lock()
+        let running = running
+        let eventTap = eventTap
+        lock.unlock()
+        guard running, let eventTap else { return false }
+        return CFMachPortIsValid(eventTap)
+            && CGEvent.tapIsEnabled(tap: eventTap)
+    }
+
+    var isStopped: Bool {
+        lock.lock()
         defer { lock.unlock() }
-        return running
+        return thread == nil
     }
 
     var diagnostics: CommandInputModeMonitorDiagnostics {
@@ -806,8 +871,11 @@ private final class CommandInputModeEventTapWorker: @unchecked Sendable {
     func start() -> Bool {
         lock.lock()
         if running {
+            let eventTap = eventTap
             lock.unlock()
-            return true
+            guard let eventTap else { return false }
+            return CFMachPortIsValid(eventTap)
+                && CGEvent.tapIsEnabled(tap: eventTap)
         }
         guard thread == nil else {
             lock.unlock()
@@ -857,6 +925,44 @@ private final class CommandInputModeEventTapWorker: @unchecked Sendable {
 
     func switchForTesting(_ action: CommandInputModeAction) {
         beginSwitch(action)
+    }
+
+    func reenableIfPossible() -> Bool {
+        lock.lock()
+        guard !stopRequested,
+              let eventTap,
+              let runLoop,
+              CFMachPortIsValid(eventTap) else {
+            lock.unlock()
+            return false
+        }
+        lock.unlock()
+
+        CGEvent.tapEnable(tap: eventTap, enable: true)
+        guard CGEvent.tapIsEnabled(tap: eventTap) else { return false }
+
+        CFRunLoopPerformBlock(
+            runLoop,
+            CFRunLoopMode.commonModes.rawValue as CFString
+        ) { [weak self] in
+            self?.stateMachine.synchronizePressedCommands(
+                Self.currentlyPressedCommandSides()
+            )
+        }
+        CFRunLoopWakeUp(runLoop)
+
+        lock.lock()
+        guard !stopRequested else {
+            lock.unlock()
+            return false
+        }
+        running = true
+        status = .running
+        diagnosticsSequence &+= 1
+        let diagnostics = makeDiagnosticsLocked()
+        lock.unlock()
+        diagnosticsHandler(diagnostics)
+        return true
     }
 
     private func runEventTap(
@@ -1172,6 +1278,31 @@ final class CommandInputModeMonitor: CommandInputModeMonitoring {
         apply(worker.diagnostics)
     }
 
+    func recover(recreate: Bool) async -> Bool {
+        if !recreate, worker.reenableIfPossible() {
+            apply(worker.diagnostics)
+            return true
+        }
+
+        worker.stop()
+        for _ in 0 ..< 50 {
+            guard !worker.isStopped else { break }
+            do {
+                try await Task.sleep(for: .milliseconds(10))
+            } catch {
+                apply(worker.diagnostics)
+                return false
+            }
+        }
+        guard worker.isStopped else {
+            apply(worker.diagnostics)
+            return false
+        }
+        let started = worker.start()
+        apply(worker.diagnostics)
+        return started
+    }
+
     func switchForTesting(_ action: CommandInputModeAction) {
         worker.switchForTesting(action)
         apply(worker.diagnostics)
@@ -1236,6 +1367,8 @@ final class CommandInputModeController: ObservableObject {
     @Published private(set) var lastAction: CommandInputModeAction?
     @Published private(set) var lastActionAt: Date?
     @Published private(set) var lastSwitchReport: CommandInputModeSwitchReport?
+    @Published private(set) var currentInputSourceID: String?
+    @Published private(set) var currentInputSourceName: String?
 
     private let defaults: UserDefaults
     private let monitor: any CommandInputModeMonitoring
@@ -1243,8 +1376,13 @@ final class CommandInputModeController: ObservableObject {
     private let codeSigningStatusProvider: any CommandInputModeCodeSigningStatusProviding
     private let backgroundActivityManager:
         any CommandInputModeBackgroundActivityManaging
+    private let inputSourceStatusProvider:
+        any CommandInputSourceStatusProviding
+    private let workspaceNotificationCenter: NotificationCenter?
     private var hasStarted = false
     private var monitoringHealthTask: Task<Void, Never>?
+    private var workspaceRecoveryTokens: [any NSObjectProtocol] = []
+    private var isRecoveringMonitor = false
 
     init(
         defaults: UserDefaults,
@@ -1254,17 +1392,26 @@ final class CommandInputModeController: ObservableObject {
             FixedCommandInputModeCodeSigningStatusProvider(status: .stable),
         backgroundActivityManager:
             any CommandInputModeBackgroundActivityManaging =
-            NoOpCommandInputModeBackgroundActivityManager()
+            NoOpCommandInputModeBackgroundActivityManager(),
+        inputSourceStatusProvider:
+            any CommandInputSourceStatusProviding =
+            DisabledCommandInputSourceStatusProvider(),
+        workspaceNotificationCenter: NotificationCenter? = nil
     ) {
         self.defaults = defaults
         self.monitor = monitor
         self.permissionProvider = permissionProvider
         self.codeSigningStatusProvider = codeSigningStatusProvider
         self.backgroundActivityManager = backgroundActivityManager
+        self.inputSourceStatusProvider = inputSourceStatusProvider
+        self.workspaceNotificationCenter = workspaceNotificationCenter
         self.codeSigningStatus = codeSigningStatusProvider.status
         self.isEnabled = defaults.bool(forKey: DefaultsKey.isEnabled)
         self.monitor.diagnosticsDidChange = { [weak self] in
             self?.refreshDiagnostics()
+        }
+        self.inputSourceStatusProvider.currentSourceDidChange = { [weak self] in
+            self?.refreshInputSourceStatus()
         }
     }
 
@@ -1275,7 +1422,9 @@ final class CommandInputModeController: ObservableObject {
             permissionProvider: SystemCommandInputModePermissionProvider(),
             codeSigningStatusProvider: SystemCommandInputModeCodeSigningStatusProvider(),
             backgroundActivityManager:
-                SystemCommandInputModeBackgroundActivityManager()
+                SystemCommandInputModeBackgroundActivityManager(),
+            inputSourceStatusProvider: SystemCommandInputSourceStatusProvider(),
+            workspaceNotificationCenter: NSWorkspace.shared.notificationCenter
         )
     }
 
@@ -1298,12 +1447,16 @@ final class CommandInputModeController: ObservableObject {
             return
         }
         hasStarted = true
+        inputSourceStatusProvider.start()
+        startWorkspaceRecoveryObservers()
         refreshAuthorization()
     }
 
     func stop() {
         monitor.stop()
         stopMonitoringHealthChecks()
+        stopWorkspaceRecoveryObservers()
+        inputSourceStatusProvider.stop()
         backgroundActivityManager.end()
         hasStarted = false
         runtimeStatus = .off
@@ -1316,6 +1469,7 @@ final class CommandInputModeController: ObservableObject {
         isInputMonitoringGranted = authorization.listenEventGranted
         isEventPostingGranted = authorization.postEventGranted
         codeSigningStatus = codeSigningStatusProvider.status
+        inputSourceStatusProvider.refresh()
         reconcile()
         refreshDiagnostics()
     }
@@ -1339,14 +1493,23 @@ final class CommandInputModeController: ObservableObject {
         refreshDiagnostics()
     }
 
-    func recoverMonitoringIfNeeded() {
+    func recoverMonitoringIfNeeded(recreate: Bool = false) async {
         guard hasStarted, isEnabled, isInputMonitoringGranted else { return }
-        guard !monitor.isRunning else {
+        guard !isRecoveringMonitor else { return }
+        guard recreate || !monitor.isRunning else {
             runtimeStatus = .active
             refreshDiagnostics()
             return
         }
-        runtimeStatus = monitor.start() ? .active : .unavailable
+        isRecoveringMonitor = true
+        let recovered = await monitor.recover(recreate: recreate)
+        isRecoveringMonitor = false
+        guard hasStarted, isEnabled, isInputMonitoringGranted else {
+            monitor.stop()
+            refreshDiagnostics()
+            return
+        }
+        runtimeStatus = recovered ? .active : .unavailable
         refreshDiagnostics()
     }
 
@@ -1392,7 +1555,7 @@ final class CommandInputModeController: ObservableObject {
                 } catch {
                     return
                 }
-                self?.recoverMonitoringIfNeeded()
+                await self?.recoverMonitoringIfNeeded()
             }
         }
     }
@@ -1408,6 +1571,44 @@ final class CommandInputModeController: ObservableObject {
         lastAction = monitor.lastAction
         lastActionAt = monitor.lastActionAt
         lastSwitchReport = monitor.lastSwitchReport
+        inputSourceStatusProvider.refresh()
+        refreshInputSourceStatus()
+    }
+
+    private func refreshInputSourceStatus() {
+        currentInputSourceID = inputSourceStatusProvider.currentSourceID
+        currentInputSourceName = currentInputSourceID.flatMap {
+            NSTextInputContext.localizedName(forInputSource: $0)
+        }
+    }
+
+    private func startWorkspaceRecoveryObservers() {
+        guard workspaceRecoveryTokens.isEmpty,
+              let workspaceNotificationCenter else { return }
+        let names = [
+            NSWorkspace.didWakeNotification,
+            NSWorkspace.sessionDidBecomeActiveNotification,
+        ]
+        workspaceRecoveryTokens = names.map { name in
+            workspaceNotificationCenter.addObserver(
+                forName: name,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                Task { @MainActor [weak self] in
+                    self?.inputSourceStatusProvider.refresh()
+                    await self?.recoverMonitoringIfNeeded(recreate: true)
+                }
+            }
+        }
+    }
+
+    private func stopWorkspaceRecoveryObservers() {
+        guard let workspaceNotificationCenter else { return }
+        workspaceRecoveryTokens.forEach {
+            workspaceNotificationCenter.removeObserver($0)
+        }
+        workspaceRecoveryTokens.removeAll(keepingCapacity: true)
     }
 }
 
@@ -1430,7 +1631,19 @@ private final class DisabledCommandInputModeMonitor: CommandInputModeMonitoring 
         status = .stopped
     }
 
+    func recover(recreate: Bool) async -> Bool { false }
     func switchForTesting(_ action: CommandInputModeAction) {}
+}
+
+@MainActor
+private final class DisabledCommandInputSourceStatusProvider:
+    CommandInputSourceStatusProviding {
+    var currentSourceID: String?
+    var currentSourceDidChange: (() -> Void)?
+
+    func start() {}
+    func stop() {}
+    func refresh() {}
 }
 
 @MainActor
