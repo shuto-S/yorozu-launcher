@@ -1083,17 +1083,18 @@ private struct GeneralSettingsView: View {
                     )
 
                     permissionRow(
-                        title: "Input Monitoring",
-                        isGranted: inputModeController.isInputMonitoringGranted,
-                        request: inputModeController.requestInputMonitoringAccess
+                        title: "Accessibility",
+                        isGranted: inputModeController.isAccessibilityGranted
+                            && inputModeController.isEventPostingGranted,
+                        request: inputModeController.requestAccessibilityAccess
                     )
 
                     HStack {
-                        Button("Open Input Monitoring Settings") {
-                            inputModeController.openInputMonitoringSettings()
+                        Button("Open Accessibility Settings") {
+                            inputModeController.openAccessibilitySettings()
                         }
                         .accessibilityIdentifier(
-                            "settings.input-mode.open-input-monitoring"
+                            "settings.input-mode.open-accessibility"
                         )
 
                         Button("Reveal This Build") {
@@ -1113,8 +1114,9 @@ private struct GeneralSettingsView: View {
                         )
                     }
 
-                    if !inputModeController.isInputMonitoringGranted {
-                        Text("Allow this copy of Yorozu in Input Monitoring so the Command keys can be detected while other apps are active. If Yorozu already appears allowed, remove the older entry and add the build revealed below.")
+                    if !inputModeController.isAccessibilityGranted
+                        || !inputModeController.isEventPostingGranted {
+                        Text("Allow this copy of Yorozu in Accessibility so it can detect a Command key pressed alone and send the native Eisu or Kana key to the active application. If Yorozu already appears allowed, remove the older entry and add the build revealed below.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                             .accessibilityIdentifier(
@@ -1123,7 +1125,7 @@ private struct GeneralSettingsView: View {
 
                         if inputModeController.codeSigningStatus == .adHoc {
                             Label(
-                                "This build uses an ad hoc signature. Input Monitoring permission may be lost after rebuilding.",
+                                "This build uses an ad hoc signature. Accessibility permission may be lost after rebuilding.",
                                 systemImage: "signature"
                             )
                             .font(.caption)
@@ -1178,13 +1180,6 @@ private struct GeneralSettingsView: View {
                         }
                     }
 
-                    LabeledContent("Accessibility") {
-                        Text(
-                            inputModeController.isAccessibilityGranted
-                                ? "Allowed" : "Not Allowed"
-                        )
-                        .foregroundStyle(.secondary)
-                    }
                     LabeledContent("Event Posting") {
                         Text(
                             inputModeController.isEventPostingGranted

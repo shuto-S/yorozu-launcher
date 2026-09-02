@@ -64,6 +64,52 @@ final class CommandInputModeSwitchingTests: XCTestCase {
         )
     }
 
+    func testInputSourceResolverMatchesEffectiveModeWithoutRequiringOneID() {
+        let candidates = [
+            candidate(id: "english.custom", ascii: true),
+            candidate(id: "japanese.custom", languages: ["ja-JP"]),
+            candidate(
+                id: "character.palette",
+                languages: ["ja"],
+                keyboardSource: false
+            ),
+        ]
+
+        XCTAssertTrue(
+            CommandInputSourceResolver.sourceID(
+                "english.custom",
+                matches: .switchToEnglish,
+                candidates: candidates
+            )
+        )
+        XCTAssertTrue(
+            CommandInputSourceResolver.sourceID(
+                "japanese.custom",
+                matches: .switchToJapanese,
+                candidates: candidates
+            )
+        )
+        XCTAssertFalse(
+            CommandInputSourceResolver.sourceID(
+                "english.custom",
+                matches: .switchToJapanese,
+                candidates: candidates
+            )
+        )
+        XCTAssertFalse(
+            CommandInputSourceResolver.sourceID(
+                "character.palette",
+                matches: .switchToJapanese,
+                candidates: candidates
+            )
+        )
+    }
+
+    func testInputModeActionsUseNativeJISEisuAndKanaKeyCodes() {
+        XCTAssertEqual(CommandInputModeAction.switchToEnglish.inputModeKeyCode, 102)
+        XCTAssertEqual(CommandInputModeAction.switchToJapanese.inputModeKeyCode, 104)
+    }
+
     func testInputSourceSwitcherSelectsAndVerifiesTarget() async {
         let system = TestCommandInputSourceSystem(
             currentSourceID: "english",
@@ -73,14 +119,20 @@ final class CommandInputModeSwitchingTests: XCTestCase {
             ],
             preferred: [.switchToJapanese: "japanese"]
         )
-        let switcher = SystemCommandInputSourceSwitcher(system: system)
+        let poster = TestCommandInputModeEventPoster { _ in
+            system.simulateSelection(id: "japanese")
+        }
+        let switcher = SystemCommandInputSourceSwitcher(
+            system: system,
+            eventPoster: poster
+        )
 
         let report = await switcher.switchInputMode(.switchToJapanese)
 
         XCTAssertEqual(report.result, .switched(sourceID: "japanese"))
         XCTAssertEqual(report.sourceIDBefore, "english")
         XCTAssertEqual(report.sourceIDAfter, "japanese")
-        XCTAssertEqual(system.selectedSourceIDs, ["japanese"])
+        XCTAssertEqual(poster.postedActions, [.switchToJapanese])
     }
 
     func testInputSourceSwitcherMarshalsDetachedCallsToMainThread() async {
@@ -92,7 +144,13 @@ final class CommandInputModeSwitchingTests: XCTestCase {
             ],
             preferred: [.switchToJapanese: "japanese"]
         )
-        let switcher = SystemCommandInputSourceSwitcher(system: system)
+        let poster = TestCommandInputModeEventPoster { _ in
+            system.simulateSelection(id: "japanese")
+        }
+        let switcher = SystemCommandInputSourceSwitcher(
+            system: system,
+            eventPoster: poster
+        )
 
         let report = await Task.detached {
             await switcher.switchInputMode(.switchToJapanese)
@@ -100,6 +158,7 @@ final class CommandInputModeSwitchingTests: XCTestCase {
 
         XCTAssertEqual(report.result, .switched(sourceID: "japanese"))
         XCTAssertTrue(system.allCallsWereOnMainThread)
+        XCTAssertTrue(poster.allCallsWereOnMainThread)
     }
 
     func testInputSourceSwitcherReportsUnavailableWithoutSelecting() async {
@@ -107,7 +166,11 @@ final class CommandInputModeSwitchingTests: XCTestCase {
             currentSourceID: "english",
             candidates: [candidate(id: "english", ascii: true)]
         )
-        let switcher = SystemCommandInputSourceSwitcher(system: system)
+        let poster = TestCommandInputModeEventPoster()
+        let switcher = SystemCommandInputSourceSwitcher(
+            system: system,
+            eventPoster: poster
+        )
 
         let report = await switcher.switchInputMode(.switchToJapanese)
 
@@ -115,7 +178,7 @@ final class CommandInputModeSwitchingTests: XCTestCase {
             report.result,
             .sourceUnavailable(.switchToJapanese)
         )
-        XCTAssertTrue(system.selectedSourceIDs.isEmpty)
+        XCTAssertTrue(poster.postedActions.isEmpty)
     }
 
     func testInputSourceSwitcherReportsSelectionFailure() async {
@@ -125,15 +188,19 @@ final class CommandInputModeSwitchingTests: XCTestCase {
                 candidate(id: "english", ascii: true),
                 candidate(id: "japanese", languages: ["ja"]),
             ],
-            preferred: [.switchToJapanese: "japanese"],
-            selectSucceeds: false
+            preferred: [.switchToJapanese: "japanese"]
         )
-        let switcher = SystemCommandInputSourceSwitcher(system: system)
+        let poster = TestCommandInputModeEventPoster(postSucceeds: false)
+        let switcher = SystemCommandInputSourceSwitcher(
+            system: system,
+            eventPoster: poster
+        )
 
         let report = await switcher.switchInputMode(.switchToJapanese)
 
         XCTAssertEqual(report.result, .selectionFailed)
         XCTAssertEqual(report.sourceIDAfter, "english")
+        XCTAssertEqual(poster.postedActions, [.switchToJapanese])
     }
 
     func testInputSourceSwitcherReportsAlreadySelected() async {
@@ -142,7 +209,11 @@ final class CommandInputModeSwitchingTests: XCTestCase {
             candidates: [candidate(id: "japanese", languages: ["ja"])],
             preferred: [.switchToJapanese: "japanese"]
         )
-        let switcher = SystemCommandInputSourceSwitcher(system: system)
+        let poster = TestCommandInputModeEventPoster()
+        let switcher = SystemCommandInputSourceSwitcher(
+            system: system,
+            eventPoster: poster
+        )
 
         let report = await switcher.switchInputMode(.switchToJapanese)
 
@@ -150,7 +221,7 @@ final class CommandInputModeSwitchingTests: XCTestCase {
             report.result,
             .alreadySelected(sourceID: "japanese")
         )
-        XCTAssertTrue(system.selectedSourceIDs.isEmpty)
+        XCTAssertTrue(poster.postedActions.isEmpty)
     }
 
     func testInputSourceSwitcherTimesOutWhenSelectionIsNotObservable() async {
@@ -160,16 +231,19 @@ final class CommandInputModeSwitchingTests: XCTestCase {
                 candidate(id: "english", ascii: true),
                 candidate(id: "japanese", languages: ["ja"]),
             ],
-            preferred: [.switchToJapanese: "japanese"],
-            updatesCurrentSourceOnSelect: false
+            preferred: [.switchToJapanese: "japanese"]
         )
-        let switcher = SystemCommandInputSourceSwitcher(system: system)
+        let poster = TestCommandInputModeEventPoster()
+        let switcher = SystemCommandInputSourceSwitcher(
+            system: system,
+            eventPoster: poster
+        )
 
         let report = await switcher.switchInputMode(.switchToJapanese)
 
         XCTAssertEqual(report.result, .verificationTimedOut)
         XCTAssertEqual(report.sourceIDAfter, "english")
-        XCTAssertEqual(system.selectedSourceIDs, ["japanese"])
+        XCTAssertEqual(poster.postedActions, [.switchToJapanese])
     }
 
     func testInputSourceSwitcherStopsVerificationWhenCancelled() async {
@@ -179,10 +253,12 @@ final class CommandInputModeSwitchingTests: XCTestCase {
                 candidate(id: "english", ascii: true),
                 candidate(id: "japanese", languages: ["ja"]),
             ],
-            preferred: [.switchToJapanese: "japanese"],
-            updatesCurrentSourceOnSelect: false
+            preferred: [.switchToJapanese: "japanese"]
         )
-        let switcher = SystemCommandInputSourceSwitcher(system: system)
+        let switcher = SystemCommandInputSourceSwitcher(
+            system: system,
+            eventPoster: TestCommandInputModeEventPoster()
+        )
         let task = Task {
             await switcher.switchInputMode(.switchToJapanese)
         }
@@ -209,7 +285,7 @@ final class CommandInputModeSwitchingTests: XCTestCase {
         }
 
         provider.start()
-        XCTAssertTrue(system.selectSource(id: "japanese"))
+        system.simulateSelection(id: "japanese")
         NotificationCenter.default.post(
             name: NSTextInputContext.keyboardSelectionDidChangeNotification,
             object: nil
@@ -219,7 +295,7 @@ final class CommandInputModeSwitchingTests: XCTestCase {
         XCTAssertEqual(observedSourceIDs, ["english", "japanese"])
 
         provider.stop()
-        XCTAssertTrue(system.selectSource(id: "english"))
+        system.simulateSelection(id: "english")
         NotificationCenter.default.post(
             name: NSTextInputContext.keyboardSelectionDidChangeNotification,
             object: nil
@@ -499,7 +575,7 @@ final class CommandInputModeSwitchingTests: XCTestCase {
         XCTAssertFalse(controller.isEnabled)
         XCTAssertEqual(controller.runtimeStatus, .off)
         XCTAssertEqual(monitor.startCount, 0)
-        XCTAssertEqual(permissions.inputMonitoringRequestCount, 0)
+        XCTAssertEqual(permissions.accessibilityRequestCount, 0)
     }
 
     func testControllerKeepsEnabledStateUntilPermissionsAreGranted() {
@@ -523,7 +599,8 @@ final class CommandInputModeSwitchingTests: XCTestCase {
         XCTAssertFalse(backgroundActivity.isActive)
         XCTAssertTrue(defaults.bool(forKey: "inputModeSwitching.isEnabled"))
 
-        permissions.isInputMonitoringGranted = true
+        permissions.isAccessibilityGranted = true
+        permissions.isEventPostingGranted = true
         controller.refreshAuthorization()
 
         XCTAssertEqual(controller.runtimeStatus, .active)
@@ -535,7 +612,7 @@ final class CommandInputModeSwitchingTests: XCTestCase {
         XCTAssertEqual(backgroundActivity.beginCount, 1)
     }
 
-    func testControllerRequiresListenPermissionEvenWhenOtherGrantsExist() {
+    func testControllerDoesNotRequireSeparateInputMonitoringPermission() {
         let defaults = UserDefaults(suiteName: UUID().uuidString)!
         let monitor = TestCommandInputModeMonitor()
         let permissions = TestCommandInputModePermissionProvider(
@@ -555,15 +632,16 @@ final class CommandInputModeSwitchingTests: XCTestCase {
         XCTAssertTrue(controller.isAccessibilityGranted)
         XCTAssertFalse(controller.isInputMonitoringGranted)
         XCTAssertTrue(controller.isEventPostingGranted)
-        XCTAssertEqual(controller.runtimeStatus, .permissionRequired)
-        XCTAssertEqual(monitor.startCount, 0)
+        XCTAssertEqual(controller.runtimeStatus, .active)
+        XCTAssertEqual(monitor.startCount, 1)
     }
 
     func testControllerStopsImmediatelyWhenDisabledOrStopped() {
         let defaults = UserDefaults(suiteName: UUID().uuidString)!
         let monitor = TestCommandInputModeMonitor()
         let permissions = TestCommandInputModePermissionProvider(
-            isInputMonitoringGranted: true
+            isAccessibilityGranted: true,
+            isEventPostingGranted: true
         )
         let backgroundActivity = TestCommandInputModeBackgroundActivityManager()
         let controller = CommandInputModeController(
@@ -591,7 +669,8 @@ final class CommandInputModeSwitchingTests: XCTestCase {
         let defaults = UserDefaults(suiteName: UUID().uuidString)!
         let monitor = TestCommandInputModeMonitor()
         let permissions = TestCommandInputModePermissionProvider(
-            isInputMonitoringGranted: true
+            isAccessibilityGranted: true,
+            isEventPostingGranted: true
         )
         let backgroundActivity = TestCommandInputModeBackgroundActivityManager()
         let controller = CommandInputModeController(
@@ -616,7 +695,8 @@ final class CommandInputModeSwitchingTests: XCTestCase {
         let defaults = UserDefaults(suiteName: UUID().uuidString)!
         let monitor = TestCommandInputModeMonitor()
         let permissions = TestCommandInputModePermissionProvider(
-            isInputMonitoringGranted: true
+            isAccessibilityGranted: true,
+            isEventPostingGranted: true
         )
         let notificationCenter = NotificationCenter()
         let controller = CommandInputModeController(
@@ -645,7 +725,8 @@ final class CommandInputModeSwitchingTests: XCTestCase {
         let defaults = UserDefaults(suiteName: UUID().uuidString)!
         let monitor = TestCommandInputModeMonitor()
         let permissions = TestCommandInputModePermissionProvider(
-            isInputMonitoringGranted: true
+            isAccessibilityGranted: true,
+            isEventPostingGranted: true
         )
         let sourceStatus = TestCommandInputSourceStatusProvider(
             currentSourceID: "english"
@@ -674,7 +755,8 @@ final class CommandInputModeSwitchingTests: XCTestCase {
         let defaults = UserDefaults(suiteName: UUID().uuidString)!
         let monitor = TestCommandInputModeMonitor()
         let permissions = TestCommandInputModePermissionProvider(
-            isInputMonitoringGranted: true
+            isAccessibilityGranted: true,
+            isEventPostingGranted: true
         )
         let backgroundActivity = TestCommandInputModeBackgroundActivityManager()
         let controller = CommandInputModeController(
@@ -699,7 +781,8 @@ final class CommandInputModeSwitchingTests: XCTestCase {
         let defaults = UserDefaults(suiteName: UUID().uuidString)!
         let monitor = TestCommandInputModeMonitor(startResult: false)
         let permissions = TestCommandInputModePermissionProvider(
-            isInputMonitoringGranted: true
+            isAccessibilityGranted: true,
+            isEventPostingGranted: true
         )
         let controller = CommandInputModeController(
             defaults: defaults,
@@ -721,7 +804,7 @@ final class CommandInputModeSwitchingTests: XCTestCase {
 
         controller.start()
         controller.isEnabled = true
-        controller.requestInputMonitoringAccess()
+        controller.requestAccessibilityAccess()
 
         XCTAssertEqual(controller.runtimeStatus, .permissionRequired)
         XCTAssertTrue(controller.isEnabled)
@@ -731,7 +814,8 @@ final class CommandInputModeSwitchingTests: XCTestCase {
         let defaults = UserDefaults(suiteName: UUID().uuidString)!
         let monitor = TestCommandInputModeMonitor()
         let permissions = TestCommandInputModePermissionProvider(
-            isInputMonitoringGranted: true
+            isAccessibilityGranted: true,
+            isEventPostingGranted: true
         )
         let controller = CommandInputModeController(
             defaults: defaults,
@@ -788,27 +872,16 @@ private final class TestCommandInputSourceSystem:
     private var currentID: String?
     private let availableCandidates: [CommandInputSourceCandidate]
     private let preferred: [CommandInputModeAction: String]
-    private let selectSucceeds: Bool
-    private let updatesCurrentSourceOnSelect: Bool
-    private var selectedIDs: [String] = []
     private var callsWereOnMainThread = true
 
     init(
         currentSourceID: String?,
         candidates: [CommandInputSourceCandidate],
-        preferred: [CommandInputModeAction: String] = [:],
-        selectSucceeds: Bool = true,
-        updatesCurrentSourceOnSelect: Bool = true
+        preferred: [CommandInputModeAction: String] = [:]
     ) {
         currentID = currentSourceID
         availableCandidates = candidates
         self.preferred = preferred
-        self.selectSucceeds = selectSucceeds
-        self.updatesCurrentSourceOnSelect = updatesCurrentSourceOnSelect
-    }
-
-    var selectedSourceIDs: [String] {
-        lock.withLock { selectedIDs }
     }
 
     var allCallsWereOnMainThread: Bool {
@@ -830,14 +903,10 @@ private final class TestCommandInputSourceSystem:
         return preferred[action]
     }
 
-    func selectSource(id: String) -> Bool {
+    func simulateSelection(id: String) {
         recordSystemCall()
-        return lock.withLock {
-            selectedIDs.append(id)
-            if selectSucceeds, updatesCurrentSourceOnSelect {
-                currentID = id
-            }
-            return selectSucceeds
+        lock.withLock {
+            currentID = id
         }
     }
 
@@ -846,6 +915,33 @@ private final class TestCommandInputSourceSystem:
         lock.withLock {
             callsWereOnMainThread = false
         }
+    }
+}
+
+@MainActor
+private final class TestCommandInputModeEventPoster:
+    CommandInputModeEventPosting {
+    private(set) var postedActions: [CommandInputModeAction] = []
+    private(set) var allCallsWereOnMainThread = true
+    private let postSucceeds: Bool
+    private let onPost: (CommandInputModeAction) -> Void
+
+    init(
+        postSucceeds: Bool = true,
+        onPost: @escaping (CommandInputModeAction) -> Void = { _ in }
+    ) {
+        self.postSucceeds = postSucceeds
+        self.onPost = onPost
+    }
+
+    func post(_ action: CommandInputModeAction) -> Bool {
+        if !Thread.isMainThread {
+            allCallsWereOnMainThread = false
+        }
+        postedActions.append(action)
+        guard postSucceeds else { return false }
+        onPost(action)
+        return true
     }
 }
 
@@ -945,6 +1041,7 @@ private final class TestCommandInputModePermissionProvider: CommandInputModePerm
     var isAccessibilityGranted: Bool
     var isInputMonitoringGranted: Bool
     var isEventPostingGranted: Bool
+    private(set) var accessibilityRequestCount = 0
     private(set) var inputMonitoringRequestCount = 0
 
     var authorizationSnapshot: CommandInputModeAuthorizationSnapshot {
@@ -969,7 +1066,9 @@ private final class TestCommandInputModePermissionProvider: CommandInputModePerm
         inputMonitoringRequestCount += 1
     }
 
-    func requestAccessibilityAccess() {}
+    func requestAccessibilityAccess() {
+        accessibilityRequestCount += 1
+    }
     func openAccessibilitySettings() {}
     func openInputMonitoringSettings() {}
     func revealCurrentBuild() {}

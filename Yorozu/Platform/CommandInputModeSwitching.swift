@@ -21,6 +21,15 @@ enum CommandInputModeAction: Hashable, Sendable {
             "Japanese"
         }
     }
+
+    var inputModeKeyCode: CGKeyCode {
+        switch self {
+        case .switchToEnglish:
+            102
+        case .switchToJapanese:
+            104
+        }
+    }
 }
 
 enum CommandInputModeSwitchResult: Equatable, Sendable {
@@ -80,7 +89,12 @@ protocol CommandInputSourceSystem: Sendable {
     func currentSourceID() -> String?
     func candidates() -> [CommandInputSourceCandidate]
     func preferredSourceID(for action: CommandInputModeAction) -> String?
-    func selectSource(id: String) -> Bool
+}
+
+@MainActor
+protocol CommandInputModeEventPosting: Sendable {
+    @discardableResult
+    func post(_ action: CommandInputModeAction) -> Bool
 }
 
 protocol CommandInputSourceSwitching: Sendable {
@@ -135,6 +149,27 @@ enum CommandInputSourceResolver {
         return matching.map(\.id).sorted().first
     }
 
+    static func sourceID(
+        _ sourceID: String?,
+        matches action: CommandInputModeAction,
+        candidates: [CommandInputSourceCandidate]
+    ) -> Bool {
+        guard let sourceID,
+              let candidate = candidates.first(where: { $0.id == sourceID }),
+              candidate.isEnabled,
+              candidate.isSelectCapable,
+              candidate.isKeyboardSource
+        else {
+            return false
+        }
+        switch action {
+        case .switchToEnglish:
+            return candidate.isASCIICapable
+        case .switchToJapanese:
+            return candidate.languages.contains(where: isJapaneseLanguage)
+        }
+    }
+
     private static func isJapaneseLanguage(_ language: String) -> Bool {
         let normalized = language.lowercased()
         return normalized == "ja"
@@ -146,18 +181,25 @@ enum CommandInputSourceResolver {
 @MainActor
 final class SystemCommandInputSourceSwitcher: CommandInputSourceSwitching {
     private let system: any CommandInputSourceSystem
+    private let eventPoster: any CommandInputModeEventPosting
 
-    init(system: any CommandInputSourceSystem = SystemCommandInputSourceSystem()) {
+    init(
+        system: any CommandInputSourceSystem = SystemCommandInputSourceSystem(),
+        eventPoster: any CommandInputModeEventPosting =
+            SystemCommandInputModeEventPoster()
+    ) {
         self.system = system
+        self.eventPoster = eventPoster
     }
 
     func switchInputMode(
         _ action: CommandInputModeAction
     ) async -> CommandInputModeSwitchReport {
         let sourceIDBefore = system.currentSourceID()
+        let candidates = system.candidates()
         let targetSourceID = CommandInputSourceResolver.sourceID(
             for: action,
-            candidates: system.candidates(),
+            candidates: candidates,
             preferredSourceID: system.preferredSourceID(for: action)
         )
         guard let targetSourceID else {
@@ -168,15 +210,19 @@ final class SystemCommandInputSourceSwitcher: CommandInputSourceSwitching {
                 after: system.currentSourceID()
             )
         }
-        if sourceIDBefore == targetSourceID {
+        if CommandInputSourceResolver.sourceID(
+            sourceIDBefore,
+            matches: action,
+            candidates: candidates
+        ) {
             return report(
                 action: action,
-                result: .alreadySelected(sourceID: targetSourceID),
+                result: .alreadySelected(sourceID: sourceIDBefore ?? targetSourceID),
                 before: sourceIDBefore,
                 after: sourceIDBefore
             )
         }
-        guard system.selectSource(id: targetSourceID) else {
+        guard eventPoster.post(action) else {
             return report(
                 action: action,
                 result: .selectionFailed,
@@ -185,7 +231,11 @@ final class SystemCommandInputSourceSwitcher: CommandInputSourceSwitching {
             )
         }
 
-        for attempt in 0 ..< 3 {
+        // A real Eisu/Kana key event updates the active application's text
+        // input context. This is the same mechanism used by dedicated input
+        // switching utilities and avoids TIS state drifting from the focused
+        // application's effective input mode.
+        for attempt in 0 ..< 8 {
             guard !Task.isCancelled else {
                 return report(
                     action: action,
@@ -195,15 +245,19 @@ final class SystemCommandInputSourceSwitcher: CommandInputSourceSwitching {
                 )
             }
             let sourceIDAfter = system.currentSourceID()
-            if sourceIDAfter == targetSourceID {
+            if CommandInputSourceResolver.sourceID(
+                sourceIDAfter,
+                matches: action,
+                candidates: candidates
+            ) {
                 return report(
                     action: action,
-                    result: .switched(sourceID: targetSourceID),
+                    result: .switched(sourceID: sourceIDAfter ?? targetSourceID),
                     before: sourceIDBefore,
                     after: sourceIDAfter
                 )
             }
-            if attempt < 2 {
+            if attempt < 7 {
                 do {
                     try await Task.sleep(for: .milliseconds(50))
                 } catch {
@@ -237,6 +291,30 @@ final class SystemCommandInputSourceSwitcher: CommandInputSourceSwitching {
             sourceIDAfter: after,
             completedAt: Date()
         )
+    }
+}
+
+@MainActor
+final class SystemCommandInputModeEventPoster: CommandInputModeEventPosting {
+    func post(_ action: CommandInputModeAction) -> Bool {
+        guard let source = CGEventSource(stateID: .hidSystemState),
+              let keyDown = CGEvent(
+                keyboardEventSource: source,
+                virtualKey: action.inputModeKeyCode,
+                keyDown: true
+              ),
+              let keyUp = CGEvent(
+                keyboardEventSource: source,
+                virtualKey: action.inputModeKeyCode,
+                keyDown: false
+              ) else {
+            return false
+        }
+        keyDown.flags = []
+        keyUp.flags = []
+        keyDown.post(tap: .cghidEventTap)
+        keyUp.post(tap: .cghidEventTap)
+        return true
     }
 }
 
@@ -289,18 +367,6 @@ final class SystemCommandInputSourceSystem: CommandInputSourceSystem {
         }
         guard let source else { return nil }
         return sourceID(of: source)
-    }
-
-    func selectSource(id: String) -> Bool {
-        let properties = [
-            kTISPropertyInputSourceID as String: id,
-        ] as CFDictionary
-        guard let sources = TISCreateInputSourceList(properties, false)?
-            .takeRetainedValue() as? [TISInputSource],
-            let source = sources.first(where: { sourceID(of: $0) == id }) else {
-            return false
-        }
-        return TISSelectInputSource(source) == noErr
     }
 
     private func sourceID(of source: TISInputSource) -> String? {
@@ -973,7 +1039,7 @@ private final class CommandInputModeEventTapWorker: @unchecked Sendable {
         guard let eventTap = CGEvent.tapCreate(
             tap: .cgSessionEventTap,
             place: .headInsertEventTap,
-            options: .listenOnly,
+            options: .defaultTap,
             eventsOfInterest: Self.eventMask,
             callback: { _, type, event, userInfo in
                 guard let userInfo else {
@@ -1145,9 +1211,9 @@ private final class CommandInputModeEventTapWorker: @unchecked Sendable {
         lock.unlock()
         guard let runLoop, !shouldIgnore else { return }
 
-        // TIS selection is intentionally deferred until the event-tap callback
-        // returns. Performing input-source work inside the callback can delay
-        // the tap and cause macOS to disable it.
+        // Posting the synthetic Eisu/Kana event is intentionally deferred
+        // until this callback returns. Work inside the callback can delay the
+        // tap long enough for macOS to disable it.
         CFRunLoopPerformBlock(
             runLoop,
             CFRunLoopMode.commonModes.rawValue as CFString
@@ -1479,6 +1545,15 @@ final class CommandInputModeController: ObservableObject {
         refreshAuthorization()
     }
 
+    func requestAccessibilityAccess() {
+        permissionProvider.requestAccessibilityAccess()
+        refreshAuthorization()
+    }
+
+    func openAccessibilitySettings() {
+        permissionProvider.openAccessibilitySettings()
+    }
+
     func openInputMonitoringSettings() {
         permissionProvider.openInputMonitoringSettings()
     }
@@ -1488,13 +1563,13 @@ final class CommandInputModeController: ObservableObject {
     }
 
     func testSwitch(_ action: CommandInputModeAction) {
-        guard isEnabled, isInputMonitoringGranted else { return }
+        guard isEnabled, hasRequiredEventAccess else { return }
         monitor.switchForTesting(action)
         refreshDiagnostics()
     }
 
     func recoverMonitoringIfNeeded(recreate: Bool = false) async {
-        guard hasStarted, isEnabled, isInputMonitoringGranted else { return }
+        guard hasStarted, isEnabled, hasRequiredEventAccess else { return }
         guard !isRecoveringMonitor else { return }
         guard recreate || !monitor.isRunning else {
             runtimeStatus = .active
@@ -1504,7 +1579,7 @@ final class CommandInputModeController: ObservableObject {
         isRecoveringMonitor = true
         let recovered = await monitor.recover(recreate: recreate)
         isRecoveringMonitor = false
-        guard hasStarted, isEnabled, isInputMonitoringGranted else {
+        guard hasStarted, isEnabled, hasRequiredEventAccess else {
             monitor.stop()
             refreshDiagnostics()
             return
@@ -1527,10 +1602,10 @@ final class CommandInputModeController: ObservableObject {
             runtimeStatus = .off
             return
         }
-        // This listen-only event tap is governed by Input Monitoring. TIS
-        // selects the source directly, so Accessibility and event-posting
-        // access are diagnostics rather than runtime gates.
-        guard isInputMonitoringGranted else {
+        // The active event tap and the Eisu/Kana key pair are both governed by
+        // Accessibility. Unlike direct TIS selection, the posted key updates
+        // the focused application's own text input context.
+        guard hasRequiredEventAccess else {
             monitor.stop()
             stopMonitoringHealthChecks()
             backgroundActivityManager.end()
@@ -1558,6 +1633,10 @@ final class CommandInputModeController: ObservableObject {
                 await self?.recoverMonitoringIfNeeded()
             }
         }
+    }
+
+    private var hasRequiredEventAccess: Bool {
+        isAccessibilityGranted && isEventPostingGranted
     }
 
     private func stopMonitoringHealthChecks() {

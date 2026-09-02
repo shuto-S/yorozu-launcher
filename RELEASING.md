@@ -107,7 +107,7 @@ a clean Mac user account:
 - canceling a download leaves the installed application untouched;
 - an archive signed by another EdDSA key is rejected;
 - installing and restarting preserves Settings, SQLite, and Keychain data.
-- Accessibility and Input Monitoring grants from the previous published build remain
+- Accessibility grants from the previous published build remain
   granted after updating in place, and automatic paste plus Command input-mode switching
   still work without a second authorization.
 

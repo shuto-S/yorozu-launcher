@@ -98,7 +98,7 @@ The current target is:
 - current-process Accessibility status
 - optional left/right Command-alone switching to English/Japanese input sources, configured only in General
 - optional modifier-plus-primary-drag window moving and bottom-right resizing, with top/left/right edge previews applied on drag release, configured in Window Control
-- permission-first Input Mode Switching settings with Input Monitoring status, System
+- permission-first Input Mode Switching settings with Accessibility status, System
   Settings access, manual refresh, and bounded source-selection diagnostics
 - windowless background monitoring on a dedicated run-loop thread, protected from App Nap,
   with automatic event-tap recovery
@@ -207,7 +207,7 @@ Privacy and reliability requirements:
 - Clipboard History is disabled by default.
 - Automatic paste requires current-process Accessibility trust and stable local signing.
 - Command input-mode switching is disabled by default. It requires current-process
-  Input Monitoring trust, stable local signing across rebuilds, and enabled selectable
+  Accessibility trust, stable local signing across rebuilds, and enabled selectable
   English and Japanese input sources in macOS.
 - Non-image database retention cleanup is batched; expired rows can remain on disk until the next maintenance pass or explicit settings prune.
 - A URL preview that fails is not retried again during the same app process.

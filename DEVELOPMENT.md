@@ -46,7 +46,7 @@ xcodebuild \
 
 ### Apple Development signing
 
-Accessibility and Input Monitoring trust are tied to the current code-signing identity.
+Accessibility trust is tied to the current code-signing identity.
 For stable automatic-paste, Command input-mode switching, and Window Control tests,
 create an ignored local override:
 
@@ -71,12 +71,12 @@ other personal signing data.
 An ad hoc signature changes when the executable changes. macOS can therefore show an old
 Yorozu entry while the current build remains untrusted, or turn its switch off after a
 rebuild. Use an Apple Development identity before diagnosing TCC-dependent features.
-Input mode switching requires Input Monitoring for its listen-only event tap. It selects
-the resolved TIS input source directly and does not post Eisu/Kana keyboard events;
-Accessibility and event-posting access are shown only as diagnostics for this feature.
+Input mode switching uses an active session event tap and posts the native JIS Eisu or
+Kana key to the focused application. Accessibility grants the required event listening
+and posting access; a separate Input Monitoring grant is not required.
 
-Treat `AXIsProcessTrusted()` as authoritative for Accessibility features and
-`CGPreflightListenEventAccess()` as authoritative for Input Mode Switching. System
+Treat `AXIsProcessTrusted()` and `CGPreflightPostEventAccess()` as authoritative for
+Input Mode Switching. System
 Settings can display an enabled row for a different Yorozu build with the same display
 name. When that happens, remove the stale row, reveal the current build from General
 settings, and add that exact app once. Do not use `tccutil reset` in development scripts
@@ -87,14 +87,14 @@ they share `com.yorozu.app`. Rebuilding repeatedly with one stable Apple Develop
 identity preserves local development authorization; published updates preserve the
 Developer ID identity separately.
 
-The General settings screen exposes the feature toggle, current-build Input Monitoring
+The General settings screen exposes the feature toggle, current-build Accessibility
 state, System Settings and current-build recovery actions, permission refresh, and bounded
 diagnostics for the monitor and last switch. An ad hoc warning appears only when that
 signing problem is detected. English and Japanese sources are resolved automatically from
 enabled, select-capable macOS input sources; there is no separate source picker.
 
 While input mode switching is enabled and authorized, Yorozu holds a user-initiated
-`ProcessInfo` activity that allows idle system sleep. This keeps the listen-only event tap
+`ProcessInfo` activity that allows idle system sleep. This keeps the event tap
 responsive when Yorozu is not frontmost without preventing the Mac from sleeping. The
 event tap runs on its own named thread and run loop, so delivery does not depend on the
 main AppKit run loop or the application being active. A lightweight health check recreates
