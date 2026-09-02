@@ -97,7 +97,7 @@ The current target is:
 - configurable shortcuts for Yorozu and feature routes
 - current-process Accessibility status
 - optional left/right Command-alone switching to English/Japanese input sources, configured only in General
-- optional modifier-drag window moving and bottom-right resizing, configured in Window Control
+- optional modifier-plus-pointer window moving and bottom-right resizing, configured in Window Control
 - permission-first Input Mode Switching settings with Input Monitoring status, System
   Settings access, manual refresh, and bounded source-selection diagnostics
 - windowless background monitoring on a dedicated run-loop thread, protected from App Nap,

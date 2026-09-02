@@ -144,7 +144,6 @@ enum WindowControlGeometry {
 enum WindowControlGestureUpdate {
     case move(WindowControlTarget, CGPoint)
     case resize(WindowControlTarget, CGSize)
-    case consumeWithoutUpdate
 }
 
 struct WindowControlGestureSession {
@@ -155,7 +154,7 @@ struct WindowControlGestureSession {
     }
 
     private var activeGesture: ActiveGesture?
-    private(set) var isCaptured = false
+    private(set) var isTracking = false
 
     mutating func begin(
         operation: WindowControlOperation,
@@ -167,21 +166,15 @@ struct WindowControlGestureSession {
             target: target,
             startPointer: pointer
         )
-        isCaptured = true
+        isTracking = true
     }
 
-    mutating func drag(
-        configuration: WindowControlConfiguration,
-        flags: CGEventFlags,
+    mutating func update(
+        operation: WindowControlOperation,
         pointer: CGPoint
     ) -> WindowControlGestureUpdate? {
-        guard isCaptured else { return nil }
         guard let gesture = activeGesture,
-              configuration.chord(for: gesture.operation)
-                == WindowControlModifierChord(eventFlags: flags) else {
-            activeGesture = nil
-            return .consumeWithoutUpdate
-        }
+              gesture.operation == operation else { return nil }
 
         switch gesture.operation {
         case .move:
@@ -205,30 +198,34 @@ struct WindowControlGestureSession {
         }
     }
 
-    mutating func flagsChanged(
-        configuration: WindowControlConfiguration,
-        flags: CGEventFlags
-    ) {
-        guard let gesture = activeGesture else { return }
-        if configuration.chord(for: gesture.operation)
-            != WindowControlModifierChord(eventFlags: flags) {
-            activeGesture = nil
-        }
-    }
-
-    mutating func cancelUpdate() {
-        activeGesture = nil
-    }
-
-    mutating func end() -> Bool {
-        guard isCaptured else { return false }
-        reset()
-        return true
-    }
-
     mutating func reset() {
         activeGesture = nil
-        isCaptured = false
+        isTracking = false
+    }
+}
+
+enum WindowControlActivity: Equatable, Sendable {
+    case listening
+    case tracking(WindowControlOperation)
+    case targetUnavailable
+    case updateRejected(WindowControlOperation)
+    case monitorRecovered
+
+    var message: String {
+        switch self {
+        case .listening:
+            "Hold a configured key combination and move the pointer."
+        case .tracking(.move):
+            "Moving the window under the pointer."
+        case .tracking(.resize):
+            "Resizing the window under the pointer."
+        case .targetUnavailable:
+            "No movable or resizable window was found under the pointer."
+        case .updateRejected:
+            "The target application did not allow Yorozu to update this window."
+        case .monitorRecovered:
+            "Pointer monitoring resumed after macOS paused it."
+        }
     }
 }
 
@@ -261,7 +258,9 @@ final class SystemWindowAccessor: WindowAccessing, @unchecked Sendable {
             return nil
         }
 
-        AXUIElementSetMessagingTimeout(window, 0.1)
+        // Some Electron and IDE windows need longer than the event-tap callback
+        // budget to answer AX requests. These calls run on the dedicated AX queue.
+        AXUIElementSetMessagingTimeout(window, 0.5)
 
         var pid: pid_t = 0
         guard AXUIElementGetPid(window, &pid) == .success,
@@ -332,15 +331,28 @@ final class SystemWindowAccessor: WindowAccessing, @unchecked Sendable {
     }
 
     private func resolveWindow(from element: AXUIElement) -> AXUIElement? {
-        if stringAttribute(element, kAXRoleAttribute as CFString)
-            == kAXWindowRole as String {
-            return element
-        }
-        return elementAttribute(element, kAXWindowAttribute as CFString)
-            ?? elementAttribute(
-                element,
+        var candidate = element
+        for _ in 0..<8 {
+            if stringAttribute(candidate, kAXRoleAttribute as CFString)
+                == kAXWindowRole as String {
+                return candidate
+            }
+            if let window = elementAttribute(
+                candidate,
+                kAXWindowAttribute as CFString
+            ) ?? elementAttribute(
+                candidate,
                 kAXTopLevelUIElementAttribute as CFString
-            )
+            ) {
+                return window
+            }
+            guard let parent = elementAttribute(
+                candidate,
+                kAXParentAttribute as CFString
+            ), !CFEqual(parent, candidate) else { return nil }
+            candidate = parent
+        }
+        return nil
     }
 
     private func axElement(from target: WindowControlTarget) -> AXUIElement? {
@@ -449,10 +461,175 @@ final class SystemWindowAccessor: WindowAccessing, @unchecked Sendable {
     }
 }
 
+struct WindowControlPointerSample: Equatable, Sendable {
+    let operation: WindowControlOperation
+    let location: CGPoint
+}
+
+final class WindowControlPointerCoordinator: @unchecked Sendable {
+    private let windowAccessor: any WindowAccessing
+    private var gestureSession = WindowControlGestureSession()
+
+    init(windowAccessor: any WindowAccessing) {
+        self.windowAccessor = windowAccessor
+    }
+
+    func process(_ sample: WindowControlPointerSample) -> WindowControlActivity {
+        if !gestureSession.isTracking {
+            guard let target = windowAccessor.target(
+                at: sample.location,
+                operation: sample.operation
+            ) else {
+                return .targetUnavailable
+            }
+            gestureSession.begin(
+                operation: sample.operation,
+                target: target,
+                pointer: sample.location
+            )
+            windowAccessor.raiseAndActivate(target)
+            return .tracking(sample.operation)
+        }
+
+        guard let update = gestureSession.update(
+            operation: sample.operation,
+            pointer: sample.location
+        ) else {
+            gestureSession.reset()
+            return process(sample)
+        }
+
+        let succeeded = switch update {
+        case let .move(target, position):
+            windowAccessor.move(target, to: position)
+        case let .resize(target, size):
+            windowAccessor.resize(target, to: size)
+        }
+        guard succeeded else {
+            gestureSession.reset()
+            return .updateRejected(sample.operation)
+        }
+        return .tracking(sample.operation)
+    }
+
+    func reset() {
+        gestureSession.reset()
+    }
+}
+
+private final class WindowControlPointerProcessor: @unchecked Sendable {
+    private struct PendingSample {
+        let generation: UInt64
+        let value: WindowControlPointerSample
+    }
+
+    private static let updateInterval = DispatchTimeInterval.milliseconds(8)
+    private static let retryInterval = DispatchTimeInterval.milliseconds(50)
+
+    private let lock = NSLock()
+    private let queue = DispatchQueue(
+        label: "com.yorozu.app.window-control.ax",
+        qos: .userInteractive
+    )
+    private let coordinator: WindowControlPointerCoordinator
+    private let activityHandler: @MainActor @Sendable (WindowControlActivity) -> Void
+    private var pendingSample: PendingSample?
+    private var generation: UInt64 = 0
+    private var isScheduled = false
+    private var isGestureActive = false
+    private var lastActivity: WindowControlActivity?
+
+    init(
+        windowAccessor: any WindowAccessing,
+        activityHandler: @escaping @MainActor @Sendable (WindowControlActivity) -> Void
+    ) {
+        coordinator = WindowControlPointerCoordinator(windowAccessor: windowAccessor)
+        self.activityHandler = activityHandler
+    }
+
+    func submit(_ sample: WindowControlPointerSample) {
+        lock.lock()
+        isGestureActive = true
+        pendingSample = PendingSample(generation: generation, value: sample)
+        let shouldSchedule = !isScheduled
+        if shouldSchedule { isScheduled = true }
+        lock.unlock()
+
+        if shouldSchedule {
+            queue.async { [weak self] in
+                self?.processPendingSample()
+            }
+        }
+    }
+
+    func report(_ activity: WindowControlActivity) {
+        queue.async { [weak self] in
+            self?.publish(activity)
+        }
+    }
+
+    func reset() {
+        lock.lock()
+        guard isGestureActive || pendingSample != nil else {
+            lock.unlock()
+            return
+        }
+        isGestureActive = false
+        generation &+= 1
+        pendingSample = nil
+        lock.unlock()
+        queue.async { [weak self] in
+            guard let self else { return }
+            coordinator.reset()
+            publish(.listening)
+        }
+    }
+
+    private func processPendingSample() {
+        lock.lock()
+        guard let sample = pendingSample else {
+            isScheduled = false
+            lock.unlock()
+            return
+        }
+        pendingSample = nil
+        let isCurrent = sample.generation == generation
+        lock.unlock()
+
+        let delay: DispatchTimeInterval
+        if isCurrent {
+            let activity = coordinator.process(sample.value)
+            publish(activity)
+            delay = switch activity {
+            case .targetUnavailable, .updateRejected:
+                Self.retryInterval
+            case .listening, .tracking, .monitorRecovered:
+                Self.updateInterval
+            }
+        } else {
+            delay = Self.updateInterval
+        }
+        queue.asyncAfter(deadline: .now() + delay) { [weak self] in
+            self?.processPendingSample()
+        }
+    }
+
+    private func publish(_ activity: WindowControlActivity) {
+        guard lastActivity != activity else { return }
+        lastActivity = activity
+        Task { @MainActor [activityHandler] in
+            activityHandler(activity)
+        }
+    }
+}
+
 @MainActor
 protocol WindowControlMonitoring: AnyObject {
     var isRunning: Bool { get }
 
+    func setActivityHandler(
+        _ handler: (@MainActor @Sendable (WindowControlActivity) -> Void)?
+    )
     func start(configuration: WindowControlConfiguration) -> Bool
     func update(configuration: WindowControlConfiguration)
     func stop()
@@ -477,21 +654,25 @@ private final class WindowControlEventTapWorker: @unchecked Sendable {
     }
 
     private let lock = NSLock()
-    private let windowAccessor: any WindowAccessing
+    private let pointerProcessor: WindowControlPointerProcessor
     private var configuration: WindowControlConfiguration
     private var runLoop: CFRunLoop?
     private var eventTap: CFMachPort?
     private var thread: Thread?
     private var running = false
     private var stopRequested = false
-    private var gestureSession = WindowControlGestureSession()
+    private var isPointerTracking = false
 
     init(
         configuration: WindowControlConfiguration,
-        windowAccessor: any WindowAccessing
+        windowAccessor: any WindowAccessing,
+        activityHandler: @escaping @MainActor @Sendable (WindowControlActivity) -> Void
     ) {
         self.configuration = configuration
-        self.windowAccessor = windowAccessor
+        pointerProcessor = WindowControlPointerProcessor(
+            windowAccessor: windowAccessor,
+            activityHandler: activityHandler
+        )
     }
 
     var isRunning: Bool {
@@ -505,8 +686,8 @@ private final class WindowControlEventTapWorker: @unchecked Sendable {
 
         let semaphore = DispatchSemaphore(value: 0)
         let result = StartResult()
-        let thread = Thread { [weak self] in
-            self?.runEventTap(result: result, semaphore: semaphore)
+        let thread = Thread { [self] in
+            runEventTap(result: result, semaphore: semaphore)
         }
         thread.name = "com.yorozu.app.window-control"
         thread.qualityOfService = .userInteractive
@@ -547,9 +728,7 @@ private final class WindowControlEventTapWorker: @unchecked Sendable {
     ) {
         let eventTypes: [CGEventType] = [
             .flagsChanged,
-            .leftMouseDown,
-            .leftMouseDragged,
-            .leftMouseUp,
+            .mouseMoved,
         ]
         let mask = eventTypes.reduce(CGEventMask(0)) {
             $0 | (CGEventMask(1) << CGEventMask($1.rawValue))
@@ -604,10 +783,11 @@ private final class WindowControlEventTapWorker: @unchecked Sendable {
         result.complete(shouldRun && CGEvent.tapIsEnabled(tap: eventTap))
         semaphore.signal()
         if shouldRun {
+            pointerProcessor.report(.listening)
             CFRunLoopRun()
         }
 
-        gestureSession.reset()
+        pointerProcessor.reset()
         CGEvent.tapEnable(tap: eventTap, enable: false)
         CFRunLoopRemoveSource(currentRunLoop, source, .commonModes)
         CFMachPortInvalidate(eventTap)
@@ -625,7 +805,9 @@ private final class WindowControlEventTapWorker: @unchecked Sendable {
         event: CGEvent
     ) -> Bool {
         if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
-            gestureSession.reset()
+            isPointerTracking = false
+            pointerProcessor.reset()
+            pointerProcessor.report(.monitorRecovered)
             lock.lock()
             let eventTap = eventTap
             lock.unlock()
@@ -637,58 +819,35 @@ private final class WindowControlEventTapWorker: @unchecked Sendable {
 
         let configuration = currentConfiguration()
         switch type {
-        case .leftMouseDown:
-            guard !gestureSession.isCaptured,
-                  let operation = configuration.operation(for: event.flags),
-                  let target = windowAccessor.target(
-                    at: event.location,
-                    operation: operation
-                  ) else {
+        case .mouseMoved:
+            guard let operation = configuration.operation(for: event.flags) else {
+                resetPointerTrackingIfNeeded()
                 return false
             }
-            gestureSession.begin(
-                operation: operation,
-                target: target,
-                pointer: event.location
+            isPointerTracking = true
+            pointerProcessor.submit(
+                WindowControlPointerSample(
+                    operation: operation,
+                    location: event.location
+                )
             )
-            windowAccessor.raiseAndActivate(target)
-            return true
-
-        case .leftMouseDragged:
-            guard let update = gestureSession.drag(
-                configuration: configuration,
-                flags: event.flags,
-                pointer: event.location
-            ) else {
-                return false
-            }
-            let succeeded: Bool
-            switch update {
-            case let .move(target, position):
-                succeeded = windowAccessor.move(target, to: position)
-            case let .resize(target, size):
-                succeeded = windowAccessor.resize(target, to: size)
-            case .consumeWithoutUpdate:
-                succeeded = true
-            }
-            if !succeeded {
-                gestureSession.cancelUpdate()
-            }
-            return true
-
-        case .leftMouseUp:
-            return gestureSession.end()
+            return false
 
         case .flagsChanged:
-            gestureSession.flagsChanged(
-                configuration: configuration,
-                flags: event.flags
-            )
+            if configuration.operation(for: event.flags) == nil {
+                resetPointerTrackingIfNeeded()
+            }
             return false
 
         default:
             return false
         }
+    }
+
+    private func resetPointerTrackingIfNeeded() {
+        guard isPointerTracking else { return }
+        isPointerTracking = false
+        pointerProcessor.reset()
     }
 
     private func currentConfiguration() -> WindowControlConfiguration {
@@ -702,6 +861,8 @@ private final class WindowControlEventTapWorker: @unchecked Sendable {
 final class WindowControlMonitor: WindowControlMonitoring {
     private let windowAccessor: any WindowAccessing
     private var worker: WindowControlEventTapWorker?
+    private var activityHandler:
+        (@MainActor @Sendable (WindowControlActivity) -> Void)?
 
     init(windowAccessor: any WindowAccessing = SystemWindowAccessor()) {
         self.windowAccessor = windowAccessor
@@ -711,14 +872,22 @@ final class WindowControlMonitor: WindowControlMonitoring {
         worker?.isRunning == true
     }
 
+    func setActivityHandler(
+        _ handler: (@MainActor @Sendable (WindowControlActivity) -> Void)?
+    ) {
+        activityHandler = handler
+    }
+
     func start(configuration: WindowControlConfiguration) -> Bool {
         if let worker, worker.isRunning {
             worker.update(configuration: configuration)
             return true
         }
+        let activityHandler = activityHandler ?? { _ in }
         let worker = WindowControlEventTapWorker(
             configuration: configuration,
-            windowAccessor: windowAccessor
+            windowAccessor: windowAccessor,
+            activityHandler: activityHandler
         )
         self.worker = worker
         let started = worker.start()
@@ -825,6 +994,7 @@ final class WindowControlController: ObservableObject {
     @Published private(set) var isAccessibilityGranted = false
     @Published private(set) var runtimeStatus: RuntimeStatus = .off
     @Published private(set) var codeSigningStatus: CommandInputModeCodeSigningStatus
+    @Published private(set) var lastActivity: WindowControlActivity?
 
     private let defaults: UserDefaults
     private let monitor: any WindowControlMonitoring
@@ -851,6 +1021,9 @@ final class WindowControlController: ObservableObject {
         moveChord = Self.loadChord(defaults, key: DefaultsKey.moveChord)
         resizeChord = Self.loadChord(defaults, key: DefaultsKey.resizeChord)
         codeSigningStatus = codeSigningStatusProvider.status
+        monitor.setActivityHandler { [weak self] activity in
+            self?.lastActivity = activity
+        }
     }
 
     static func live(defaults: UserDefaults) -> WindowControlController {
@@ -895,6 +1068,7 @@ final class WindowControlController: ObservableObject {
         backgroundActivityManager.end()
         hasStarted = false
         runtimeStatus = .off
+        lastActivity = nil
     }
 
     @discardableResult
@@ -950,18 +1124,21 @@ final class WindowControlController: ObservableObject {
             monitor.stop()
             backgroundActivityManager.end()
             runtimeStatus = .off
+            lastActivity = nil
             return
         }
         guard configuration.isValid else {
             monitor.stop()
             backgroundActivityManager.end()
             runtimeStatus = .needsConfiguration
+            lastActivity = nil
             return
         }
         guard isAccessibilityGranted else {
             monitor.stop()
             backgroundActivityManager.end()
             runtimeStatus = .permissionRequired
+            lastActivity = nil
             return
         }
 
@@ -1011,6 +1188,9 @@ final class WindowControlController: ObservableObject {
 @MainActor
 private final class DisabledWindowControlMonitor: WindowControlMonitoring {
     var isRunning = false
+    func setActivityHandler(
+        _ handler: (@MainActor @Sendable (WindowControlActivity) -> Void)?
+    ) {}
     func start(configuration: WindowControlConfiguration) -> Bool { false }
     func update(configuration: WindowControlConfiguration) {}
     func stop() { isRunning = false }

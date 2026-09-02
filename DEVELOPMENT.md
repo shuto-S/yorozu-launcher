@@ -103,9 +103,10 @@ immediately when the feature is disabled or the app terminates.
 
 Window Control follows the same permission and signing rules. Its active event tap is
 created only after the feature is enabled, two distinct modifier combinations are set,
-and the current process is trusted. It listens only for modifier changes and left-mouse
-drag events, performs Accessibility work only for a matching gesture, and uses a
-user-initiated activity that still permits idle system sleep.
+and the current process is trusted. It listens only for modifier changes and pointer
+movement, then coalesces matching gestures before performing Accessibility work on a
+dedicated serial queue. It uses a user-initiated activity that still permits idle system
+sleep.
 
 The shared project must remain buildable without a personal Apple account. Never place a Development Team directly in `project.pbxproj`.
 

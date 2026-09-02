@@ -154,10 +154,20 @@ private struct WindowControlSettingsView: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
+
+                if controller.runtimeStatus == .active,
+                   let activity = controller.lastActivity {
+                    Text(activity.message)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .accessibilityIdentifier(
+                            "settings.window-control.activity"
+                        )
+                }
             } header: {
                 Text("Window Control")
             } footer: {
-                Text("Hold the configured keys and drag with the left mouse button. The target application is brought to the front when the gesture begins.")
+                Text("Hold the configured keys and move the pointer. No click is required. The window under the pointer is brought to the front when tracking begins.")
             }
 
             Section("Gestures") {

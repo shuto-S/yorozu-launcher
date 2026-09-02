@@ -48,9 +48,9 @@ Command shortcuts and regular Command-clicks continue to work normally. Once ena
 the listen-only monitor remains available while Yorozu is not the active application.
 
 Window Control is also disabled by default. Configure two different modifier-key
-combinations in **Settings → Window Control**, then hold one combination while dragging
-with the left mouse button. Move and resize gestures use Accessibility, run only while
-the feature is enabled, and allow normal idle system sleep.
+combinations in **Settings → Window Control**, then hold one combination and move the
+pointer over a window; no click is required. Move and resize gestures use Accessibility,
+run only while the feature is enabled, and allow normal idle system sleep.
 
 When Root Search recognizes a supported arithmetic expression, the result is shown as a
 copyable command. `Return` copies the result; the Action Panel also offers `Copy Result`
