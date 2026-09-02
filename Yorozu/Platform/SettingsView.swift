@@ -167,7 +167,7 @@ private struct WindowControlSettingsView: View {
             } header: {
                 Text("Window Control")
             } footer: {
-                Text("Hold the configured keys and move the pointer. No click is required. Push a moving window to the top edge to maximize it, or to the left or right edge to fill that half of the screen.")
+                Text("Hold the configured keys and drag with the primary mouse button or trackpad click. A preview appears at the top, left, or right edge. Release the drag to apply it.")
             }
 
             Section("Gestures") {

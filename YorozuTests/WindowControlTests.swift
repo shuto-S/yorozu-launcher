@@ -154,6 +154,20 @@ final class WindowControlTests: XCTestCase {
             ),
             CGRect(x: 0, y: 900, width: 1024, height: 768)
         )
+        XCTAssertEqual(
+            WindowControlSnapGeometry.appKitFrame(
+                from: CGRect(x: 0, y: -900, width: 1440, height: 900),
+                primaryScreenMaxY: 900
+            ),
+            CGRect(x: 0, y: 900, width: 1440, height: 900)
+        )
+        XCTAssertEqual(
+            WindowControlSnapGeometry.appKitFrame(
+                from: CGRect(x: 0, y: 900, width: 1024, height: 768),
+                primaryScreenMaxY: 900
+            ),
+            CGRect(x: 0, y: -768, width: 1024, height: 768)
+        )
     }
 
     func testGestureTracksPointerUntilReset() throws {
@@ -209,7 +223,7 @@ final class WindowControlTests: XCTestCase {
         XCTAssertEqual(size, CGSize(width: 450, height: 360))
     }
 
-    func testPointerCoordinatorAcquiresAndMovesWindowWithoutMouseClick() {
+    func testPointerCoordinatorAcquiresAndMovesWindowFromGestureStart() {
         let accessor = TestWindowAccessor(target: testTarget())
         let coordinator = WindowControlPointerCoordinator(
             windowAccessor: accessor
@@ -243,15 +257,17 @@ final class WindowControlTests: XCTestCase {
         )
     }
 
-    func testPointerCoordinatorSnapsOnceAndRestoresFreeMoveSize() {
+    func testPointerCoordinatorPreviewsSnapAndCommitsOnlyOnMouseUp() {
         let accessor = TestWindowAccessor(target: testTarget())
+        let previews = TestWindowControlPreviewRecorder()
         let screen = WindowControlScreen(
             frame: CGRect(x: 0, y: 0, width: 1000, height: 800),
             visibleFrame: CGRect(x: 0, y: 24, width: 1000, height: 776)
         )
         let coordinator = WindowControlPointerCoordinator(
             windowAccessor: accessor,
-            screenProvider: TestWindowControlScreenProvider(screen: screen)
+            screenProvider: TestWindowControlScreenProvider(screen: screen),
+            previewHandler: previews.record
         )
 
         _ = coordinator.process(
@@ -273,24 +289,128 @@ final class WindowControlTests: XCTestCase {
             )
         )
 
+        XCTAssertTrue(accessor.setFrames.isEmpty)
+        XCTAssertEqual(
+            previews.values.compactMap { $0 },
+            [
+                WindowControlSnapDestination(
+                    zone: .leftHalf,
+                    frame: CGRect(x: 0, y: 24, width: 500, height: 776)
+                ),
+            ]
+        )
+        XCTAssertEqual(coordinator.finish(commitSnap: true), .listening)
         XCTAssertEqual(
             accessor.setFrames,
             [CGRect(x: 0, y: 24, width: 500, height: 776)]
         )
+        XCTAssertNil(previews.values.last ?? nil)
+    }
 
+    func testPointerCoordinatorCancelsSnapBeforeMouseUp() {
+        let accessor = TestWindowAccessor(target: testTarget())
+        let previews = TestWindowControlPreviewRecorder()
+        let screen = WindowControlScreen(
+            frame: CGRect(x: 0, y: 0, width: 1000, height: 800),
+            visibleFrame: CGRect(x: 0, y: 24, width: 1000, height: 776)
+        )
+        let coordinator = WindowControlPointerCoordinator(
+            windowAccessor: accessor,
+            screenProvider: TestWindowControlScreenProvider(screen: screen),
+            previewHandler: previews.record
+        )
+
+        _ = coordinator.process(
+            WindowControlPointerSample(
+                operation: .move,
+                location: CGPoint(x: 300, y: 300)
+            )
+        )
+        _ = coordinator.process(
+            WindowControlPointerSample(
+                operation: .move,
+                location: CGPoint(x: 5, y: 300)
+            )
+        )
+
+        XCTAssertEqual(coordinator.finish(commitSnap: false), .listening)
+        XCTAssertTrue(accessor.setFrames.isEmpty)
+        XCTAssertNil(previews.values.last ?? nil)
+    }
+
+    func testPointerCoordinatorHidesPreviewAfterLeavingSnapZone() {
+        let accessor = TestWindowAccessor(target: testTarget())
+        let previews = TestWindowControlPreviewRecorder()
+        let screen = WindowControlScreen(
+            frame: CGRect(x: 0, y: 0, width: 1000, height: 800),
+            visibleFrame: CGRect(x: 0, y: 24, width: 1000, height: 776)
+        )
+        let coordinator = WindowControlPointerCoordinator(
+            windowAccessor: accessor,
+            screenProvider: TestWindowControlScreenProvider(screen: screen),
+            previewHandler: previews.record
+        )
+
+        _ = coordinator.process(
+            WindowControlPointerSample(
+                operation: .move,
+                location: CGPoint(x: 300, y: 300)
+            )
+        )
+        _ = coordinator.process(
+            WindowControlPointerSample(
+                operation: .move,
+                location: CGPoint(x: 5, y: 300)
+            )
+        )
         _ = coordinator.process(
             WindowControlPointerSample(
                 operation: .move,
                 location: CGPoint(x: 100, y: 320)
             )
         )
+
+        XCTAssertNil(previews.values.last ?? nil)
+        XCTAssertEqual(coordinator.finish(commitSnap: true), .listening)
+        XCTAssertTrue(accessor.setFrames.isEmpty)
+    }
+
+    func testPrimaryDragCommitsMoveSnapOnlyWhenMouseUpFinishesGesture() {
+        var session = WindowControlPrimaryDragSession()
+
+        session.begin(operation: .move)
+        XCTAssertTrue(session.isConsuming)
         XCTAssertEqual(
-            accessor.setFrames,
-            [
-                CGRect(x: 0, y: 24, width: 500, height: 776),
-                CGRect(x: -100, y: 120, width: 400, height: 300),
-            ]
+            session.finish(),
+            WindowControlPrimaryDragSession.Completion(
+                shouldCommitSnap: true
+            )
         )
+        XCTAssertFalse(session.isConsuming)
+
+        session.begin(operation: .resize)
+        XCTAssertEqual(
+            session.finish(),
+            WindowControlPrimaryDragSession.Completion(
+                shouldCommitSnap: false
+            )
+        )
+    }
+
+    func testPrimaryDragCancelsSnapWhenModifierIsReleasedBeforeMouseUp() {
+        var session = WindowControlPrimaryDragSession()
+        session.begin(operation: .move)
+
+        XCTAssertTrue(session.cancel())
+        XCTAssertTrue(session.isConsuming)
+        XCTAssertTrue(session.isCancelled)
+        XCTAssertEqual(
+            session.finish(),
+            WindowControlPrimaryDragSession.Completion(
+                shouldCommitSnap: false
+            )
+        )
+        XCTAssertFalse(session.isConsuming)
     }
 
     func testResizeAndNonResizableMoveDoNotUseSnapFrames() {
@@ -626,6 +746,23 @@ private final class TestWindowControlScreenProvider:
             return nil
         }
         return screen
+    }
+}
+
+private final class TestWindowControlPreviewRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storedValues: [WindowControlSnapDestination?] = []
+
+    var values: [WindowControlSnapDestination?] {
+        lock.lock()
+        defer { lock.unlock() }
+        return storedValues
+    }
+
+    func record(_ destination: WindowControlSnapDestination?) {
+        lock.lock()
+        storedValues.append(destination)
+        lock.unlock()
     }
 }
 

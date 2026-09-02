@@ -200,6 +200,18 @@ enum WindowControlSnapGeometry {
         )
     }
 
+    static func appKitFrame(
+        from accessibilityFrame: CGRect,
+        primaryScreenMaxY: CGFloat
+    ) -> CGRect {
+        CGRect(
+            x: accessibilityFrame.minX,
+            y: primaryScreenMaxY - accessibilityFrame.maxY,
+            width: accessibilityFrame.width,
+            height: accessibilityFrame.height
+        )
+    }
+
     private static func frame(
         for zone: WindowControlSnapZone,
         visibleFrame: CGRect
@@ -301,6 +313,81 @@ private final class WindowControlScreenParametersObserver:
             NotificationCenter.default.removeObserver(token)
         }
     }
+}
+
+@MainActor
+protocol WindowControlSnapPreviewPresenting: AnyObject {
+    func show(_ destination: WindowControlSnapDestination)
+    func hide()
+}
+
+@MainActor
+final class SystemWindowControlSnapPreviewPresenter:
+    WindowControlSnapPreviewPresenting {
+    private var panel: NSPanel?
+    private var visibleDestination: WindowControlSnapDestination?
+
+    func show(_ destination: WindowControlSnapDestination) {
+        guard destination != visibleDestination,
+              let primaryScreenMaxY = NSScreen.screens.first?.frame.maxY else {
+            return
+        }
+        let panel = panel ?? makePanel()
+        self.panel = panel
+        visibleDestination = destination
+        panel.setFrame(
+            WindowControlSnapGeometry.appKitFrame(
+                from: destination.frame,
+                primaryScreenMaxY: primaryScreenMaxY
+            ),
+            display: true
+        )
+        panel.orderFrontRegardless()
+    }
+
+    func hide() {
+        guard visibleDestination != nil else { return }
+        visibleDestination = nil
+        panel?.orderOut(nil)
+    }
+
+    private func makePanel() -> NSPanel {
+        let panel = NSPanel(
+            contentRect: .zero,
+            styleMask: [.borderless, .nonactivatingPanel],
+            backing: .buffered,
+            defer: false
+        )
+        panel.isReleasedWhenClosed = false
+        panel.isOpaque = false
+        panel.backgroundColor = .clear
+        panel.hasShadow = false
+        panel.hidesOnDeactivate = false
+        panel.ignoresMouseEvents = true
+        panel.level = .floating
+        panel.collectionBehavior = [
+            .canJoinAllSpaces,
+            .fullScreenAuxiliary,
+            .transient,
+            .ignoresCycle,
+        ]
+        panel.animationBehavior = .none
+
+        let glassView = NSGlassEffectView(frame: panel.contentView?.bounds ?? .zero)
+        glassView.autoresizingMask = [.width, .height]
+        glassView.style = .regular
+        glassView.cornerRadius = 18
+        glassView.setAccessibilityElement(false)
+        panel.contentView = glassView
+        return panel
+    }
+}
+
+@MainActor
+final class EmptyWindowControlSnapPreviewPresenter:
+    WindowControlSnapPreviewPresenting {
+    func show(_ destination: WindowControlSnapDestination) {}
+    func hide() {}
 }
 
 final class EmptyWindowControlScreenProvider:
@@ -658,16 +745,23 @@ struct WindowControlPointerSample: Equatable, Sendable {
 final class WindowControlPointerCoordinator: @unchecked Sendable {
     private let windowAccessor: any WindowAccessing
     private let screenProvider: any WindowControlScreenProviding
+    private let previewHandler:
+        @Sendable (WindowControlSnapDestination?) -> Void
     private var gestureSession = WindowControlGestureSession()
     private var activeSnapDestination: WindowControlSnapDestination?
+    private var activeSnapTarget: WindowControlTarget?
 
     init(
         windowAccessor: any WindowAccessing,
         screenProvider: any WindowControlScreenProviding =
-            EmptyWindowControlScreenProvider()
+            EmptyWindowControlScreenProvider(),
+        previewHandler: @escaping @Sendable (
+            WindowControlSnapDestination?
+        ) -> Void = { _ in }
     ) {
         self.windowAccessor = windowAccessor
         self.screenProvider = screenProvider
+        self.previewHandler = previewHandler
     }
 
     func process(_ sample: WindowControlPointerSample) -> WindowControlActivity {
@@ -704,7 +798,7 @@ final class WindowControlPointerCoordinator: @unchecked Sendable {
                 pointer: sample.location
             )
         case let .resize(target, size):
-            activeSnapDestination = nil
+            clearSnapPreview()
             succeeded = windowAccessor.resize(target, to: size)
         }
         guard succeeded else {
@@ -716,7 +810,34 @@ final class WindowControlPointerCoordinator: @unchecked Sendable {
 
     func reset() {
         gestureSession.reset()
+        clearSnapPreview()
+    }
+
+    func finish(commitSnap: Bool) -> WindowControlActivity {
+        let activity: WindowControlActivity
+        if commitSnap,
+           let activeSnapDestination,
+           let activeSnapTarget,
+           !windowAccessor.setFrame(
+               activeSnapTarget,
+               to: activeSnapDestination.frame
+           ) {
+            activity = .updateRejected(.move)
+        } else {
+            activity = .listening
+        }
+        gestureSession.reset()
+        clearSnapPreview()
+        return activity
+    }
+
+    private func clearSnapPreview() {
+        guard activeSnapDestination != nil || activeSnapTarget != nil else {
+            return
+        }
         activeSnapDestination = nil
+        activeSnapTarget = nil
+        previewHandler(nil)
     }
 
     private func processMove(
@@ -734,27 +855,18 @@ final class WindowControlPointerCoordinator: @unchecked Sendable {
             : nil
 
         if let destination {
-            guard destination != activeSnapDestination else { return true }
-            guard windowAccessor.setFrame(
-                target,
-                to: destination.frame
-            ) else { return false }
-            activeSnapDestination = destination
-            return true
-        }
-
-        if activeSnapDestination != nil {
-            let restoredFrame = CGRect(
-                origin: position,
-                size: target.initialSize
-            )
-            guard windowAccessor.setFrame(target, to: restoredFrame) else {
+            guard windowAccessor.move(target, to: position) else {
                 return false
             }
-            activeSnapDestination = nil
+            if destination != activeSnapDestination {
+                activeSnapDestination = destination
+                activeSnapTarget = target
+                previewHandler(destination)
+            }
             return true
         }
 
+        clearSnapPreview()
         return windowAccessor.move(target, to: position)
     }
 }
@@ -784,11 +896,19 @@ private final class WindowControlPointerProcessor: @unchecked Sendable {
     init(
         windowAccessor: any WindowAccessing,
         screenProvider: any WindowControlScreenProviding,
+        previewHandler: @escaping @MainActor @Sendable (
+            WindowControlSnapDestination?
+        ) -> Void,
         activityHandler: @escaping @MainActor @Sendable (WindowControlActivity) -> Void
     ) {
         coordinator = WindowControlPointerCoordinator(
             windowAccessor: windowAccessor,
-            screenProvider: screenProvider
+            screenProvider: screenProvider,
+            previewHandler: { destination in
+                Task { @MainActor in
+                    previewHandler(destination)
+                }
+            }
         )
         self.activityHandler = activityHandler
     }
@@ -814,21 +934,28 @@ private final class WindowControlPointerProcessor: @unchecked Sendable {
         }
     }
 
-    func reset() {
+    func finish(commitSnap: Bool) {
         lock.lock()
         guard isGestureActive || pendingSample != nil else {
             lock.unlock()
             return
         }
+        let finalSample = commitSnap ? pendingSample?.value : nil
         isGestureActive = false
         generation &+= 1
         pendingSample = nil
         lock.unlock()
         queue.async { [weak self] in
             guard let self else { return }
-            coordinator.reset()
-            publish(.listening)
+            if let finalSample {
+                _ = coordinator.process(finalSample)
+            }
+            publish(coordinator.finish(commitSnap: commitSnap))
         }
+    }
+
+    func reset() {
+        finish(commitSnap: false)
     }
 
     private func processPendingSample() {
@@ -866,6 +993,45 @@ private final class WindowControlPointerProcessor: @unchecked Sendable {
         Task { @MainActor [activityHandler] in
             activityHandler(activity)
         }
+    }
+}
+
+struct WindowControlPrimaryDragSession: Equatable, Sendable {
+    struct Completion: Equatable, Sendable {
+        let shouldCommitSnap: Bool
+    }
+
+    private(set) var operation: WindowControlOperation?
+    private(set) var isConsuming = false
+    private(set) var isCancelled = false
+
+    mutating func begin(operation: WindowControlOperation) {
+        self.operation = operation
+        isConsuming = true
+        isCancelled = false
+    }
+
+    @discardableResult
+    mutating func cancel() -> Bool {
+        guard isConsuming, !isCancelled else { return false }
+        operation = nil
+        isCancelled = true
+        return true
+    }
+
+    mutating func finish() -> Completion? {
+        guard isConsuming else { return nil }
+        let completion = Completion(
+            shouldCommitSnap: !isCancelled && operation == .move
+        )
+        reset()
+        return completion
+    }
+
+    mutating func reset() {
+        operation = nil
+        isConsuming = false
+        isCancelled = false
     }
 }
 
@@ -907,18 +1073,22 @@ private final class WindowControlEventTapWorker: @unchecked Sendable {
     private var thread: Thread?
     private var running = false
     private var stopRequested = false
-    private var isPointerTracking = false
+    private var dragSession = WindowControlPrimaryDragSession()
 
     init(
         configuration: WindowControlConfiguration,
         windowAccessor: any WindowAccessing,
         screenProvider: any WindowControlScreenProviding,
+        previewHandler: @escaping @MainActor @Sendable (
+            WindowControlSnapDestination?
+        ) -> Void,
         activityHandler: @escaping @MainActor @Sendable (WindowControlActivity) -> Void
     ) {
         self.configuration = configuration
         pointerProcessor = WindowControlPointerProcessor(
             windowAccessor: windowAccessor,
             screenProvider: screenProvider,
+            previewHandler: previewHandler,
             activityHandler: activityHandler
         )
     }
@@ -976,7 +1146,9 @@ private final class WindowControlEventTapWorker: @unchecked Sendable {
     ) {
         let eventTypes: [CGEventType] = [
             .flagsChanged,
-            .mouseMoved,
+            .leftMouseDown,
+            .leftMouseDragged,
+            .leftMouseUp,
         ]
         let mask = eventTypes.reduce(CGEventMask(0)) {
             $0 | (CGEventMask(1) << CGEventMask($1.rawValue))
@@ -1053,7 +1225,7 @@ private final class WindowControlEventTapWorker: @unchecked Sendable {
         event: CGEvent
     ) -> Bool {
         if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
-            isPointerTracking = false
+            dragSession.reset()
             pointerProcessor.reset()
             pointerProcessor.report(.monitorRecovered)
             lock.lock()
@@ -1067,23 +1239,47 @@ private final class WindowControlEventTapWorker: @unchecked Sendable {
 
         let configuration = currentConfiguration()
         switch type {
-        case .mouseMoved:
+        case .leftMouseDown:
             guard let operation = configuration.operation(for: event.flags) else {
-                resetPointerTrackingIfNeeded()
                 return false
             }
-            isPointerTracking = true
+            dragSession.begin(operation: operation)
             pointerProcessor.submit(
                 WindowControlPointerSample(
                     operation: operation,
                     location: event.location
                 )
             )
-            return false
+            return true
+
+        case .leftMouseDragged:
+            guard dragSession.isConsuming else { return false }
+            guard !dragSession.isCancelled,
+                  let operation = dragSession.operation,
+                  configuration.operation(for: event.flags) == operation else {
+                cancelActiveDragIfNeeded()
+                return true
+            }
+            pointerProcessor.submit(
+                WindowControlPointerSample(
+                    operation: operation,
+                    location: event.location
+                )
+            )
+            return true
+
+        case .leftMouseUp:
+            guard let completion = dragSession.finish() else { return false }
+            pointerProcessor.finish(
+                commitSnap: completion.shouldCommitSnap
+            )
+            return true
 
         case .flagsChanged:
-            if configuration.operation(for: event.flags) == nil {
-                resetPointerTrackingIfNeeded()
+            if dragSession.isConsuming,
+               let operation = dragSession.operation,
+               configuration.operation(for: event.flags) != operation {
+                cancelActiveDragIfNeeded()
             }
             return false
 
@@ -1092,9 +1288,8 @@ private final class WindowControlEventTapWorker: @unchecked Sendable {
         }
     }
 
-    private func resetPointerTrackingIfNeeded() {
-        guard isPointerTracking else { return }
-        isPointerTracking = false
+    private func cancelActiveDragIfNeeded() {
+        guard dragSession.cancel() else { return }
         pointerProcessor.reset()
     }
 
@@ -1109,6 +1304,7 @@ private final class WindowControlEventTapWorker: @unchecked Sendable {
 final class WindowControlMonitor: WindowControlMonitoring {
     private let windowAccessor: any WindowAccessing
     private let screenProvider: any WindowControlScreenProviding
+    private let snapPreviewPresenter: any WindowControlSnapPreviewPresenting
     private let screenParametersObserver: WindowControlScreenParametersObserver
     private var worker: WindowControlEventTapWorker?
     private var activityHandler:
@@ -1116,12 +1312,17 @@ final class WindowControlMonitor: WindowControlMonitoring {
 
     init(
         windowAccessor: any WindowAccessing = SystemWindowAccessor(),
-        screenProvider: (any WindowControlScreenProviding)? = nil
+        screenProvider: (any WindowControlScreenProviding)? = nil,
+        snapPreviewPresenter: (
+            any WindowControlSnapPreviewPresenting
+        )? = nil
     ) {
         self.windowAccessor = windowAccessor
         let resolvedScreenProvider = screenProvider
             ?? SystemWindowControlScreenProvider()
         self.screenProvider = resolvedScreenProvider
+        self.snapPreviewPresenter = snapPreviewPresenter
+            ?? SystemWindowControlSnapPreviewPresenter()
         let systemScreenProvider = resolvedScreenProvider
             as? SystemWindowControlScreenProvider
         systemScreenProvider?.refresh()
@@ -1150,6 +1351,13 @@ final class WindowControlMonitor: WindowControlMonitoring {
             configuration: configuration,
             windowAccessor: windowAccessor,
             screenProvider: screenProvider,
+            previewHandler: { [snapPreviewPresenter] destination in
+                if let destination {
+                    snapPreviewPresenter.show(destination)
+                } else {
+                    snapPreviewPresenter.hide()
+                }
+            },
             activityHandler: activityHandler
         )
         self.worker = worker
@@ -1167,6 +1375,7 @@ final class WindowControlMonitor: WindowControlMonitoring {
     func stop() {
         worker?.stop()
         worker = nil
+        snapPreviewPresenter.hide()
     }
 }
 
