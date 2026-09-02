@@ -468,7 +468,7 @@ enum WindowControlActivity: Equatable, Sendable {
     var message: String {
         switch self {
         case .listening:
-            "Hold a configured key combination and move the pointer."
+            "Hold a configured key combination and drag with the primary button."
         case .tracking(.move):
             "Moving the window under the pointer."
         case .tracking(.resize):
@@ -871,7 +871,7 @@ final class WindowControlPointerCoordinator: @unchecked Sendable {
     }
 }
 
-private final class WindowControlPointerProcessor: @unchecked Sendable {
+final class WindowControlPointerProcessor: @unchecked Sendable {
     private struct PendingSample {
         let generation: UInt64
         let value: WindowControlPointerSample
@@ -887,6 +887,7 @@ private final class WindowControlPointerProcessor: @unchecked Sendable {
     )
     private let coordinator: WindowControlPointerCoordinator
     private let activityHandler: @MainActor @Sendable (WindowControlActivity) -> Void
+    private var initialSample: PendingSample?
     private var pendingSample: PendingSample?
     private var generation: UInt64 = 0
     private var isScheduled = false
@@ -913,6 +914,22 @@ private final class WindowControlPointerProcessor: @unchecked Sendable {
         self.activityHandler = activityHandler
     }
 
+    func begin(_ sample: WindowControlPointerSample) {
+        lock.lock()
+        isGestureActive = true
+        initialSample = PendingSample(generation: generation, value: sample)
+        pendingSample = nil
+        let shouldSchedule = !isScheduled
+        if shouldSchedule { isScheduled = true }
+        lock.unlock()
+
+        if shouldSchedule {
+            queue.async { [weak self] in
+                self?.processPendingSample()
+            }
+        }
+    }
+
     func submit(_ sample: WindowControlPointerSample) {
         lock.lock()
         isGestureActive = true
@@ -934,19 +951,31 @@ private final class WindowControlPointerProcessor: @unchecked Sendable {
         }
     }
 
-    func finish(commitSnap: Bool) {
+    func finish(
+        applyPendingUpdate: Bool,
+        commitSnap: Bool
+    ) {
         lock.lock()
-        guard isGestureActive || pendingSample != nil else {
+        guard isGestureActive || initialSample != nil || pendingSample != nil else {
             lock.unlock()
             return
         }
-        let finalSample = commitSnap ? pendingSample?.value : nil
+        let initialSample = applyPendingUpdate
+            ? self.initialSample?.value
+            : nil
+        let finalSample = applyPendingUpdate
+            ? pendingSample?.value
+            : nil
         isGestureActive = false
         generation &+= 1
+        self.initialSample = nil
         pendingSample = nil
         lock.unlock()
         queue.async { [weak self] in
             guard let self else { return }
+            if let initialSample {
+                _ = coordinator.process(initialSample)
+            }
             if let finalSample {
                 _ = coordinator.process(finalSample)
             }
@@ -955,17 +984,24 @@ private final class WindowControlPointerProcessor: @unchecked Sendable {
     }
 
     func reset() {
-        finish(commitSnap: false)
+        finish(
+            applyPendingUpdate: false,
+            commitSnap: false
+        )
     }
 
     private func processPendingSample() {
         lock.lock()
-        guard let sample = pendingSample else {
+        guard let sample = initialSample ?? pendingSample else {
             isScheduled = false
             lock.unlock()
             return
         }
-        pendingSample = nil
+        if initialSample != nil {
+            initialSample = nil
+        } else {
+            pendingSample = nil
+        }
         let isCurrent = sample.generation == generation
         lock.unlock()
 
@@ -996,8 +1032,15 @@ private final class WindowControlPointerProcessor: @unchecked Sendable {
     }
 }
 
+enum WindowControlEventTapConfiguration {
+    // HID event taps require a root process. The session tap is the earliest
+    // supported filtering point for a regular Accessibility-authorized app.
+    static let location: CGEventTapLocation = .cgSessionEventTap
+}
+
 struct WindowControlPrimaryDragSession: Equatable, Sendable {
     struct Completion: Equatable, Sendable {
+        let shouldApplyPendingUpdate: Bool
         let shouldCommitSnap: Bool
     }
 
@@ -1022,6 +1065,7 @@ struct WindowControlPrimaryDragSession: Equatable, Sendable {
     mutating func finish() -> Completion? {
         guard isConsuming else { return nil }
         let completion = Completion(
+            shouldApplyPendingUpdate: !isCancelled,
             shouldCommitSnap: !isCancelled && operation == .move
         )
         reset()
@@ -1155,7 +1199,7 @@ private final class WindowControlEventTapWorker: @unchecked Sendable {
         }
         let userInfo = Unmanaged.passUnretained(self).toOpaque()
         guard let eventTap = CGEvent.tapCreate(
-            tap: .cgSessionEventTap,
+            tap: WindowControlEventTapConfiguration.location,
             place: .headInsertEventTap,
             options: .defaultTap,
             eventsOfInterest: mask,
@@ -1244,7 +1288,7 @@ private final class WindowControlEventTapWorker: @unchecked Sendable {
                 return false
             }
             dragSession.begin(operation: operation)
-            pointerProcessor.submit(
+            pointerProcessor.begin(
                 WindowControlPointerSample(
                     operation: operation,
                     location: event.location
@@ -1271,6 +1315,7 @@ private final class WindowControlEventTapWorker: @unchecked Sendable {
         case .leftMouseUp:
             guard let completion = dragSession.finish() else { return false }
             pointerProcessor.finish(
+                applyPendingUpdate: completion.shouldApplyPendingUpdate,
                 commitSnap: completion.shouldCommitSnap
             )
             return true

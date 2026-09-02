@@ -101,7 +101,7 @@ main AppKit run loop or the application being active. A lightweight health check
 an invalidated tap. Monitoring, the health check, and the activity are all stopped
 immediately when the feature is disabled or the app terminates.
 
-Window Control follows the same permission and signing rules. Its active event tap is
+Window Control follows the same permission and signing rules. Its active session event tap is
 created only after the feature is enabled, two distinct modifier combinations are set,
 and the current process is trusted. It listens only for modifier changes and primary-button
 drag events, then coalesces matching gestures before performing Accessibility work on a

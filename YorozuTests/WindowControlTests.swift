@@ -4,6 +4,13 @@ import XCTest
 
 @MainActor
 final class WindowControlTests: XCTestCase {
+    func testWindowControlFiltersDragAtSessionEventTap() {
+        XCTAssertEqual(
+            WindowControlEventTapConfiguration.location,
+            .cgSessionEventTap
+        )
+    }
+
     func testModifierChordNormalizesSupportedFlagsAndRequiresExactMatch() {
         let configuration = WindowControlConfiguration(
             moveChord: [.control],
@@ -257,6 +264,77 @@ final class WindowControlTests: XCTestCase {
         )
     }
 
+    func testPointerProcessorPreservesMouseDownAndFlushesResizeOnMouseUp() async {
+        let accessor = TestWindowAccessor(target: testTarget())
+        let finished = expectation(description: "Resize gesture finished")
+        let processor = WindowControlPointerProcessor(
+            windowAccessor: accessor,
+            screenProvider: EmptyWindowControlScreenProvider(),
+            previewHandler: { _ in },
+            activityHandler: { activity in
+                if activity == .listening {
+                    finished.fulfill()
+                }
+            }
+        )
+
+        processor.begin(
+            WindowControlPointerSample(
+                operation: .resize,
+                location: CGPoint(x: 20, y: 30)
+            )
+        )
+        processor.submit(
+            WindowControlPointerSample(
+                operation: .resize,
+                location: CGPoint(x: 70, y: 80)
+            )
+        )
+        processor.finish(
+            applyPendingUpdate: true,
+            commitSnap: false
+        )
+
+        await fulfillment(of: [finished], timeout: 1)
+        XCTAssertEqual(accessor.targetCount, 1)
+        XCTAssertEqual(
+            accessor.resizedSizes,
+            [CGSize(width: 450, height: 350)]
+        )
+    }
+
+    func testPointerProcessorCancelDropsPendingResize() async {
+        let accessor = TestWindowAccessor(target: testTarget())
+        let finished = expectation(description: "Resize gesture cancelled")
+        let processor = WindowControlPointerProcessor(
+            windowAccessor: accessor,
+            screenProvider: EmptyWindowControlScreenProvider(),
+            previewHandler: { _ in },
+            activityHandler: { activity in
+                if activity == .listening {
+                    finished.fulfill()
+                }
+            }
+        )
+
+        processor.begin(
+            WindowControlPointerSample(
+                operation: .resize,
+                location: CGPoint(x: 20, y: 30)
+            )
+        )
+        processor.submit(
+            WindowControlPointerSample(
+                operation: .resize,
+                location: CGPoint(x: 70, y: 80)
+            )
+        )
+        processor.reset()
+
+        await fulfillment(of: [finished], timeout: 1)
+        XCTAssertTrue(accessor.resizedSizes.isEmpty)
+    }
+
     func testPointerCoordinatorPreviewsSnapAndCommitsOnlyOnMouseUp() {
         let accessor = TestWindowAccessor(target: testTarget())
         let previews = TestWindowControlPreviewRecorder()
@@ -383,6 +461,7 @@ final class WindowControlTests: XCTestCase {
         XCTAssertEqual(
             session.finish(),
             WindowControlPrimaryDragSession.Completion(
+                shouldApplyPendingUpdate: true,
                 shouldCommitSnap: true
             )
         )
@@ -392,6 +471,7 @@ final class WindowControlTests: XCTestCase {
         XCTAssertEqual(
             session.finish(),
             WindowControlPrimaryDragSession.Completion(
+                shouldApplyPendingUpdate: true,
                 shouldCommitSnap: false
             )
         )
@@ -407,6 +487,7 @@ final class WindowControlTests: XCTestCase {
         XCTAssertEqual(
             session.finish(),
             WindowControlPrimaryDragSession.Completion(
+                shouldApplyPendingUpdate: false,
                 shouldCommitSnap: false
             )
         )
