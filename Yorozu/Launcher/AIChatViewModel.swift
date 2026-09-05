@@ -165,7 +165,7 @@ final class AIChatViewModel {
     private var activeStreamConversationID: String?
     private let maximumCachedConversationCount = 8
     @ObservationIgnored
-    private lazy var pasteboard = SystemPasteboardAccessor()
+    var copyText: ((String) async -> PasteboardReplacementResult)?
 
     var preferencesBinding: Binding<AIModel> {
         Binding(
@@ -1015,18 +1015,36 @@ final class AIChatViewModel {
     }
 
     func copyMessage(_ text: String) {
-        guard !text.isEmpty,
-              case let .captured(original) = pasteboard.snapshot() else {
-            errorMessage = "The current clipboard is too large to preserve safely."
+        guard !text.isEmpty else { return }
+        statusMessage = nil
+        guard let copyText else {
+            errorMessage = "The response could not be copied."
             return
         }
-        switch pasteboard.replace(with: .text(text), preserving: original) {
-        case .written:
-            statusMessage = "Response copied."
-        case .preservationLimitExceeded:
-            errorMessage = "The current clipboard is too large to preserve safely."
-        case .invalidContent, .writeFailedAndRestored, .writeFailedAndRestoreFailed:
-            errorMessage = "The response could not be copied."
+        let revision = conversationLoadRevision
+        Task { @MainActor [weak self] in
+            // Use the palette's shared coordinator so an AI copy cannot bypass
+            // clipboard preservation checks or overlap an in-flight paste.
+            let result = await copyText(text)
+            guard let self, revision == conversationLoadRevision else { return }
+            statusMessage = nil
+            switch result {
+            case .written:
+                errorMessage = nil
+                statusMessage = "Response copied."
+            case .preservationLimitExceeded:
+                errorMessage = "The current clipboard is too large to preserve safely."
+            case .preservationFailed:
+                errorMessage = "The current clipboard could not be preserved safely. Try copying it again."
+            case .clipboardChanged:
+                errorMessage = "The clipboard changed. Try copying again."
+            case .busy:
+                errorMessage = "Another clipboard operation is finishing. Try again."
+            case .invalidContent, .writeFailedAndRestored:
+                errorMessage = "The response could not be copied."
+            case .writeFailedAndRestoreFailed:
+                errorMessage = "Copy failed, and the previous clipboard could not be restored."
+            }
         }
     }
 
@@ -2067,6 +2085,12 @@ final class TranslationViewModel {
                 errorMessage = nil
             case .preservationLimitExceeded:
                 errorMessage = "The current clipboard is too large to preserve safely."
+            case .preservationFailed:
+                errorMessage = "The current clipboard could not be preserved safely. Try copying it again."
+            case .clipboardChanged:
+                errorMessage = "The clipboard changed. Try copying again."
+            case .busy:
+                errorMessage = "Another clipboard operation is finishing. Try again."
             case .invalidContent, .writeFailedAndRestored, .writeFailedAndRestoreFailed:
                 errorMessage = "The selected text could not be copied."
             }

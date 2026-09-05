@@ -203,23 +203,26 @@ final class YorozuUITests: XCTestCase {
                 "settings.detail.window-control"
             ].waitForExistence(timeout: 2)
         )
-        XCTAssertTrue(
-            application.descendants(matching: .any)[
-                "settings.window-control.move-recorder"
-            ].exists
-        )
-        XCTAssertTrue(
-            application.descendants(matching: .any)[
-                "settings.window-control.resize-recorder"
-            ].exists
-        )
+        let moveRecorder = application.buttons["settings.window-control.move-recorder"]
+        let resizeRecorder = application.buttons["settings.window-control.resize-recorder"]
+        XCTAssertTrue(moveRecorder.exists)
+        XCTAssertTrue(resizeRecorder.exists)
+        XCTAssertTrue(moveRecorder.isEnabled)
+        XCTAssertTrue(resizeRecorder.isEnabled)
+        XCTAssertEqual(moveRecorder.label, "Move Window Key Combination")
+        XCTAssertEqual(resizeRecorder.label, "Resize Window Key Combination")
+        for operation in ["move", "resize"] {
+            let clear = application.buttons["settings.window-control.\(operation)-clear"]
+            XCTAssertTrue(clear.exists)
+            XCTAssertFalse(clear.isEnabled)
+        }
 
         let enableToggle = application.switches[
             "settings.window-control.enabled"
         ]
         XCTAssertTrue(enableToggle.exists)
         XCTAssertFalse(enableToggle.isEnabled)
-        XCTAssertTrue(application.staticTexts["Set Both Key Combinations"].exists)
+        XCTAssertTrue(application.staticTexts["Off"].exists)
         XCTAssertTrue(application.staticTexts["Not Allowed"].exists)
     }
 

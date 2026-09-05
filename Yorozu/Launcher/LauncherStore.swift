@@ -253,7 +253,8 @@ actor LauncherStore {
                         is_pinned DESC,
                         CASE WHEN is_pinned = 1 THEN last_used_at END DESC,
                         pinned_at ASC,
-                        MAX(copied_at, COALESCE(last_used_at, copied_at)) DESC
+                        MAX(copied_at, COALESCE(last_used_at, copied_at)) DESC,
+                        id ASC
                     """
             ).map { try Self.clipboardItem(from: $0) }
         }
@@ -1219,37 +1220,27 @@ actor LauncherStore {
                 """,
             arguments: [retentionCutoff.timeIntervalSince1970]
         )
-        try database.execute(
-            sql: """
-                DELETE FROM clipboard_items
-                WHERE is_pinned = 0
-                  AND id NOT IN (
-                      SELECT id
-                      FROM clipboard_items
-                      WHERE is_pinned = 0
-                      ORDER BY copied_at DESC
-                      LIMIT ?
-                  )
-            """,
-            arguments: [max(1, maximumItems)]
-        )
-
-        let imageRows = try Row.fetchAll(
+        // Match the in-memory catalog's MRU order and quota admission in one
+        // pass. Applying the count limit first would also discard older text
+        // that still fits when a newer image exceeds the image budget.
+        let rows = try Row.fetchAll(
             database,
             sql: """
-                SELECT id, length(image_data) AS byte_count
+                SELECT id, kind, COALESCE(length(image_data), 0) AS byte_count
                 FROM clipboard_items
                 WHERE is_pinned = 0
-                  AND kind = ?
-                  AND image_data IS NOT NULL
-                ORDER BY copied_at DESC
-                """,
-            arguments: [ClipboardItemKind.image.rawValue]
+                ORDER BY MAX(copied_at, COALESCE(last_used_at, copied_at)) DESC,
+                         id ASC
+                """
         )
+        var retainedCount = 0
         var retainedImageBytes = 0
-        for row in imageRows {
-            let byteCount: Int = row["byte_count"]
-            if retainedImageBytes + byteCount <= ClipboardStoragePolicy.maximumUnpinnedImageBytes {
+        for row in rows {
+            let kind: String = row["kind"]
+            let byteCount: Int = kind == ClipboardItemKind.image.rawValue ? row["byte_count"] : 0
+            if retainedCount < max(1, maximumItems),
+               retainedImageBytes + byteCount <= ClipboardStoragePolicy.maximumUnpinnedImageBytes {
+                retainedCount += 1
                 retainedImageBytes += byteCount
             } else {
                 let id: String = row["id"]

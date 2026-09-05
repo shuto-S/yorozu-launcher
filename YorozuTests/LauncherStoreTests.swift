@@ -319,6 +319,67 @@ final class LauncherStoreTests: XCTestCase {
         XCTAssertEqual(loadedImageData, imageData)
     }
 
+    func testClipboardPruningKeepsUsedImageInBothCatalogAndDatabase() async throws {
+        let fixture = try makeStore()
+        var ids: [UUID] = []
+        let imageData = Data([0x89, 0x50, 0x4E, 0x47])
+        for index in 0..<3 {
+            let id = UUID()
+            ids.append(id)
+            _ = try await fixture.store.recordClipboardCapture(
+                ClipboardCapture(
+                    id: id, kind: index == 0 ? .image : .text,
+                    contentHash: "retention-\(index)", textContent: index == 0 ? nil : "Fixture",
+                    filePaths: [], imageData: index == 0 ? imageData : nil,
+                    imageWidth: index == 0 ? 1 : nil, imageHeight: index == 0 ? 1 : nil,
+                    normalizedSearchText: "fixture", sourceBundleIdentifier: nil,
+                    sourceApplicationName: nil,
+                    copiedAt: Date(timeIntervalSince1970: Double(1_000 + index))
+                ), retentionDays: 30, maximumItems: 3
+            )
+        }
+        let catalog = ClipboardCatalog(store: fixture.store)
+        _ = await catalog.load()
+        _ = await catalog.recordUse(id: ids[0], usedAt: Date(timeIntervalSince1970: 2_000))
+        let snapshot = await catalog.prune(
+            retentionDays: 30, maximumItems: 2, now: Date(timeIntervalSince1970: 2_000)
+        )
+        let persisted = try await fixture.store.loadClipboardItems()
+        XCTAssertNil(snapshot.message)
+        XCTAssertEqual(snapshot.values.map(\.id), [ids[0], ids[2]])
+        XCTAssertEqual(persisted.map(\.id), snapshot.values.map(\.id))
+        let retainedImage = await catalog.imageData(id: ids[0])
+        XCTAssertEqual(retainedImage, imageData)
+
+        _ = await catalog.togglePin(id: ids[0])
+        let afterPin = try await fixture.store.loadClipboardItems()
+        XCTAssertTrue(afterPin.first(where: { $0.id == ids[0] })?.isPinned == true)
+    }
+
+    func testClipboardPruningUsesSameTieBreakerInMemoryAndDatabase() async throws {
+        let fixture = try makeStore()
+        let ids = try (1...3).map {
+            try XCTUnwrap(UUID(uuidString: "00000000-0000-0000-0000-00000000000\($0)"))
+        }
+        let date = Date(timeIntervalSince1970: 1_000)
+        for id in ids.reversed() {
+            _ = try await fixture.store.recordClipboardCapture(
+                ClipboardCapture(
+                    id: id, kind: .text, contentHash: id.uuidString, textContent: "Fixture",
+                    filePaths: [], imageData: nil, imageWidth: nil, imageHeight: nil,
+                    normalizedSearchText: "fixture", sourceBundleIdentifier: nil,
+                    sourceApplicationName: nil, copiedAt: date
+                ), retentionDays: 30, maximumItems: 3
+            )
+        }
+        let catalog = ClipboardCatalog(store: fixture.store)
+        _ = await catalog.load()
+        let snapshot = await catalog.prune(retentionDays: 30, maximumItems: 2, now: date)
+        let persisted = try await fixture.store.loadClipboardItems()
+        XCTAssertEqual(snapshot.values.map(\.id), Array(ids.prefix(2)))
+        XCTAssertEqual(persisted.map(\.id), snapshot.values.map(\.id))
+    }
+
     func testClipboardImageDecoderDownsamplesLargeImages() async throws {
         let width = 2_400
         let height = 1_600

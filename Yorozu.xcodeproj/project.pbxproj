@@ -56,6 +56,8 @@
 		B20000000000000000000009 /* AppUpdateControllerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000009 /* AppUpdateControllerTests.swift */; };
 		B2000000000000000000000A /* LaunchAtLoginTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000000A /* LaunchAtLoginTests.swift */; };
 		B2000000000000000000000B /* WindowControlTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000000B /* WindowControlTests.swift */; };
+		B2000000000000000000000C /* WindowControlTargetTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000000C /* WindowControlTargetTests.swift */; };
+		B2000000000000000000000D /* WindowControlLiveTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000000D /* WindowControlLiveTests.swift */; };
 		B30000000000000000000001 /* YorozuUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A30000000000000000000001 /* YorozuUITests.swift */; };
 /* End PBXBuildFile section */
 
@@ -124,6 +126,8 @@
 		A20000000000000000000009 /* AppUpdateControllerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppUpdateControllerTests.swift; sourceTree = "<group>"; };
 		A2000000000000000000000A /* LaunchAtLoginTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LaunchAtLoginTests.swift; sourceTree = "<group>"; };
 		A2000000000000000000000B /* WindowControlTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WindowControlTests.swift; sourceTree = "<group>"; };
+		A2000000000000000000000C /* WindowControlTargetTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WindowControlTargetTests.swift; sourceTree = "<group>"; };
+		A2000000000000000000000D /* WindowControlLiveTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WindowControlLiveTests.swift; sourceTree = "<group>"; };
 		A30000000000000000000001 /* YorozuUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = YorozuUITests.swift; sourceTree = "<group>"; };
 		A40000000000000000000001 /* Yorozu.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Yorozu.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		A40000000000000000000002 /* YorozuTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = YorozuTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -275,6 +279,8 @@
 				A20000000000000000000009 /* AppUpdateControllerTests.swift */,
 				A2000000000000000000000A /* LaunchAtLoginTests.swift */,
 				A2000000000000000000000B /* WindowControlTests.swift */,
+				A2000000000000000000000C /* WindowControlTargetTests.swift */,
+				A2000000000000000000000D /* WindowControlLiveTests.swift */,
 			);
 			path = YorozuTests;
 			sourceTree = "<group>";
@@ -487,6 +493,8 @@
 				B20000000000000000000009 /* AppUpdateControllerTests.swift in Sources */,
 				B2000000000000000000000A /* LaunchAtLoginTests.swift in Sources */,
 				B2000000000000000000000B /* WindowControlTests.swift in Sources */,
+				B2000000000000000000000C /* WindowControlTargetTests.swift in Sources */,
+				B2000000000000000000000D /* WindowControlLiveTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -523,7 +531,7 @@
 				CODE_SIGN_IDENTITY = "$(YOROZU_CODE_SIGN_IDENTITY)";
 				CODE_SIGN_STYLE = "$(YOROZU_CODE_SIGN_STYLE)";
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 14;
+				CURRENT_PROJECT_VERSION = 15;
 				DEVELOPMENT_TEAM = "$(YOROZU_DEVELOPMENT_TEAM)";
 				ENABLE_APP_SANDBOX = NO;
 				ENABLE_HARDENED_RUNTIME = NO;
@@ -538,7 +546,7 @@
 					"@executable_path/../Frameworks",
 				);
 				MACOSX_DEPLOYMENT_TARGET = 26.0;
-				MARKETING_VERSION = 0.1.13;
+				MARKETING_VERSION = 0.1.14;
 				PRODUCT_BUNDLE_IDENTIFIER = com.yorozu.app;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = macosx;
@@ -558,7 +566,7 @@
 				CODE_SIGN_IDENTITY = "Developer ID Application";
 				CODE_SIGN_STYLE = Manual;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 14;
+				CURRENT_PROJECT_VERSION = 15;
 				DEVELOPMENT_TEAM = "";
 				ENABLE_APP_SANDBOX = NO;
 				ENABLE_HARDENED_RUNTIME = YES;
@@ -569,7 +577,7 @@
 					"@executable_path/../Frameworks",
 				);
 				MACOSX_DEPLOYMENT_TARGET = 26.0;
-				MARKETING_VERSION = 0.1.13;
+				MARKETING_VERSION = 0.1.14;
 				PRODUCT_BUNDLE_IDENTIFIER = com.yorozu.app;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = macosx;

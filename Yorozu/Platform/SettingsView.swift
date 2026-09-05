@@ -87,6 +87,9 @@ struct SettingsView: View {
         .onAppear {
             isSidebarFocused = true
         }
+        .onChange(of: selection) {
+            WindowControlModifierCapture.cancelActiveRecording()
+        }
     }
 
     @ViewBuilder
@@ -249,9 +252,12 @@ private struct WindowControlSettingsView: View {
 
     @ViewBuilder
     private func modifierRow(for operation: WindowControlOperation) -> some View {
-        LabeledContent(operation.title) {
+        HStack {
+            Text(operation.title)
+            Spacer(minLength: 12)
             HStack(spacing: 8) {
                 WindowControlModifierRecorder(
+                    operation: operation,
                     chord: Binding(
                         get: {
                             controller.configuration.chord(for: operation)
@@ -274,8 +280,12 @@ private struct WindowControlSettingsView: View {
                 .accessibilityIdentifier(
                     "settings.window-control.\(operation.rawValue)-clear"
                 )
+                .accessibilityLabel("Clear \(operation.title) Key Combination")
             }
         }
+        // LabeledContent combines compound controls into one AX text element.
+        // Keep both independently actionable buttons in the accessibility tree.
+        .accessibilityElement(children: .contain)
     }
 
     private var statusColor: Color {
@@ -291,37 +301,60 @@ private struct WindowControlSettingsView: View {
 }
 
 @MainActor
-private final class WindowControlModifierCapture: ObservableObject {
+final class WindowControlModifierCapture: ObservableObject {
+    private static weak var activeCapture: WindowControlModifierCapture?
+    static var isAnyRecording: Bool { activeCapture?.isRecording == true }
+
     @Published private(set) var isRecording = false
     private var eventMonitor: Any?
     private var pendingChord: WindowControlModifierChord?
     private var completion: ((WindowControlModifierChord?) -> Void)?
+    private let installMonitor: (@escaping (NSEvent) -> NSEvent?) -> Any?
+    private let removeMonitor: (Any) -> Void
+
+    init(
+        installMonitor: @escaping (@escaping (NSEvent) -> NSEvent?) -> Any? = {
+            NSEvent.addLocalMonitorForEvents(matching: [.flagsChanged, .keyDown], handler: $0)
+        },
+        removeMonitor: @escaping (Any) -> Void = { NSEvent.removeMonitor($0) }
+    ) {
+        self.installMonitor = installMonitor
+        self.removeMonitor = removeMonitor
+    }
+
+    static func cancelActiveRecording() {
+        activeCapture?.stop()
+    }
 
     func begin(
         completion: @escaping (WindowControlModifierChord?) -> Void
     ) {
+        Self.cancelActiveRecording()
         stop()
+        Self.activeCapture = self
         self.completion = completion
         pendingChord = nil
         isRecording = true
-        eventMonitor = NSEvent.addLocalMonitorForEvents(
-            matching: [.flagsChanged, .keyDown]
-        ) { [weak self] event in
-            self?.handle(event)
+        eventMonitor = installMonitor { [weak self] event in
+            guard let self else { return event }
+            return self.handle(event)
         }
+        if eventMonitor == nil { stop() }
     }
 
     func stop() {
         if let eventMonitor {
-            NSEvent.removeMonitor(eventMonitor)
+            removeMonitor(eventMonitor)
         }
         eventMonitor = nil
         pendingChord = nil
         completion = nil
         isRecording = false
+        if Self.activeCapture === self { Self.activeCapture = nil }
     }
 
-    private func handle(_ event: NSEvent) -> NSEvent? {
+    func handle(_ event: NSEvent) -> NSEvent? {
+        guard isRecording else { return event }
         switch event.type {
         case .flagsChanged:
             let chord = WindowControlModifierChord(
@@ -343,6 +376,10 @@ private final class WindowControlModifierCapture: ObservableObject {
             stop()
             return nil
 
+        case .keyDown where event.keyCode == 48:
+            stop()
+            return event
+
         case .keyDown where event.keyCode == 51 || event.keyCode == 117:
             let completion = completion
             stop()
@@ -357,6 +394,7 @@ private final class WindowControlModifierCapture: ObservableObject {
 }
 
 private struct WindowControlModifierRecorder: View {
+    let operation: WindowControlOperation
     @Binding var chord: WindowControlModifierChord?
     @StateObject private var capture = WindowControlModifierCapture()
 
@@ -369,8 +407,8 @@ private struct WindowControlModifierRecorder: View {
         .onDisappear {
             capture.stop()
         }
-        .accessibilityLabel("Modifier key combination")
-        .accessibilityValue(chordTitle)
+        .accessibilityLabel("\(operation.title) Key Combination")
+        .accessibilityValue(capture.isRecording ? "Recording" : chordTitle)
     }
 
     private var chordTitle: String {

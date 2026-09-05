@@ -1241,6 +1241,13 @@ final class LauncherViewModel {
             switch result {
             case .pasted:
                 onSuccess()
+            case .pastedButClipboardRestoreFailed:
+                onSuccess()
+                self?.errorMessage = "Pasted, but the previous clipboard could not be restored. Copy the content you need again."
+            case .busy:
+                self?.statusMessage = "A clipboard operation is still in progress. Try again in a moment."
+            case .clipboardChanged:
+                self?.statusMessage = "Clipboard changed. Paste was cancelled to keep your latest copy. Try again."
             case .copiedBecausePermissionDenied:
                 onSuccess()
                 self?.statusMessage = "Copied. Allow Accessibility to paste automatically."
@@ -1252,7 +1259,7 @@ final class LauncherViewModel {
                 self?.statusMessage = "Copied. Yorozu couldn’t activate the target application."
             case .failedBecauseClipboardCouldNotBePreserved:
                 self?.errorMessage =
-                    "The current clipboard is too large to preserve safely."
+                    "The current clipboard could not be preserved safely. Try copying it again."
             case .failed:
                 self?.errorMessage = "The selected content couldn’t be pasted."
             }
@@ -1272,8 +1279,14 @@ final class LauncherViewModel {
             case .written:
                 onSuccess()
                 statusMessage = "Copied to Clipboard"
+            case .busy:
+                statusMessage = "A clipboard operation is still in progress. Try again in a moment."
+            case .clipboardChanged:
+                statusMessage = "Clipboard changed. Copy was cancelled to keep your latest copy. Try again."
             case .preservationLimitExceeded:
                 errorMessage = "The current clipboard is too large to preserve safely."
+            case .preservationFailed:
+                errorMessage = "The current clipboard could not be preserved safely. Try copying it again."
             case .invalidContent:
                 errorMessage = "The selected content is no longer available."
             case .writeFailedAndRestored:

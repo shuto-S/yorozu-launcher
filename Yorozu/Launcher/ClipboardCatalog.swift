@@ -255,7 +255,9 @@ actor ClipboardCatalog {
         }
         let lhsActivity = max(lhs.copiedAt, lhs.lastUsedAt ?? .distantPast)
         let rhsActivity = max(rhs.copiedAt, rhs.lastUsedAt ?? .distantPast)
-        return lhsActivity > rhsActivity
+        if lhsActivity != rhsActivity { return lhsActivity > rhsActivity }
+        // Match SQLite's deterministic tie-breaker when pruning to a limit.
+        return lhs.id.uuidString < rhs.id.uuidString
     }
 
     private func pruneInMemory(retentionDays: Int, maximumItems: Int, now: Date) {

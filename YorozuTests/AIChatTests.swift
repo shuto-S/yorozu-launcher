@@ -1276,6 +1276,140 @@ final class AIChatStorageTests: XCTestCase {
 
 @MainActor
 final class AIChatViewModelTests: XCTestCase {
+    func testMessageCopyWithoutInjectedServiceFailsWithoutSystemPasteboardAccess() {
+        let viewModel = makeViewModel(service: AIChatTestService())
+        viewModel.statusMessage = "Response copied."
+
+        viewModel.copyMessage("response")
+
+        XCTAssertEqual(viewModel.errorMessage, "The response could not be copied.")
+        XCTAssertNil(viewModel.statusMessage)
+    }
+
+    func testEmptyMessageDoesNotCallCopyService() async {
+        let viewModel = makeViewModel(service: AIChatTestService())
+        var copyCount = 0
+        viewModel.copyText = { _ in
+            copyCount += 1
+            return .written(changeCount: 1)
+        }
+
+        viewModel.copyMessage("")
+        await Task.yield()
+
+        XCTAssertEqual(copyCount, 0)
+        XCTAssertNil(viewModel.statusMessage)
+    }
+
+    func testMessageCopyAnnouncesSuccessOnlyAfterSharedCopyCompletes() async {
+        let viewModel = makeViewModel(service: AIChatTestService())
+        viewModel.errorMessage = "Previous failure"
+        var copiedText: String?
+        var resumeCopy: CheckedContinuation<PasteboardReplacementResult, Never>?
+        defer { resumeCopy?.resume(returning: .busy) }
+        viewModel.copyText = { text in
+            copiedText = text
+            return await withCheckedContinuation { resumeCopy = $0 }
+        }
+
+        viewModel.copyMessage("response")
+        await waitUntil { resumeCopy != nil }
+
+        XCTAssertEqual(copiedText, "response")
+        XCTAssertNil(viewModel.statusMessage)
+        resumeCopy?.resume(returning: .written(changeCount: 1))
+        resumeCopy = nil
+        await waitUntil { viewModel.statusMessage == "Response copied." }
+        XCTAssertNil(viewModel.errorMessage)
+    }
+
+    func testMessageCopyCompletionDoesNotOverwriteAnotherConversationState() async {
+        for result: PasteboardReplacementResult in [.written(changeCount: 1), .clipboardChanged] {
+            let viewModel = makeViewModel(service: AIChatTestService())
+            var resumeCopy: CheckedContinuation<PasteboardReplacementResult, Never>?
+            var copyCompleted = false
+            defer { resumeCopy?.resume(returning: .busy) }
+            viewModel.copyText = { _ in
+                let value = await withCheckedContinuation { resumeCopy = $0 }
+                copyCompleted = true
+                return value
+            }
+
+            viewModel.copyMessage("response")
+            await waitUntil { resumeCopy != nil }
+            viewModel.beginNewChat()
+            viewModel.errorMessage = "Current conversation error"
+            viewModel.statusMessage = "Current conversation status"
+            resumeCopy?.resume(returning: result)
+            resumeCopy = nil
+            await waitUntil { copyCompleted }
+            await Task.yield()
+
+            XCTAssertEqual(viewModel.errorMessage, "Current conversation error")
+            XCTAssertEqual(viewModel.statusMessage, "Current conversation status")
+        }
+    }
+
+    func testMessageCopyFailuresNeverAnnounceSuccess() async {
+        let failures: [PasteboardReplacementResult] = [
+            .busy, .clipboardChanged, .preservationLimitExceeded, .preservationFailed,
+            .invalidContent, .writeFailedAndRestored, .writeFailedAndRestoreFailed,
+        ]
+        for failure in failures {
+            let viewModel = makeViewModel(service: AIChatTestService())
+            viewModel.statusMessage = "Response copied."
+            viewModel.copyText = { _ in failure }
+
+            viewModel.copyMessage("response")
+            await waitUntil { viewModel.errorMessage != nil }
+
+            XCTAssertNil(viewModel.statusMessage, "Unexpected success for \(failure)")
+        }
+    }
+
+    func testMessageCopyUsesSharedCoordinatorSingleFlight() async {
+        let viewModel = makeViewModel(service: AIChatTestService())
+        let pasteboard = AIMessageTestPasteboard()
+        var resumeFirstCopy: CheckedContinuation<Void, Never>?
+        defer { resumeFirstCopy?.resume() }
+        let coordinator = makeCopyCoordinator(pasteboard: pasteboard) { _ in
+            await withCheckedContinuation { resumeFirstCopy = $0 }
+        }
+        viewModel.copyText = { text in await coordinator.copy(.text(text)) }
+        let firstCopy = Task { await coordinator.copy(.text("first copy")) }
+        await waitUntil { resumeFirstCopy != nil }
+
+        viewModel.copyMessage("response")
+        await waitUntil { viewModel.errorMessage != nil }
+
+        XCTAssertEqual(viewModel.errorMessage, "Another clipboard operation is finishing. Try again.")
+        XCTAssertEqual(pasteboard.replaceCount, 0)
+        XCTAssertNil(viewModel.statusMessage)
+        resumeFirstCopy?.resume()
+        resumeFirstCopy = nil
+        let result = await firstCopy.value
+        XCTAssertTrue(result.wasWritten)
+        XCTAssertEqual(pasteboard.replaceCount, 1)
+        XCTAssertFalse(coordinator.isOperationInProgress)
+    }
+
+    func testMessageCopyPreservesExternalCopyMadeDuringSnapshot() async {
+        let viewModel = makeViewModel(service: AIChatTestService())
+        let pasteboard = AIMessageTestPasteboard()
+        pasteboard.changesDuringSnapshot = true
+        let coordinator = makeCopyCoordinator(pasteboard: pasteboard)
+        viewModel.copyText = { text in await coordinator.copy(.text(text)) }
+
+        viewModel.copyMessage("response")
+        await waitUntil { viewModel.errorMessage != nil }
+
+        XCTAssertEqual(viewModel.errorMessage, "The clipboard changed. Try copying again.")
+        XCTAssertEqual(pasteboard.replaceCount, 0)
+        XCTAssertEqual(pasteboard.restoreCount, 0)
+        XCTAssertNil(viewModel.statusMessage)
+        XCTAssertFalse(coordinator.isOperationInProgress)
+    }
+
     func testOllamaRefreshesDownloadedModelsBeforeModelSelection() async {
         let downloadedModel = AIModel(
             rawValue: "qwen2.5:7b",
@@ -1707,6 +1841,28 @@ final class AIChatViewModelTests: XCTestCase {
         )
     }
 
+    private func makeCopyCoordinator(
+        pasteboard: AIMessageTestPasteboard,
+        suppress: @escaping (Duration) async -> Void = { _ in }
+    ) -> PasteCoordinator {
+        PasteCoordinator(
+            pasteboard: pasteboard,
+            suppressClipboardMonitor: suppress,
+            dependencies: PasteCoordinatorDependencies(
+                isAccessibilityTrusted: { false },
+                postPasteShortcut: { _ in
+                    XCTFail("Copy must not post a paste event")
+                    return false
+                },
+                sleep: { _ in },
+                activationPollInterval: .zero,
+                activationPollAttempts: 0,
+                activationGracePeriod: .zero,
+                restorationDelay: .zero
+            )
+        )
+    }
+
     private func makeCodexViewModel(
         conversations: [AIConversationSummary],
         openExternalURL: @escaping (URL) -> Bool
@@ -1770,6 +1926,34 @@ final class AIChatViewModelTests: XCTestCase {
             try? await Task.sleep(for: .milliseconds(10))
         }
         XCTFail("Timed out waiting for asynchronous AI state")
+    }
+}
+
+@MainActor
+private final class AIMessageTestPasteboard: PasteboardAccessing {
+    private(set) var changeCount = 1
+    private(set) var replaceCount = 0
+    private(set) var restoreCount = 0
+    var changesDuringSnapshot = false
+
+    func snapshot() -> PasteboardSnapshotResult {
+        if changesDuringSnapshot { changeCount += 1 }
+        return .captured(PasteboardSnapshot(items: []))
+    }
+
+    func replace(
+        with content: PasteboardContent,
+        preserving snapshot: PasteboardSnapshot
+    ) -> PasteboardReplacementResult {
+        replaceCount += 1
+        changeCount += 1
+        return .written(changeCount: changeCount)
+    }
+
+    func restore(_ snapshot: PasteboardSnapshot) -> Bool {
+        restoreCount += 1
+        changeCount += 1
+        return true
     }
 }
 

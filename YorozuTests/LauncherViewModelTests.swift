@@ -209,6 +209,125 @@ final class LauncherViewModelTests: XCTestCase {
         )
     }
 
+    func testModifierRecorderReceivesEscapeBeforePaletteNavigation() throws {
+        var handler: ((NSEvent) -> NSEvent?)?
+        var removals = 0
+        var completed = false
+        let capture = WindowControlModifierCapture(
+            installMonitor: { handler = $0; return NSObject() },
+            removeMonitor: { _ in removals += 1 }
+        )
+        defer { capture.stop() }
+        capture.begin { _ in completed = true }
+
+        for keyCode: UInt16 in [36, 76, 126, 125, 53, 48, 51, 117, 40] {
+            XCTAssertEqual(PaletteKeyEventPolicy.action(
+                keyCode: keyCode,
+                modifiers: keyCode == 40 ? .command : [],
+                hasMarkedText: false,
+                route: .settings,
+                isActionPanelPresented: false,
+                isRecordingModifierShortcut: WindowControlModifierCapture.isAnyRecording
+            ), .passThrough)
+        }
+
+        let escape = try modifierCaptureEvent(keyCode: 53)
+        let installedHandler = try XCTUnwrap(handler)
+        XCTAssertNil(installedHandler(escape))
+        XCTAssertFalse(capture.isRecording)
+        XCTAssertFalse(WindowControlModifierCapture.isAnyRecording)
+        XCTAssertFalse(completed)
+        XCTAssertEqual(removals, 1)
+        XCTAssertEqual(keyAction(keyCode: 53, route: .settings), .escape)
+        XCTAssertEqual(keyAction(keyCode: 53, hasMarkedText: true, route: .settings), .passThrough)
+        XCTAssertEqual(keyAction(keyCode: 40, modifiers: .command), .handleCommandShortcut)
+    }
+
+    func testStartingAnotherModifierRecorderCancelsThePreviousOne() throws {
+        var removals = 0
+        var firstCompleted = false
+        var result: WindowControlModifierChord?
+        let first = WindowControlModifierCapture(
+            installMonitor: { _ in NSObject() }, removeMonitor: { _ in removals += 1 }
+        )
+        let second = WindowControlModifierCapture(
+            installMonitor: { _ in NSObject() }, removeMonitor: { _ in removals += 1 }
+        )
+        defer { first.stop(); second.stop() }
+        first.begin { _ in firstCompleted = true }
+        _ = first.handle(try modifierCaptureEvent(keyCode: 55, modifiers: .command, type: .flagsChanged))
+        second.begin { result = $0 }
+        XCTAssertFalse(first.isRecording)
+        XCTAssertTrue(second.isRecording)
+        XCTAssertFalse(firstCompleted)
+        XCTAssertEqual(removals, 1)
+
+        _ = second.handle(try modifierCaptureEvent(
+            keyCode: 58, modifiers: [.option, .shift], type: .flagsChanged
+        ))
+        _ = second.handle(try modifierCaptureEvent(keyCode: 58, type: .flagsChanged))
+        XCTAssertEqual(result, [.option, .shift])
+        XCTAssertFalse(WindowControlModifierCapture.isAnyRecording)
+        XCTAssertEqual(removals, 2)
+    }
+
+    func testTabAndLifecycleCancellationDiscardPendingModifierChord() throws {
+        var completions = 0
+        var removals = 0
+        let capture = WindowControlModifierCapture(
+            installMonitor: { _ in NSObject() }, removeMonitor: { _ in removals += 1 }
+        )
+        defer { capture.stop() }
+        let tab = try modifierCaptureEvent(keyCode: 48)
+        capture.begin { _ in completions += 1 }
+        _ = capture.handle(try modifierCaptureEvent(keyCode: 58, modifiers: .option, type: .flagsChanged))
+        XCTAssertNotNil(capture.handle(tab))
+        XCTAssertFalse(capture.isRecording)
+        XCTAssertEqual(completions, 0)
+        XCTAssertEqual(removals, 1)
+
+        capture.begin { _ in completions += 1 }
+        _ = capture.handle(try modifierCaptureEvent(keyCode: 58, modifiers: .option, type: .flagsChanged))
+        WindowControlModifierCapture.cancelActiveRecording()
+        XCTAssertFalse(capture.isRecording)
+        XCTAssertFalse(WindowControlModifierCapture.isAnyRecording)
+        XCTAssertNotNil(capture.handle(try modifierCaptureEvent(keyCode: 58, type: .flagsChanged)))
+        XCTAssertEqual(completions, 0)
+        XCTAssertEqual(removals, 2)
+    }
+
+    func testModifierRecorderDeleteClearsAndMonitorInstallFailureDoesNotRecord() throws {
+        var didClear = false
+        let capture = WindowControlModifierCapture(
+            installMonitor: { _ in NSObject() }, removeMonitor: { _ in }
+        )
+        defer { capture.stop() }
+        capture.begin { didClear = $0 == nil }
+        XCTAssertNil(capture.handle(try modifierCaptureEvent(keyCode: 51)))
+        XCTAssertTrue(didClear)
+        XCTAssertFalse(capture.isRecording)
+
+        let failed = WindowControlModifierCapture(
+            installMonitor: { _ in nil }, removeMonitor: { _ in XCTFail("No monitor was installed") }
+        )
+        failed.begin { _ in XCTFail("Failed recorder must not save") }
+        XCTAssertFalse(failed.isRecording)
+        XCTAssertFalse(WindowControlModifierCapture.isAnyRecording)
+    }
+
+    private func modifierCaptureEvent(
+        keyCode: UInt16,
+        modifiers: NSEvent.ModifierFlags = [],
+        type: NSEvent.EventType = .keyDown
+    ) throws -> NSEvent {
+        try XCTUnwrap(NSEvent.keyEvent(
+            with: type, location: .zero, modifierFlags: modifiers,
+            timestamp: 0, windowNumber: 0, context: nil,
+            characters: "", charactersIgnoringModifiers: "",
+            isARepeat: false, keyCode: keyCode
+        ))
+    }
+
     func testAliasesEditorReturnPassesThroughWhileTextIsComposing() {
         XCTAssertEqual(
             keyAction(
@@ -938,6 +1057,82 @@ final class LauncherViewModelTests: XCTestCase {
         fixture.viewModel.escape()
         XCTAssertFalse(fixture.viewModel.isActionPanelPresented)
         XCTAssertEqual(fixture.viewModel.actionQuery, "")
+    }
+
+    func testHoverSelectionRequiresAnActualFiniteScreenPointerMovement() {
+        let pointer = CGPoint(x: -320, y: 480)
+        XCTAssertFalse(PaletteHoverSelectionTracker.hasPointerMoved(from: nil, to: pointer))
+        XCTAssertFalse(PaletteHoverSelectionTracker.hasPointerMoved(from: pointer, to: pointer))
+        XCTAssertTrue(PaletteHoverSelectionTracker.hasPointerMoved(
+            from: pointer, to: CGPoint(x: -319.5, y: 480)
+        ))
+        XCTAssertTrue(PaletteHoverSelectionTracker.hasPointerMoved(
+            from: pointer, to: CGPoint(x: -320, y: 479)
+        ))
+        for invalid in [CGPoint(x: CGFloat.nan, y: 480), CGPoint(x: -320, y: CGFloat.infinity)] {
+            XCTAssertFalse(PaletteHoverSelectionTracker.hasPointerMoved(from: pointer, to: invalid))
+            XCTAssertFalse(PaletteHoverSelectionTracker.hasPointerMoved(from: invalid, to: pointer))
+        }
+    }
+
+    func testActionKeyboardSelectionIsNotReplacedByStationaryPointerHover() async throws {
+        let fixture = try makeFixture(launcherShouldFail: false)
+        fixture.viewModel.start()
+        try await waitUntil {
+            fixture.viewModel.results.contains(where: { $0.title == "Keep Awake" })
+        }
+        fixture.viewModel.selectedID = try XCTUnwrap(
+            fixture.viewModel.results.first(where: { $0.title == "Keep Awake" })?.id
+        )
+        fixture.viewModel.showActionMenu()
+        fixture.viewModel.performAction(.keepAwakeSetDuration)
+        let actionIDs = fixture.viewModel.filteredActionItems.map(\.id)
+        XCTAssertEqual(actionIDs.count, 49)
+        let hoveredActionID = try XCTUnwrap(actionIDs.first)
+        let tracker = PaletteHoverSelectionTracker()
+        let pointer = CGPoint(x: 500, y: 300)
+        tracker.recordPointer(at: pointer)
+
+        // Model the hover re-entry caused by each keyboard-driven scroll in
+        // both directions. It must not reset the selection to the row below it.
+        for index in 1..<actionIDs.count {
+            fixture.viewModel.moveActionSelection(by: 1)
+            tracker.recordPointer(at: pointer)
+            if tracker.shouldSelect(at: pointer) {
+                fixture.viewModel.selectAction(hoveredActionID)
+            }
+            XCTAssertEqual(fixture.viewModel.selectedActionID, actionIDs[index])
+        }
+        for index in (0..<(actionIDs.count - 1)).reversed() {
+            fixture.viewModel.moveActionSelection(by: -1)
+            tracker.recordPointer(at: pointer)
+            if tracker.shouldSelect(at: pointer) {
+                fixture.viewModel.selectAction(hoveredActionID)
+            }
+            XCTAssertEqual(fixture.viewModel.selectedActionID, actionIDs[index])
+        }
+
+        let movedPointer = CGPoint(x: pointer.x + 1, y: pointer.y)
+        if tracker.shouldSelect(at: movedPointer) {
+            fixture.viewModel.selectAction(actionIDs[6])
+        }
+        XCTAssertEqual(fixture.viewModel.selectedActionID, actionIDs[6])
+        XCTAssertFalse(tracker.shouldSelect(at: movedPointer))
+    }
+
+    func testHoverBaselineResetsOnPanelPresentationAndActionListChanges() {
+        let tracker = PaletteHoverSelectionTracker()
+        let original = CGPoint(x: 10, y: 20)
+        let reopened = CGPoint(x: 50, y: 60)
+        XCTAssertFalse(tracker.shouldSelect(at: original))
+        XCTAssertTrue(tracker.shouldSelect(at: CGPoint(x: 11, y: 20)))
+
+        tracker.recordPointer(at: reopened)
+        XCTAssertFalse(tracker.shouldSelect(at: reopened))
+        XCTAssertTrue(tracker.shouldSelect(at: CGPoint(x: 50, y: 61)))
+        tracker.recordPointer(at: original)
+        XCTAssertFalse(tracker.shouldSelect(at: original))
+        XCTAssertTrue(tracker.shouldSelect(at: CGPoint(x: 10, y: 21)))
     }
 
     func testFooterActionsExposeMouseEquivalentForKeyboardCommands() async throws {

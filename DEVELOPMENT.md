@@ -114,6 +114,58 @@ sleep.
 
 The shared project must remain buildable without a personal Apple account. Never place a Development Team directly in `project.pbxproj`.
 
+Window Control validates the actual event-tap port and enabled state, checks health every
+five seconds only while enabled, and recreates monitoring after wake or session recovery.
+The same check also detects Accessibility re-grants without foregrounding Yorozu; it
+does not request permission automatically. Rebinding a chord cancels an active drag.
+Its filtering tap runs after the Command-alone observer, so a Command-modified drag does
+not become an input-mode switch. Stopping the feature cancels pending mouse-up frame and
+snap updates as well as pending drag samples. A failed target lookup stays attached to that
+gesture; moving over another window does not silently select a different target. Failures
+remain visible in Settings after the mouse button is released.
+Cancellation is checked again after slow AX replies and before deferred activation or
+snap previews. An individual AX write already sent to another process cannot be undone,
+but cancellation prevents later steps from being applied.
+
+Window targeting uses the topmost visible Window Server owner for application-scoped AX
+hit testing, then matches its bounds to that application's AXWindows if needed. AX lookup
+has a one-second total budget with per-request timeouts capped at 200 ms; an incomplete
+scan cannot select an ambiguous candidate. Frame matching allows up to 4 pt per edge
+for the small Window Server/AX frame insets observed on macOS 26 standard windows.
+Direct AX hit testing uses the validated owner and point containment instead: Window
+Server geometry can lag behind AX during a move, so only fallback lookup compares bounds.
+Invalid geometry, ambiguous matches, and menus covering the target are rejected.
+No window titles or contents are captured, and no
+process-wide Accessibility timeout is changed.
+
+Window Control's modifier recorders expose separate accessibility actions and own key
+handling only while recording. Escape cancels recording without closing Settings; Tab
+ends recording and resumes normal focus movement. Leaving Settings, losing focus, or
+closing the palette discards the pending chord and removes its local monitor.
+
+For optional real AX verification, build `Tests/Fixtures/WindowControlFixture.swift`
+as a separate temporary executable named `WindowControlFixture`:
+
+```bash
+xcrun swiftc -parse-as-library -swift-version 6 -strict-concurrency=complete \
+  -target arm64-apple-macos26.0 Tests/Fixtures/WindowControlFixture.swift \
+  -o /tmp/WindowControlFixture
+```
+
+Run `WindowControlLiveTests` in a signed test host that already has Accessibility
+permission. Use `build-for-testing`, copy its generated `.xctestrun` beside the original,
+and set the `YorozuTests` entry's `CommandLineArguments` to
+`["--ui-testing", "--ui-testing-run-id", "<unique-run-id>"]`. Set its
+`EnvironmentVariables.YOROZU_LIVE_WINDOW_TESTS` to `1` and
+`EnvironmentVariables.YOROZU_WINDOW_FIXTURE_EXECUTABLE` to the fixture's absolute path,
+then use `test-without-building -xctestrun <copy> -only-testing:YorozuTests/WindowControlLiveTests`.
+This uses an isolated database and defaults, with normal monitors and networking disabled.
+The tests start and foreground only their own fixture, check target lookup through its title bar and
+content, check real position/size read-back after move, resize and snap-frame writes,
+and terminate the fixture. Missing existing permission, screen lock, or another window
+covering the hit-test fixture is an explicit skip, not a pass.
+It does not validate physical pointer delivery or replace unlocked drag acceptance tests.
+
 ### Public-repository safety
 
 - Keep `Config/Local.xcconfig` ignored; only the placeholder example is tracked.
@@ -211,6 +263,26 @@ generation, and GitHub Pages deployment are documented in [RELEASING.md](RELEASI
 No private release credential belongs in the repository.
 
 Clipboard maintenance is intentionally amortized. Non-image captures perform full database retention maintenance every 32 writes; in-memory pruning still occurs for each capture. Image captures perform full maintenance immediately.
+The database and in-memory catalog use the same last-used order, stable ID tie-breaker,
+item limit, and image-budget admission when pruning. Pin items remain exempt.
+
+Copy and Paste, including AI message Copy across all providers, share a single-flight
+coordinator until clipboard restoration finishes. AI UI tests inject the same isolated
+copy service rather than constructing a system pasteboard accessor.
+It rechecks the clipboard revision after asynchronous preparation and activation waits,
+before posting Paste, and before restoration. A new external copy cancels replacement
+or is left intact after Paste. A restoration failure is reported separately from a
+failed Paste so users are not prompted to paste the same content twice.
+Unreadable advertised pasteboard representations fail preservation before any mutation;
+empty representations remain valid. Writes retain the ownership generation returned by
+`clearContents()` so a concurrent external copy cannot be mistaken for Yorozu's data.
+The history monitor ignores only Yorozu-owned generations (bounded to 16), not all
+copies during a time window. External copies immediately after Copy/Paste remain eligible
+for recording. Reads validate the expected generation before and after materializing data.
+
+Action Panel hover selection requires an actual change in screen pointer position.
+Keyboard-driven scrolling under a stationary pointer must not replace the keyboard
+selection. This uses event-driven hover callbacks, not another monitor or timer.
 
 ### Translation and Calculator
 

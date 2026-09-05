@@ -489,67 +489,253 @@ protocol WindowAccessing: AnyObject, Sendable {
         operation: WindowControlOperation
     ) -> WindowControlTarget?
     func raiseAndActivate(_ target: WindowControlTarget)
+    func raiseAndActivate(_ target: WindowControlTarget, isCancelled: @escaping @Sendable () -> Bool)
     func move(_ target: WindowControlTarget, to position: CGPoint) -> Bool
     func resize(_ target: WindowControlTarget, to size: CGSize) -> Bool
     func setFrame(_ target: WindowControlTarget, to frame: CGRect) -> Bool
+    func setFrame(_ target: WindowControlTarget, to frame: CGRect, isCancelled: @escaping @Sendable () -> Bool) -> Bool
+}
+
+extension WindowAccessing {
+    func raiseAndActivate(_ target: WindowControlTarget, isCancelled: @escaping @Sendable () -> Bool) {
+        guard !isCancelled() else { return }
+        raiseAndActivate(target)
+    }
+
+    func setFrame(_ target: WindowControlTarget, to frame: CGRect, isCancelled: @escaping @Sendable () -> Bool) -> Bool {
+        guard !isCancelled() else { return false }
+        return setFrame(target, to: frame)
+    }
+}
+
+struct WindowControlWindowRecord: Equatable, Sendable {
+    let processIdentifier: pid_t
+    let frame: CGRect
+
+    func acceptsHitTest(frame candidate: CGRect, at point: CGPoint) -> Bool {
+        // AX hit testing already resolves z-order within this owner. Window
+        // Server bounds can lag AX immediately after a move or during animation;
+        // comparing those two frames would reject the next gesture.
+        Self.isValid(frame: candidate) && point.x.isFinite && point.y.isFinite
+            && frame.contains(point) && candidate.contains(point)
+    }
+
+    func matches(frame candidate: CGRect) -> Bool {
+        guard Self.isValid(frame: frame), Self.isValid(frame: candidate) else { return false }
+        // On macOS 26, a standard titled NSWindow's Window Server bounds can
+        // sit 3 pt horizontally / 2 pt vertically inside its AX frame. Compare
+        // edges with a small allowance, not widths (which double the inset).
+        // The fallback still scans every candidate and rejects ambiguous matches.
+        let edgeTolerance: CGFloat = 4
+        return abs(frame.minX - candidate.minX) <= edgeTolerance
+            && abs(frame.minY - candidate.minY) <= edgeTolerance
+            && abs(frame.maxX - candidate.maxX) <= edgeTolerance
+            && abs(frame.maxY - candidate.maxY) <= edgeTolerance
+    }
+
+    static func isValid(frame: CGRect) -> Bool {
+        frame.origin.x.isFinite && frame.origin.y.isFinite
+            && frame.size.width.isFinite && frame.size.height.isFinite
+            && frame.size.width > 0 && frame.size.height > 0
+            && frame.maxX.isFinite && frame.maxY.isFinite
+    }
+
+    func uniquelyMatchingWindow<Element>(
+        in windows: [Element],
+        canContinue: () -> Bool,
+        frame: (Element) -> CGRect?
+    ) -> Element? {
+        guard windows.count <= 64 else { return nil }
+        var match: Element?
+        for window in windows {
+            guard canContinue(), let candidate = frame(window),
+                  Self.isValid(frame: candidate) else { return nil }
+            if matches(frame: candidate) {
+                // Public bounds cannot identify the frontmost of identical windows.
+                guard match == nil else { return nil }
+                match = window
+            }
+        }
+        // A partial scan cannot prove the candidate is unique.
+        return canContinue() ? match : nil
+    }
+}
+
+struct WindowControlAXLookupBudget {
+    private let deadline: TimeInterval
+    private let now: () -> TimeInterval
+
+    init(
+        timeout: TimeInterval = 1,
+        now: @escaping () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }
+    ) {
+        self.now = now
+        deadline = now() + timeout
+    }
+
+    var requestTimeout: Float? {
+        let remaining = deadline - now()
+        // AX interprets zero as resetting its timeout rather than canceling a call.
+        guard remaining.isFinite, remaining >= 0.001 else { return nil }
+        return Float(min(0.2, remaining))
+    }
+}
+
+enum WindowControlFrameWriter {
+    static func apply(
+        frame: CGRect,
+        isCancelled: () -> Bool,
+        resize: (CGSize) -> Bool,
+        move: (CGPoint) -> Bool
+    ) -> Bool {
+        // A completed AX call cannot be undone, but cancellation must stop the
+        // remaining writes in a cross-display resize/move/resize sequence.
+        guard WindowControlWindowRecord.isValid(frame: frame),
+              !isCancelled(), resize(frame.size),
+              !isCancelled(), move(frame.origin),
+              !isCancelled(), resize(frame.size),
+              !isCancelled() else { return false }
+        return true
+    }
+}
+
+struct WindowControlWindowResolver<Element> {
+    let isWindow: (Element) -> Bool
+    let relatedElement: (Element, String) -> Element?
+    let isEqual: (Element, Element) -> Bool
+
+    func resolve(_ element: Element, canContinue: () -> Bool = { true }) -> Element? {
+        var pending = [element]
+        var visited: [Element] = []
+        while !pending.isEmpty, visited.count < 32 {
+            guard canContinue() else { return nil }
+            let candidate = pending.removeFirst()
+            guard !visited.contains(where: { isEqual($0, candidate) }) else { continue }
+            visited.append(candidate)
+            if isWindow(candidate) { return canContinue() ? candidate : nil }
+            // AXTopLevelUIElement may be a sheet or group, not an AXWindow.
+            // Traverse it instead of rejecting an otherwise movable application.
+            for attribute in [kAXWindowAttribute, kAXTopLevelUIElementAttribute, kAXParentAttribute] {
+                guard canContinue() else { return nil }
+                if let related = relatedElement(candidate, attribute) {
+                    pending.append(related)
+                }
+            }
+        }
+        return nil
+    }
 }
 
 final class SystemWindowAccessor: WindowAccessing, @unchecked Sendable {
-    private let systemWideElement = AXUIElementCreateSystemWide()
     private let ownProcessIdentifier = ProcessInfo.processInfo.processIdentifier
 
     func target(
         at point: CGPoint,
         operation: WindowControlOperation
     ) -> WindowControlTarget? {
+        let budget = WindowControlAXLookupBudget()
+        guard point.x.isFinite, point.y.isFinite,
+              Float(point.x).isFinite, Float(point.y).isFinite,
+              let record = windowRecord(at: point),
+              record.processIdentifier > 0,
+              record.processIdentifier != ownProcessIdentifier else { return nil }
+        let application = AXUIElementCreateApplication(record.processIdentifier)
+        guard prepare(application, budget: budget) else { return nil }
+
+        // A system-wide AX timeout changes other features' AX calls as well.
+        // Restrict hit testing to the topmost window's app for a local timeout.
         var hitElement: AXUIElement?
-        guard AXUIElementCopyElementAtPosition(
-            systemWideElement,
-            Float(point.x),
-            Float(point.y),
-            &hitElement
+        if AXUIElementCopyElementAtPosition(
+            application, Float(point.x), Float(point.y), &hitElement
         ) == .success, let hitElement,
-              let window = resolveWindow(from: hitElement) else {
-            return nil
+           let window = resolveWindow(from: hitElement, budget: budget) {
+            return target(
+                window: window, record: record, operation: operation, budget: budget,
+                hitTestPoint: point
+            )
         }
 
-        // Some Electron and IDE windows need longer than the event-tap callback
-        // budget to answer AX requests. These calls run on the dedicated AX queue.
-        AXUIElementSetMessagingTimeout(window, 0.5)
+        // Some apps expose AXWindows before their content hit-test tree. Scan
+        // all bounded candidates so identical overlapping windows remain ambiguous.
+        guard let windows = attribute(
+            application, kAXWindowsAttribute as CFString, budget: budget
+        ) as? [AXUIElement] else { return nil }
+        let matchedWindow = record.uniquelyMatchingWindow(
+            in: windows,
+            canContinue: { budget.requestTimeout != nil }
+        ) { window in
+            guard stringAttribute(window, kAXRoleAttribute as CFString, budget: budget)
+                    == kAXWindowRole as String,
+                  let position = pointAttribute(window, kAXPositionAttribute as CFString, budget: budget),
+                  let size = sizeAttribute(window, kAXSizeAttribute as CFString, budget: budget) else {
+                return nil
+            }
+            return CGRect(origin: position, size: size)
+        }
+        return matchedWindow.flatMap {
+            target(window: $0, record: record, operation: operation, budget: budget)
+        }
+    }
 
+    private func windowRecord(at point: CGPoint) -> WindowControlWindowRecord? {
+        guard let records = CGWindowListCopyWindowInfo(
+            [.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID
+        ) as? [[String: Any]] else { return nil }
+        for record in records {
+            guard let pid = record[kCGWindowOwnerPID as String] as? NSNumber,
+                  let layer = record[kCGWindowLayer as String] as? NSNumber,
+                  let bounds = record[kCGWindowBounds as String] as? NSDictionary,
+                  let frame = CGRect(dictionaryRepresentation: bounds),
+                  WindowControlWindowRecord.isValid(frame: frame),
+                  frame.contains(point),
+                  (record[kCGWindowAlpha as String] as? NSNumber)?.doubleValue != 0 else {
+                continue
+            }
+            // A menu or overlay above the pointer blocks the windows below it.
+            guard layer.intValue >= 0, layer.intValue < 21 else { return nil }
+            return WindowControlWindowRecord(
+                processIdentifier: pid.int32Value, frame: frame
+            )
+        }
+        return nil
+    }
+
+    private func target(
+        window: AXUIElement,
+        record: WindowControlWindowRecord,
+        operation: WindowControlOperation,
+        budget: WindowControlAXLookupBudget,
+        hitTestPoint: CGPoint? = nil
+    ) -> WindowControlTarget? {
         var pid: pid_t = 0
         guard AXUIElementGetPid(window, &pid) == .success,
+              pid == record.processIdentifier,
               pid != ownProcessIdentifier,
               pid > 0,
-              boolAttribute(window, kAXMinimizedAttribute as CFString) != true,
-              boolAttribute(window, "AXFullScreen" as CFString) != true,
-              let position = pointAttribute(
-                window,
-                kAXPositionAttribute as CFString
-              ),
-              let size = sizeAttribute(window, kAXSizeAttribute as CFString)
-        else {
+              boolAttribute(window, kAXMinimizedAttribute as CFString, budget: budget) != true,
+              boolAttribute(window, "AXFullScreen" as CFString, budget: budget) != true,
+              let position = pointAttribute(window, kAXPositionAttribute as CFString, budget: budget),
+              let size = sizeAttribute(window, kAXSizeAttribute as CFString, budget: budget) else {
             return nil
         }
+        let frame = CGRect(origin: position, size: size)
+        let matchesTarget = hitTestPoint.map { record.acceptsHitTest(frame: frame, at: $0) }
+            ?? record.matches(frame: frame)
+        guard matchesTarget else { return nil }
 
         let positionIsSettable = isSettable(
-            window,
-            kAXPositionAttribute as CFString
+            window, kAXPositionAttribute as CFString, budget: budget
         )
         let sizeIsSettable = isSettable(
-            window,
-            kAXSizeAttribute as CFString
+            window, kAXSizeAttribute as CFString, budget: budget
         )
         let supportsOperation = switch operation {
-        case .move:
-            positionIsSettable
-        case .resize:
-            sizeIsSettable
+        case .move: positionIsSettable
+        case .resize: sizeIsSettable
         }
-        guard supportsOperation else {
-            return nil
-        }
+        guard supportsOperation, budget.requestTimeout != nil else { return nil }
 
+        AXUIElementSetMessagingTimeout(window, 0.2)
         return WindowControlTarget(
             element: window,
             processIdentifier: pid,
@@ -560,165 +746,153 @@ final class SystemWindowAccessor: WindowAccessing, @unchecked Sendable {
     }
 
     func raiseAndActivate(_ target: WindowControlTarget) {
-        guard let window = axElement(from: target) else { return }
+        raiseAndActivate(target, isCancelled: { false })
+    }
+
+    func raiseAndActivate(
+        _ target: WindowControlTarget,
+        isCancelled: @escaping @Sendable () -> Bool
+    ) {
+        guard !isCancelled(), let window = axElement(from: target) else { return }
         _ = AXUIElementPerformAction(window, kAXRaiseAction as CFString)
         let pid = target.processIdentifier
         DispatchQueue.main.async {
+            guard !isCancelled() else { return }
             _ = NSRunningApplication(processIdentifier: pid)?.activate()
         }
     }
 
     func move(_ target: WindowControlTarget, to position: CGPoint) -> Bool {
-        guard let window = axElement(from: target) else { return false }
+        guard position.x.isFinite, position.y.isFinite,
+              let window = axElement(from: target) else { return false }
         var position = position
-        guard let value = AXValueCreate(.cgPoint, &position) else {
-            return false
-        }
+        guard let value = AXValueCreate(.cgPoint, &position) else { return false }
         return AXUIElementSetAttributeValue(
-            window,
-            kAXPositionAttribute as CFString,
-            value
+            window, kAXPositionAttribute as CFString, value
         ) == .success
     }
 
     func resize(_ target: WindowControlTarget, to size: CGSize) -> Bool {
-        guard let window = axElement(from: target) else { return false }
+        guard target.supportsResizing,
+              WindowControlWindowRecord.isValid(frame: CGRect(origin: .zero, size: size)),
+              let window = axElement(from: target) else { return false }
         var size = size
-        guard let value = AXValueCreate(.cgSize, &size) else {
-            return false
-        }
+        guard let value = AXValueCreate(.cgSize, &size) else { return false }
         return AXUIElementSetAttributeValue(
-            window,
-            kAXSizeAttribute as CFString,
-            value
+            window, kAXSizeAttribute as CFString, value
         ) == .success
     }
 
     func setFrame(_ target: WindowControlTarget, to frame: CGRect) -> Bool {
-        // macOS can constrain the first resize to the window's current display.
-        // Reapply it after moving so cross-display snaps reach the requested size.
-        guard target.supportsResizing,
-              resize(target, to: frame.size),
-              move(target, to: frame.origin),
-              resize(target, to: frame.size) else {
-            return false
-        }
-        return true
+        setFrame(target, to: frame, isCancelled: { false })
     }
 
-    private func resolveWindow(from element: AXUIElement) -> AXUIElement? {
-        var candidate = element
-        for _ in 0..<8 {
-            if stringAttribute(candidate, kAXRoleAttribute as CFString)
-                == kAXWindowRole as String {
-                return candidate
-            }
-            if let window = elementAttribute(
-                candidate,
-                kAXWindowAttribute as CFString
-            ) ?? elementAttribute(
-                candidate,
-                kAXTopLevelUIElementAttribute as CFString
-            ) {
-                return window
-            }
-            guard let parent = elementAttribute(
-                candidate,
-                kAXParentAttribute as CFString
-            ), !CFEqual(parent, candidate) else { return nil }
-            candidate = parent
-        }
-        return nil
+    func setFrame(
+        _ target: WindowControlTarget,
+        to frame: CGRect,
+        isCancelled: @escaping @Sendable () -> Bool
+    ) -> Bool {
+        guard target.supportsResizing else { return false }
+        return WindowControlFrameWriter.apply(
+            frame: frame,
+            isCancelled: isCancelled,
+            resize: { self.resize(target, to: $0) },
+            move: { self.move(target, to: $0) }
+        )
+    }
+
+    private func resolveWindow(
+        from element: AXUIElement,
+        budget: WindowControlAXLookupBudget
+    ) -> AXUIElement? {
+        WindowControlWindowResolver<AXUIElement>(
+            isWindow: { self.stringAttribute($0, kAXRoleAttribute as CFString, budget: budget)
+                == kAXWindowRole as String },
+            relatedElement: { self.elementAttribute($0, $1 as CFString, budget: budget) },
+            isEqual: { CFEqual($0, $1) }
+        ).resolve(element, canContinue: { budget.requestTimeout != nil })
     }
 
     private func axElement(from target: WindowControlTarget) -> AXUIElement? {
-        guard CFGetTypeID(target.element) == AXUIElementGetTypeID() else {
-            return nil
-        }
-        return (target.element as! AXUIElement)
+        guard target.processIdentifier > 0,
+              target.processIdentifier != ownProcessIdentifier,
+              CFGetTypeID(target.element) == AXUIElementGetTypeID() else { return nil }
+        let element = target.element as! AXUIElement
+        var pid: pid_t = 0
+        guard AXUIElementGetPid(element, &pid) == .success,
+              pid == target.processIdentifier else { return nil }
+        return element
+    }
+
+    private func prepare(
+        _ element: AXUIElement,
+        budget: WindowControlAXLookupBudget
+    ) -> Bool {
+        guard let timeout = budget.requestTimeout else { return false }
+        return AXUIElementSetMessagingTimeout(element, timeout) == .success
+    }
+
+    private func attribute(
+        _ element: AXUIElement,
+        _ name: CFString,
+        budget: WindowControlAXLookupBudget
+    ) -> CFTypeRef? {
+        guard prepare(element, budget: budget) else { return nil }
+        var value: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, name, &value) == .success,
+              budget.requestTimeout != nil else { return nil }
+        return value
     }
 
     private func elementAttribute(
         _ element: AXUIElement,
-        _ attribute: CFString
+        _ name: CFString,
+        budget: WindowControlAXLookupBudget
     ) -> AXUIElement? {
-        var value: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(
-            element,
-            attribute,
-            &value
-        ) == .success, let value,
-              CFGetTypeID(value) == AXUIElementGetTypeID() else {
-            return nil
-        }
-        return (value as! AXUIElement)
+        guard let value = attribute(element, name, budget: budget),
+              CFGetTypeID(value) == AXUIElementGetTypeID() else { return nil }
+        return .some(value as! AXUIElement)
     }
 
     private func stringAttribute(
         _ element: AXUIElement,
-        _ attribute: CFString
+        _ name: CFString,
+        budget: WindowControlAXLookupBudget
     ) -> String? {
-        var value: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(
-            element,
-            attribute,
-            &value
-        ) == .success else {
-            return nil
-        }
-        return value as? String
+        attribute(element, name, budget: budget) as? String
     }
 
     private func boolAttribute(
         _ element: AXUIElement,
-        _ attribute: CFString
+        _ name: CFString,
+        budget: WindowControlAXLookupBudget
     ) -> Bool? {
-        var value: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(
-            element,
-            attribute,
-            &value
-        ) == .success else {
-            return nil
-        }
-        return (value as? NSNumber)?.boolValue
+        (attribute(element, name, budget: budget) as? NSNumber)?.boolValue
     }
 
     private func pointAttribute(
         _ element: AXUIElement,
-        _ attribute: CFString
+        _ name: CFString,
+        budget: WindowControlAXLookupBudget
     ) -> CGPoint? {
-        var value: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(
-            element,
-            attribute,
-            &value
-        ) == .success, let value,
-              CFGetTypeID(value) == AXValueGetTypeID() else {
-            return nil
-        }
+        guard let value = attribute(element, name, budget: budget),
+              CFGetTypeID(value) == AXValueGetTypeID() else { return nil }
         var point = CGPoint.zero
-        guard AXValueGetValue(value as! AXValue, .cgPoint, &point) else {
-            return nil
-        }
+        guard AXValueGetValue(value as! AXValue, .cgPoint, &point),
+              point.x.isFinite, point.y.isFinite else { return nil }
         return point
     }
 
     private func sizeAttribute(
         _ element: AXUIElement,
-        _ attribute: CFString
+        _ name: CFString,
+        budget: WindowControlAXLookupBudget
     ) -> CGSize? {
-        var value: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(
-            element,
-            attribute,
-            &value
-        ) == .success, let value,
-              CFGetTypeID(value) == AXValueGetTypeID() else {
-            return nil
-        }
+        guard let value = attribute(element, name, budget: budget),
+              CFGetTypeID(value) == AXValueGetTypeID() else { return nil }
         var size = CGSize.zero
-        guard AXValueGetValue(value as! AXValue, .cgSize, &size) else {
+        guard AXValueGetValue(value as! AXValue, .cgSize, &size),
+              WindowControlWindowRecord.isValid(frame: CGRect(origin: .zero, size: size)) else {
             return nil
         }
         return size
@@ -726,14 +900,13 @@ final class SystemWindowAccessor: WindowAccessing, @unchecked Sendable {
 
     private func isSettable(
         _ element: AXUIElement,
-        _ attribute: CFString
+        _ name: CFString,
+        budget: WindowControlAXLookupBudget
     ) -> Bool {
+        guard prepare(element, budget: budget) else { return false }
         var settable = DarwinBoolean(false)
-        return AXUIElementIsAttributeSettable(
-            element,
-            attribute,
-            &settable
-        ) == .success && settable.boolValue
+        return AXUIElementIsAttributeSettable(element, name, &settable) == .success
+            && settable.boolValue && budget.requestTimeout != nil
     }
 }
 
@@ -750,6 +923,7 @@ final class WindowControlPointerCoordinator: @unchecked Sendable {
     private var gestureSession = WindowControlGestureSession()
     private var activeSnapDestination: WindowControlSnapDestination?
     private var activeSnapTarget: WindowControlTarget?
+    private var gestureFailure: WindowControlActivity?
 
     init(
         windowAccessor: any WindowAccessing,
@@ -764,12 +938,22 @@ final class WindowControlPointerCoordinator: @unchecked Sendable {
         self.previewHandler = previewHandler
     }
 
-    func process(_ sample: WindowControlPointerSample) -> WindowControlActivity {
+    func process(
+        _ sample: WindowControlPointerSample,
+        isCancelled: @escaping @Sendable () -> Bool = { false }
+    ) -> WindowControlActivity {
+        guard !isCancelled() else { return .listening }
+        if let gestureFailure { return gestureFailure }
         if !gestureSession.isTracking {
-            guard let target = windowAccessor.target(
+            let target = windowAccessor.target(
                 at: sample.location,
                 operation: sample.operation
-            ) else {
+            )
+            // AX can reply after the user releases the chord or disables the
+            // feature. Do not raise or mutate that abandoned gesture's target.
+            guard !isCancelled() else { return .listening }
+            guard let target else {
+                gestureFailure = .targetUnavailable
                 return .targetUnavailable
             }
             gestureSession.begin(
@@ -777,7 +961,7 @@ final class WindowControlPointerCoordinator: @unchecked Sendable {
                 target: target,
                 pointer: sample.location
             )
-            windowAccessor.raiseAndActivate(target)
+            windowAccessor.raiseAndActivate(target, isCancelled: isCancelled)
             return .tracking(sample.operation)
         }
 
@@ -786,7 +970,7 @@ final class WindowControlPointerCoordinator: @unchecked Sendable {
             pointer: sample.location
         ) else {
             reset()
-            return process(sample)
+            return process(sample, isCancelled: isCancelled)
         }
 
         let succeeded: Bool
@@ -795,39 +979,53 @@ final class WindowControlPointerCoordinator: @unchecked Sendable {
             succeeded = processMove(
                 target: target,
                 position: position,
-                pointer: sample.location
+                pointer: sample.location,
+                isCancelled: isCancelled
             )
         case let .resize(target, size):
             clearSnapPreview()
+            guard !isCancelled() else { return .listening }
             succeeded = windowAccessor.resize(target, to: size)
         }
+        guard !isCancelled() else { return .listening }
         guard succeeded else {
             reset()
+            gestureFailure = .updateRejected(sample.operation)
             return .updateRejected(sample.operation)
         }
         return .tracking(sample.operation)
     }
 
     func reset() {
+        gestureFailure = nil
         gestureSession.reset()
         clearSnapPreview()
     }
 
-    func finish(commitSnap: Bool) -> WindowControlActivity {
+    func finish(
+        commitSnap: Bool,
+        isCancelled: @escaping @Sendable () -> Bool = { false }
+    ) -> WindowControlActivity {
+        guard !isCancelled() else {
+            reset()
+            return .listening
+        }
         let activity: WindowControlActivity
-        if commitSnap,
+        if let gestureFailure {
+            activity = gestureFailure
+        } else if commitSnap,
            let activeSnapDestination,
            let activeSnapTarget,
            !windowAccessor.setFrame(
                activeSnapTarget,
-               to: activeSnapDestination.frame
+               to: activeSnapDestination.frame,
+               isCancelled: isCancelled
            ) {
             activity = .updateRejected(.move)
         } else {
             activity = .listening
         }
-        gestureSession.reset()
-        clearSnapPreview()
+        reset()
         return activity
     }
 
@@ -843,7 +1041,8 @@ final class WindowControlPointerCoordinator: @unchecked Sendable {
     private func processMove(
         target: WindowControlTarget,
         position: CGPoint,
-        pointer: CGPoint
+        pointer: CGPoint,
+        isCancelled: @escaping @Sendable () -> Bool
     ) -> Bool {
         let destination = target.supportsResizing
             ? screenProvider.screen(containing: pointer).flatMap {
@@ -854,10 +1053,13 @@ final class WindowControlPointerCoordinator: @unchecked Sendable {
             }
             : nil
 
+        guard !isCancelled() else { return false }
+
         if let destination {
             guard windowAccessor.move(target, to: position) else {
                 return false
             }
+            guard !isCancelled() else { return false }
             if destination != activeSnapDestination {
                 activeSnapDestination = destination
                 activeSnapTarget = target
@@ -890,6 +1092,7 @@ final class WindowControlPointerProcessor: @unchecked Sendable {
     private var initialSample: PendingSample?
     private var pendingSample: PendingSample?
     private var generation: UInt64 = 0
+    private var cancellationRevision: UInt64 = 0
     private var isScheduled = false
     private var isGestureActive = false
     private var lastActivity: WindowControlActivity?
@@ -932,7 +1135,10 @@ final class WindowControlPointerProcessor: @unchecked Sendable {
 
     func submit(_ sample: WindowControlPointerSample) {
         lock.lock()
-        isGestureActive = true
+        guard isGestureActive else {
+            lock.unlock()
+            return
+        }
         pendingSample = PendingSample(generation: generation, value: sample)
         let shouldSchedule = !isScheduled
         if shouldSchedule { isScheduled = true }
@@ -966,28 +1172,52 @@ final class WindowControlPointerProcessor: @unchecked Sendable {
         let finalSample = applyPendingUpdate
             ? pendingSample?.value
             : nil
+        let completionRevision = cancellationRevision
         isGestureActive = false
         generation &+= 1
         self.initialSample = nil
         pendingSample = nil
         lock.unlock()
         queue.async { [weak self] in
-            guard let self else { return }
+            guard let self, isCompletionCurrent(completionRevision) else { return }
+            let isCancelled: @Sendable () -> Bool = { [weak self] in
+                self?.isCompletionCurrent(completionRevision) != true
+            }
             if let initialSample {
-                _ = coordinator.process(initialSample)
+                _ = coordinator.process(initialSample, isCancelled: isCancelled)
             }
+            guard isCompletionCurrent(completionRevision) else { return }
             if let finalSample {
-                _ = coordinator.process(finalSample)
+                _ = coordinator.process(finalSample, isCancelled: isCancelled)
             }
-            publish(coordinator.finish(commitSnap: commitSnap))
+            guard isCompletionCurrent(completionRevision) else { return }
+            let activity = coordinator.finish(commitSnap: commitSnap, isCancelled: isCancelled)
+            guard !isCancelled() else { return }
+            publish(activity)
         }
     }
 
     func reset() {
-        finish(
-            applyPendingUpdate: false,
-            commitSnap: false
-        )
+        lock.lock()
+        // Mouse-up may already have queued its final update. Cancellation must
+        // invalidate that completion even after isGestureActive became false.
+        cancellationRevision &+= 1
+        generation &+= 1
+        isGestureActive = false
+        initialSample = nil
+        pendingSample = nil
+        lock.unlock()
+        queue.async { [weak self] in
+            guard let self else { return }
+            coordinator.reset()
+            publish(.listening)
+        }
+    }
+
+    private func isCompletionCurrent(_ revision: UInt64) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return cancellationRevision == revision
     }
 
     private func processPendingSample() {
@@ -1003,12 +1233,16 @@ final class WindowControlPointerProcessor: @unchecked Sendable {
             pendingSample = nil
         }
         let isCurrent = sample.generation == generation
+        let revision = cancellationRevision
         lock.unlock()
 
         let delay: DispatchTimeInterval
         if isCurrent {
-            let activity = coordinator.process(sample.value)
-            publish(activity)
+            let isCancelled: @Sendable () -> Bool = { [weak self] in
+                self?.isCompletionCurrent(revision) != true
+            }
+            let activity = coordinator.process(sample.value, isCancelled: isCancelled)
+            if !isCancelled() { publish(activity) }
             delay = switch activity {
             case .targetUnavailable, .updateRejected:
                 Self.retryInterval
@@ -1036,6 +1270,7 @@ enum WindowControlEventTapConfiguration {
     // HID event taps require a root process. The session tap is the earliest
     // supported filtering point for a regular Accessibility-authorized app.
     static let location: CGEventTapLocation = .cgSessionEventTap
+    static let placement: CGEventTapPlacement = .tailAppendEventTap
 }
 
 struct WindowControlPrimaryDragSession: Equatable, Sendable {
@@ -1088,10 +1323,11 @@ protocol WindowControlMonitoring: AnyObject {
     )
     func start(configuration: WindowControlConfiguration) -> Bool
     func update(configuration: WindowControlConfiguration)
+    func recover(configuration: WindowControlConfiguration, recreate: Bool) async -> Bool
     func stop()
 }
 
-private final class WindowControlEventTapWorker: @unchecked Sendable {
+final class WindowControlEventTapWorker: @unchecked Sendable {
     private final class StartResult: @unchecked Sendable {
         private let lock = NSLock()
         private var value: Bool?
@@ -1139,22 +1375,37 @@ private final class WindowControlEventTapWorker: @unchecked Sendable {
 
     var isRunning: Bool {
         lock.lock()
+        let running = running
+        let eventTap = eventTap
+        lock.unlock()
+        guard running, let eventTap else { return false }
+        return CFMachPortIsValid(eventTap) && CGEvent.tapIsEnabled(tap: eventTap)
+    }
+
+    var isStopped: Bool {
+        lock.lock()
         defer { lock.unlock() }
-        return running
+        return thread == nil
     }
 
     func start() -> Bool {
         if isRunning { return true }
 
+        lock.lock()
+        guard thread == nil else {
+            lock.unlock()
+            return false
+        }
         let semaphore = DispatchSemaphore(value: 0)
         let result = StartResult()
         let thread = Thread { [self] in
-            runEventTap(result: result, semaphore: semaphore)
+            autoreleasepool {
+                runEventTap(result: result, semaphore: semaphore)
+            }
         }
         thread.name = "com.yorozu.app.window-control"
         thread.qualityOfService = .userInteractive
 
-        lock.lock()
         stopRequested = false
         self.thread = thread
         lock.unlock()
@@ -1169,16 +1420,34 @@ private final class WindowControlEventTapWorker: @unchecked Sendable {
 
     func update(configuration: WindowControlConfiguration) {
         lock.lock()
+        guard self.configuration != configuration else {
+            lock.unlock()
+            return
+        }
         self.configuration = configuration
+        // A new binding must not reinterpret a gesture already in progress.
+        // Keep consuming its matching mouse-up, but discard queued geometry.
+        dragSession.cancel()
+        pointerProcessor.reset()
         lock.unlock()
     }
 
     func stop() {
         lock.lock()
         stopRequested = true
+        running = false
         let runLoop = runLoop
+        let eventTap = eventTap
+        dragSession.reset()
+        pointerProcessor.reset()
         lock.unlock()
+        if let eventTap { CGEvent.tapEnable(tap: eventTap, enable: false) }
         if let runLoop {
+            // A stop can race with startup just before CFRunLoopRun. Keep a
+            // queued stop as well so a newly entered run-loop cannot survive it.
+            CFRunLoopPerformBlock(runLoop, CFRunLoopMode.commonModes.rawValue) {
+                CFRunLoopStop(runLoop)
+            }
             CFRunLoopStop(runLoop)
             CFRunLoopWakeUp(runLoop)
         }
@@ -1200,7 +1469,9 @@ private final class WindowControlEventTapWorker: @unchecked Sendable {
         let userInfo = Unmanaged.passUnretained(self).toOpaque()
         guard let eventTap = CGEvent.tapCreate(
             tap: WindowControlEventTapConfiguration.location,
-            place: .headInsertEventTap,
+            // Command-alone input switching observes mouse activity at the head
+            // of the chain. Let it cancel its candidate before we consume a drag.
+            place: WindowControlEventTapConfiguration.placement,
             options: .defaultTap,
             eventsOfInterest: mask,
             callback: { _, type, event, userInfo in
@@ -1220,6 +1491,9 @@ private final class WindowControlEventTapWorker: @unchecked Sendable {
             eventTap,
             0
         ) else {
+            lock.lock()
+            thread = nil
+            lock.unlock()
             result.complete(false)
             semaphore.signal()
             return
@@ -1228,6 +1502,7 @@ private final class WindowControlEventTapWorker: @unchecked Sendable {
         let currentRunLoop = CFRunLoopGetCurrent()
         lock.lock()
         guard !stopRequested else {
+            thread = nil
             lock.unlock()
             CFMachPortInvalidate(eventTap)
             result.complete(false)
@@ -1264,26 +1539,34 @@ private final class WindowControlEventTapWorker: @unchecked Sendable {
         lock.unlock()
     }
 
-    private func handle(
+    func handle(
         type: CGEventType,
         event: CGEvent
     ) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        // Only bounded state changes and queue submissions happen under this
+        // lock. This serializes event admission with stop/configuration changes;
+        // Accessibility requests continue to run on the separate AX queue.
+        guard !stopRequested else { return false }
         if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
             dragSession.reset()
             pointerProcessor.reset()
-            pointerProcessor.report(.monitorRecovered)
-            lock.lock()
             let eventTap = eventTap
-            lock.unlock()
             if let eventTap {
                 CGEvent.tapEnable(tap: eventTap, enable: true)
+                if CFMachPortIsValid(eventTap), CGEvent.tapIsEnabled(tap: eventTap) {
+                    pointerProcessor.report(.monitorRecovered)
+                }
             }
             return false
         }
 
-        let configuration = currentConfiguration()
         switch type {
         case .leftMouseDown:
+            // A duplicate down cannot replace the original target or starting
+            // pointer while its matching mouse-up is still outstanding.
+            guard !dragSession.isConsuming else { return true }
             guard let operation = configuration.operation(for: event.flags) else {
                 return false
             }
@@ -1313,7 +1596,13 @@ private final class WindowControlEventTapWorker: @unchecked Sendable {
             return true
 
         case .leftMouseUp:
+            let operation = dragSession.operation
             guard let completion = dragSession.finish() else { return false }
+            if completion.shouldApplyPendingUpdate, let operation {
+                pointerProcessor.submit(
+                    WindowControlPointerSample(operation: operation, location: event.location)
+                )
+            }
             pointerProcessor.finish(
                 applyPendingUpdate: completion.shouldApplyPendingUpdate,
                 commitSnap: completion.shouldCommitSnap
@@ -1338,11 +1627,6 @@ private final class WindowControlEventTapWorker: @unchecked Sendable {
         pointerProcessor.reset()
     }
 
-    private func currentConfiguration() -> WindowControlConfiguration {
-        lock.lock()
-        defer { lock.unlock() }
-        return configuration
-    }
 }
 
 @MainActor
@@ -1352,6 +1636,7 @@ final class WindowControlMonitor: WindowControlMonitoring {
     private let snapPreviewPresenter: any WindowControlSnapPreviewPresenting
     private let screenParametersObserver: WindowControlScreenParametersObserver
     private var worker: WindowControlEventTapWorker?
+    private var workerRevision: UInt64 = 0
     private var activityHandler:
         (@MainActor @Sendable (WindowControlActivity) -> Void)?
 
@@ -1391,25 +1676,32 @@ final class WindowControlMonitor: WindowControlMonitoring {
             worker.update(configuration: configuration)
             return true
         }
+        if let worker {
+            stop()
+            guard worker.isStopped else { return false }
+        }
+        workerRevision &+= 1
+        let revision = workerRevision
         let activityHandler = activityHandler ?? { _ in }
         let worker = WindowControlEventTapWorker(
             configuration: configuration,
             windowAccessor: windowAccessor,
             screenProvider: screenProvider,
-            previewHandler: { [snapPreviewPresenter] destination in
+            previewHandler: { [weak self] destination in
+                guard let self, self.workerRevision == revision else { return }
                 if let destination {
-                    snapPreviewPresenter.show(destination)
+                    self.snapPreviewPresenter.show(destination)
                 } else {
-                    snapPreviewPresenter.hide()
+                    self.snapPreviewPresenter.hide()
                 }
             },
-            activityHandler: activityHandler
+            activityHandler: { [weak self] activity in
+                guard let self, self.workerRevision == revision else { return }
+                activityHandler(activity)
+            }
         )
         self.worker = worker
         let started = worker.start()
-        if !started {
-            self.worker = nil
-        }
         return started
     }
 
@@ -1417,9 +1709,33 @@ final class WindowControlMonitor: WindowControlMonitoring {
         worker?.update(configuration: configuration)
     }
 
+    func recover(configuration: WindowControlConfiguration, recreate: Bool) async -> Bool {
+        if !recreate, isRunning {
+            update(configuration: configuration)
+            return true
+        }
+        let previousWorker = worker
+        stop()
+        let revision = workerRevision
+        // Wait for the old run-loop to release its tap before installing another.
+        // The main actor remains available to cancellation and settings changes.
+        for _ in 0..<50 {
+            if previousWorker?.isStopped != false { break }
+            do {
+                try await Task.sleep(for: .milliseconds(10))
+            } catch {
+                return false
+            }
+        }
+        guard workerRevision == revision,
+              previousWorker?.isStopped != false,
+              !Task.isCancelled else { return false }
+        return start(configuration: configuration)
+    }
+
     func stop() {
+        workerRevision &+= 1
         worker?.stop()
-        worker = nil
         snapPreviewPresenter.hide()
     }
 }
@@ -1518,7 +1834,12 @@ final class WindowControlController: ObservableObject {
     private let permissionProvider: any CommandInputModePermissionProviding
     private let codeSigningStatusProvider: any CommandInputModeCodeSigningStatusProviding
     private let backgroundActivityManager: any WindowControlBackgroundActivityManaging
+    private let workspaceNotificationCenter: NotificationCenter?
+    private let monitoringHealthInterval: Duration
     private var hasStarted = false
+    private var isRecoveringMonitor = false
+    private var monitoringHealthTask: Task<Void, Never>?
+    private var workspaceRecoveryTokens: [any NSObjectProtocol] = []
 
     init(
         defaults: UserDefaults,
@@ -1527,13 +1848,17 @@ final class WindowControlController: ObservableObject {
         codeSigningStatusProvider: any CommandInputModeCodeSigningStatusProviding =
             FixedCommandInputModeCodeSigningStatusProvider(status: .stable),
         backgroundActivityManager: any WindowControlBackgroundActivityManaging =
-            NoOpWindowControlBackgroundActivityManager()
+            NoOpWindowControlBackgroundActivityManager(),
+        workspaceNotificationCenter: NotificationCenter? = nil,
+        monitoringHealthInterval: Duration = .seconds(5)
     ) {
         self.defaults = defaults
         self.monitor = monitor
         self.permissionProvider = permissionProvider
         self.codeSigningStatusProvider = codeSigningStatusProvider
         self.backgroundActivityManager = backgroundActivityManager
+        self.workspaceNotificationCenter = workspaceNotificationCenter
+        self.monitoringHealthInterval = monitoringHealthInterval
         isEnabled = defaults.bool(forKey: DefaultsKey.isEnabled)
         moveChord = Self.loadChord(defaults, key: DefaultsKey.moveChord)
         resizeChord = Self.loadChord(defaults, key: DefaultsKey.resizeChord)
@@ -1549,7 +1874,8 @@ final class WindowControlController: ObservableObject {
             monitor: WindowControlMonitor(),
             permissionProvider: SystemCommandInputModePermissionProvider(),
             codeSigningStatusProvider: SystemCommandInputModeCodeSigningStatusProvider(),
-            backgroundActivityManager: SystemWindowControlBackgroundActivityManager()
+            backgroundActivityManager: SystemWindowControlBackgroundActivityManager(),
+            workspaceNotificationCenter: NSWorkspace.shared.notificationCenter
         )
     }
 
@@ -1577,10 +1903,13 @@ final class WindowControlController: ObservableObject {
             return
         }
         hasStarted = true
+        startWorkspaceRecoveryObservers()
         refreshAuthorization()
     }
 
     func stop() {
+        stopMonitoringHealthChecks()
+        stopWorkspaceRecoveryObservers()
         monitor.stop()
         backgroundActivityManager.end()
         hasStarted = false
@@ -1619,6 +1948,34 @@ final class WindowControlController: ObservableObject {
         reconcile()
     }
 
+    func recoverMonitoringIfNeeded(recreate: Bool = false) async {
+        guard hasStarted, isEnabled, configuration.isValid else { return }
+        isAccessibilityGranted = permissionProvider.isAccessibilityGranted
+        guard isAccessibilityGranted else {
+            reconcile()
+            return
+        }
+        backgroundActivityManager.begin()
+        guard !isRecoveringMonitor else { return }
+        guard recreate || !monitor.isRunning else {
+            runtimeStatus = .active
+            return
+        }
+        isRecoveringMonitor = true
+        let recovered = await monitor.recover(configuration: configuration, recreate: recreate)
+        isRecoveringMonitor = false
+        // A permission or configuration change may arrive while the old tap stops.
+        isAccessibilityGranted = permissionProvider.isAccessibilityGranted
+        guard hasStarted, isEnabled, configuration.isValid, isAccessibilityGranted else {
+            monitor.stop()
+            reconcile()
+            return
+        }
+        monitor.update(configuration: configuration)
+        runtimeStatus = recovered && monitor.isRunning ? .active : .unavailable
+        if runtimeStatus == .active { lastActivity = .monitorRecovered }
+    }
+
     func requestAccessibilityAccess() {
         permissionProvider.requestAccessibilityAccess()
         refreshAuthorization()
@@ -1634,10 +1991,12 @@ final class WindowControlController: ObservableObject {
 
     private func reconcile() {
         guard hasStarted else {
+            stopMonitoringHealthChecks()
             runtimeStatus = isEnabled ? preflightStatus : .off
             return
         }
         guard isEnabled else {
+            stopMonitoringHealthChecks()
             monitor.stop()
             backgroundActivityManager.end()
             runtimeStatus = .off
@@ -1645,12 +2004,16 @@ final class WindowControlController: ObservableObject {
             return
         }
         guard configuration.isValid else {
+            stopMonitoringHealthChecks()
             monitor.stop()
             backgroundActivityManager.end()
             runtimeStatus = .needsConfiguration
             lastActivity = nil
             return
         }
+        // Keep the existing health check while this feature is enabled, so a
+        // permission re-grant can recover without bringing Yorozu to the front.
+        startMonitoringHealthChecks()
         guard isAccessibilityGranted else {
             monitor.stop()
             backgroundActivityManager.end()
@@ -1660,6 +2023,7 @@ final class WindowControlController: ObservableObject {
         }
 
         backgroundActivityManager.begin()
+        guard !isRecoveringMonitor else { return }
         if monitor.isRunning {
             monitor.update(configuration: configuration)
             runtimeStatus = .active
@@ -1667,10 +2031,49 @@ final class WindowControlController: ObservableObject {
             runtimeStatus = monitor.start(configuration: configuration)
                 ? .active
                 : .unavailable
-            if runtimeStatus == .unavailable {
-                backgroundActivityManager.end()
+        }
+    }
+
+    private func startMonitoringHealthChecks() {
+        guard monitoringHealthTask == nil else { return }
+        let interval = monitoringHealthInterval
+        monitoringHealthTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                do {
+                    try await Task.sleep(for: interval)
+                } catch {
+                    return
+                }
+                guard let self else { return }
+                await self.recoverMonitoringIfNeeded()
             }
         }
+    }
+
+    private func stopMonitoringHealthChecks() {
+        monitoringHealthTask?.cancel()
+        monitoringHealthTask = nil
+    }
+
+    private func startWorkspaceRecoveryObservers() {
+        guard workspaceRecoveryTokens.isEmpty, let workspaceNotificationCenter else { return }
+        workspaceRecoveryTokens = [
+            NSWorkspace.didWakeNotification,
+            NSWorkspace.sessionDidBecomeActiveNotification,
+        ].map { name in
+            workspaceNotificationCenter.addObserver(forName: name, object: nil, queue: .main) {
+                [weak self] _ in
+                Task { @MainActor [weak self] in
+                    await self?.recoverMonitoringIfNeeded(recreate: true)
+                }
+            }
+        }
+    }
+
+    private func stopWorkspaceRecoveryObservers() {
+        guard let workspaceNotificationCenter else { return }
+        workspaceRecoveryTokens.forEach { workspaceNotificationCenter.removeObserver($0) }
+        workspaceRecoveryTokens.removeAll()
     }
 
     private var preflightStatus: RuntimeStatus {
@@ -1710,6 +2113,7 @@ private final class DisabledWindowControlMonitor: WindowControlMonitoring {
     ) {}
     func start(configuration: WindowControlConfiguration) -> Bool { false }
     func update(configuration: WindowControlConfiguration) {}
+    func recover(configuration: WindowControlConfiguration, recreate: Bool) async -> Bool { false }
     func stop() { isRunning = false }
 }
 

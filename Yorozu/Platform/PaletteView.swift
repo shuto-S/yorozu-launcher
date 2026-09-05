@@ -928,9 +928,33 @@ private final class ActionVisibilityTracker {
     var ids: Set<LauncherActionID> = []
 }
 
+@MainActor
+final class PaletteHoverSelectionTracker {
+    private var pointerLocation: CGPoint?
+
+    func recordPointer(at location: CGPoint) {
+        guard location.x.isFinite, location.y.isFinite else { return }
+        pointerLocation = location
+    }
+
+    func shouldSelect(at location: CGPoint) -> Bool {
+        let moved = Self.hasPointerMoved(from: pointerLocation, to: location)
+        recordPointer(at: location)
+        return moved
+    }
+
+    nonisolated static func hasPointerMoved(from previous: CGPoint?, to current: CGPoint) -> Bool {
+        guard let previous,
+              previous.x.isFinite, previous.y.isFinite,
+              current.x.isFinite, current.y.isFinite else { return false }
+        return previous != current
+    }
+}
+
 private struct ActionPanelView: View {
     @Bindable var viewModel: LauncherViewModel
     @State private var visibleActions = ActionVisibilityTracker()
+    @State private var hoverSelection = PaletteHoverSelectionTracker()
     @FocusState private var isSearchFocused: Bool
 
     var body: some View {
@@ -971,6 +995,7 @@ private struct ActionPanelView: View {
                 }
                 .scrollIndicators(.never)
                 .onChange(of: viewModel.selectedActionID) { previousID, selectedID in
+                    hoverSelection.recordPointer(at: NSEvent.mouseLocation)
                     guard let selectedID,
                           !visibleActions.ids.contains(selectedID) else {
                         return
@@ -984,11 +1009,13 @@ private struct ActionPanelView: View {
                     )
                 }
                 .onChange(of: viewModel.filteredActionItems.map(\.id)) { _, _ in
+                    hoverSelection.recordPointer(at: NSEvent.mouseLocation)
                     visibleActions.ids.removeAll()
                     guard let selectedID = viewModel.selectedActionID else { return }
                     Task { @MainActor in
                         await Task.yield()
                         guard selectedID == viewModel.selectedActionID else { return }
+                        hoverSelection.recordPointer(at: NSEvent.mouseLocation)
                         proxy.scrollTo(selectedID, anchor: .center)
                     }
                 }
@@ -1010,6 +1037,7 @@ private struct ActionPanelView: View {
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("launcher.action-panel")
         .onAppear {
+            hoverSelection.recordPointer(at: NSEvent.mouseLocation)
             // The panel enters the hierarchy during the same update that leaves
             // the AppKit root search field as first responder. Defer one run-loop
             // turn so the action field can reliably take keyboard focus.
@@ -1067,10 +1095,12 @@ private struct ActionPanelView: View {
         .accessibilityAddTraits(
             viewModel.selectedActionID == action.id ? .isSelected : []
         )
-        .onHover { isHovering in
-            if isHovering {
-                viewModel.selectAction(action.id)
-            }
+        .onContinuousHover { phase in
+            // Scrolling a row under a stationary pointer also fires hover. Use
+            // screen coordinates, not the row-local location changed by scrolling.
+            guard case .active = phase,
+                  hoverSelection.shouldSelect(at: NSEvent.mouseLocation) else { return }
+            viewModel.selectAction(action.id)
         }
     }
 

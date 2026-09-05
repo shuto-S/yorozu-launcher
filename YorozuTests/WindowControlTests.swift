@@ -1,3 +1,4 @@
+import AppKit
 import CoreGraphics
 import XCTest
 @testable import Yorozu
@@ -9,6 +10,7 @@ final class WindowControlTests: XCTestCase {
             WindowControlEventTapConfiguration.location,
             .cgSessionEventTap
         )
+        XCTAssertEqual(WindowControlEventTapConfiguration.placement, .tailAppendEventTap)
     }
 
     func testModifierChordNormalizesSupportedFlagsAndRequiresExactMatch() {
@@ -335,6 +337,103 @@ final class WindowControlTests: XCTestCase {
         XCTAssertTrue(accessor.resizedSizes.isEmpty)
     }
 
+    func testResetCancelsMouseUpCompletionQueuedBehindAXLookup() async {
+        for operation in WindowControlOperation.allCases {
+            let accessor = TestWindowAccessor(target: testTarget())
+            let lookupStarted = expectation(description: "AX lookup started for \(operation)")
+            let resetCompleted = expectation(description: "Queued \(operation) cancelled")
+            let lookupGate = DispatchSemaphore(value: 0)
+            accessor.targetLookupStarted = { lookupStarted.fulfill() }
+            accessor.targetLookupGate = lookupGate
+            let processor = WindowControlPointerProcessor(
+                windowAccessor: accessor,
+                screenProvider: TestWindowControlScreenProvider(screen: WindowControlScreen(
+                    frame: CGRect(x: 0, y: 0, width: 1_000, height: 800),
+                    visibleFrame: CGRect(x: 0, y: 25, width: 1_000, height: 750)
+                )),
+                previewHandler: { _ in },
+                activityHandler: { activity in
+                    if activity == .listening { resetCompleted.fulfill() }
+                }
+            )
+            processor.begin(.init(operation: operation, location: CGPoint(x: 200, y: 200)))
+            await fulfillment(of: [lookupStarted], timeout: 1)
+
+            // A slow target app can still be replying when mouse-up queues the
+            // last resize/snap and the user immediately disables the feature.
+            processor.submit(.init(operation: operation, location: CGPoint(x: 0, y: 300)))
+            processor.finish(applyPendingUpdate: true, commitSnap: operation == .move)
+            processor.reset()
+            lookupGate.signal()
+
+            await fulfillment(of: [resetCompleted], timeout: 1)
+            XCTAssertEqual(accessor.targetCount, 1)
+            XCTAssertTrue(accessor.movedPositions.isEmpty)
+            XCTAssertTrue(accessor.resizedSizes.isEmpty)
+            XCTAssertTrue(accessor.setFrames.isEmpty)
+        }
+    }
+
+    func testDuplicateMouseDownDoesNotReplaceGestureAnchor() async throws {
+        let accessor = TestWindowAccessor(target: testTarget())
+        let finished = expectation(description: "Original gesture completed")
+        let worker = WindowControlEventTapWorker(
+            configuration: .init(moveChord: [.option], resizeChord: [.option, .shift]),
+            windowAccessor: accessor,
+            screenProvider: EmptyWindowControlScreenProvider(),
+            previewHandler: { _ in },
+            activityHandler: { if $0 == .listening { finished.fulfill() } }
+        )
+        XCTAssertTrue(worker.handle(type: .leftMouseDown, event: try pointerEvent(
+            .leftMouseDown, at: CGPoint(x: 200, y: 200), flags: .maskAlternate
+        )))
+        XCTAssertTrue(worker.handle(type: .leftMouseDown, event: try pointerEvent(
+            .leftMouseDown, at: CGPoint(x: 400, y: 400), flags: .maskAlternate
+        )))
+        XCTAssertTrue(worker.handle(type: .leftMouseUp, event: try pointerEvent(
+            .leftMouseUp, at: CGPoint(x: 240, y: 230), flags: .maskAlternate
+        )))
+
+        await fulfillment(of: [finished], timeout: 1)
+        XCTAssertEqual(accessor.targetCount, 1)
+        XCTAssertEqual(accessor.movedPositions.last, CGPoint(x: 140, y: 130))
+    }
+
+    func testChangingBindingsCancelsGestureBeforeMouseUp() async throws {
+        let accessor = TestWindowAccessor(target: testTarget())
+        let acquired = expectation(description: "Original window acquired")
+        let cancelled = expectation(description: "Binding change cancelled gesture")
+        let worker = WindowControlEventTapWorker(
+            configuration: .init(moveChord: [.option], resizeChord: [.option, .shift]),
+            windowAccessor: accessor,
+            screenProvider: EmptyWindowControlScreenProvider(),
+            previewHandler: { _ in },
+            activityHandler: { activity in
+                if activity == .tracking(.move) { acquired.fulfill() }
+                if activity == .listening { cancelled.fulfill() }
+            }
+        )
+        XCTAssertTrue(worker.handle(type: .leftMouseDown, event: try pointerEvent(
+            .leftMouseDown, at: CGPoint(x: 200, y: 200), flags: .maskAlternate
+        )))
+        await fulfillment(of: [acquired], timeout: 1)
+
+        worker.update(configuration: .init(moveChord: [.command], resizeChord: [.command, .shift]))
+        XCTAssertTrue(worker.handle(type: .leftMouseUp, event: try pointerEvent(
+            .leftMouseUp, at: CGPoint(x: 0, y: 200), flags: .maskAlternate
+        )))
+        await fulfillment(of: [cancelled], timeout: 1)
+        XCTAssertTrue(accessor.movedPositions.isEmpty)
+        XCTAssertTrue(accessor.resizedSizes.isEmpty)
+        XCTAssertTrue(accessor.setFrames.isEmpty)
+    }
+
+    private func pointerEvent(_ type: CGEventType, at point: CGPoint, flags: CGEventFlags) throws -> CGEvent {
+        let event = try XCTUnwrap(CGEvent(mouseEventSource: nil, mouseType: type, mouseCursorPosition: point, mouseButton: .left))
+        event.flags = flags
+        return event
+    }
+
     func testPointerCoordinatorPreviewsSnapAndCommitsOnlyOnMouseUp() {
         let accessor = TestWindowAccessor(target: testTarget())
         let previews = TestWindowControlPreviewRecorder()
@@ -628,6 +727,31 @@ final class WindowControlTests: XCTestCase {
         )
     }
 
+    func testFailedGestureDoesNotRetargetAnotherWindowAndKeepsFailureOnMouseUp() {
+        let accessor = TestWindowAccessor(target: nil)
+        let coordinator = WindowControlPointerCoordinator(windowAccessor: accessor)
+        let initial = WindowControlPointerSample(operation: .move, location: .zero)
+        let later = WindowControlPointerSample(operation: .move, location: CGPoint(x: 800, y: 600))
+        XCTAssertEqual(coordinator.process(initial), .targetUnavailable)
+        accessor.targetValue = testTarget()
+        XCTAssertEqual(coordinator.process(later), .targetUnavailable)
+        XCTAssertEqual(accessor.targetCount, 1)
+        XCTAssertTrue(accessor.movedPositions.isEmpty)
+        XCTAssertEqual(coordinator.finish(commitSnap: true), .targetUnavailable)
+
+        XCTAssertEqual(coordinator.process(initial), .tracking(.move))
+        accessor.acceptsUpdates = false
+        XCTAssertEqual(coordinator.process(later), .updateRejected(.move))
+        accessor.acceptsUpdates = true
+        XCTAssertEqual(coordinator.process(later), .updateRejected(.move))
+        XCTAssertEqual(accessor.targetCount, 2)
+        XCTAssertEqual(coordinator.finish(commitSnap: true), .updateRejected(.move))
+        XCTAssertTrue(accessor.setFrames.isEmpty)
+
+        XCTAssertEqual(coordinator.process(initial), .tracking(.move))
+        XCTAssertEqual(accessor.targetCount, 3)
+    }
+
     func testControllerStartsOffAndPersistsNonConflictingChords() {
         let suiteName = "window-control-\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName)!
@@ -724,6 +848,148 @@ final class WindowControlTests: XCTestCase {
         XCTAssertFalse(options.contains(.idleSystemSleepDisabled))
     }
 
+    func testHealthyWindowMonitorIsNotRestartedByHealthCheck() async {
+        let (controller, monitor, _) = makeRunningController()
+        defer { controller.stop() }
+
+        await controller.recoverMonitoringIfNeeded()
+
+        XCTAssertEqual(monitor.startCount, 1)
+        XCTAssertEqual(monitor.recoverCount, 0)
+        XCTAssertEqual(controller.runtimeStatus, .active)
+    }
+
+    func testDisabledWindowTapRecoversWithoutActivatingYorozu() async {
+        let (controller, monitor, _) = makeRunningController()
+        defer { controller.stop() }
+        monitor.interrupt()
+
+        await controller.recoverMonitoringIfNeeded()
+
+        XCTAssertEqual(monitor.recoverCount, 1)
+        XCTAssertEqual(monitor.recreateRequests, [false])
+        XCTAssertTrue(monitor.isRunning)
+        XCTAssertEqual(controller.runtimeStatus, .active)
+        XCTAssertEqual(controller.lastActivity, .monitorRecovered)
+    }
+
+    func testFailedWindowRecoveryRemainsUnavailableAndCanRetry() async {
+        let (controller, monitor, _) = makeRunningController()
+        defer { controller.stop() }
+        monitor.interrupt()
+        monitor.recoverySucceeds = false
+
+        await controller.recoverMonitoringIfNeeded()
+        XCTAssertEqual(controller.runtimeStatus, .unavailable)
+        XCTAssertFalse(monitor.isRunning)
+
+        monitor.recoverySucceeds = true
+        await controller.recoverMonitoringIfNeeded()
+        XCTAssertEqual(monitor.recoverCount, 2)
+        XCTAssertEqual(controller.runtimeStatus, .active)
+    }
+
+    func testRevokedWindowPermissionStopsMonitorBeforeRecovery() async {
+        let (controller, monitor, permissions) = makeRunningController()
+        defer { controller.stop() }
+        permissions.isAccessibilityGranted = false
+
+        await controller.recoverMonitoringIfNeeded()
+
+        XCTAssertEqual(monitor.recoverCount, 0)
+        XCTAssertFalse(monitor.isRunning)
+        XCTAssertEqual(controller.runtimeStatus, .permissionRequired)
+    }
+
+    func testPermissionRegrantRecoversWithoutForegroundAndRestoresBackgroundActivity() async {
+        let defaults = UserDefaults(suiteName: "window-control-\(UUID().uuidString)")!
+        let monitor = TestWindowControlMonitor()
+        let permissions = TestWindowControlPermissionProvider(isAccessibilityGranted: true)
+        let backgroundActivity = TestWindowControlBackgroundActivityManager()
+        let controller = WindowControlController(
+            defaults: defaults, monitor: monitor, permissionProvider: permissions,
+            backgroundActivityManager: backgroundActivity,
+            monitoringHealthInterval: .milliseconds(20)
+        )
+        controller.setChord([.option], for: .move)
+        controller.setChord([.option, .shift], for: .resize)
+        controller.isEnabled = true
+        controller.start()
+        defer { controller.stop() }
+
+        permissions.isAccessibilityGranted = false
+        await controller.recoverMonitoringIfNeeded()
+        XCTAssertFalse(monitor.isRunning)
+        XCTAssertFalse(backgroundActivity.isActive)
+        XCTAssertEqual(controller.runtimeStatus, .permissionRequired)
+
+        permissions.isAccessibilityGranted = true
+        let recovered = expectation(description: "Existing health task detects re-grant")
+        monitor.recoveryStarted = { recovered.fulfill() }
+        await fulfillment(of: [recovered], timeout: 1)
+        XCTAssertEqual(monitor.recoverCount, 1)
+        XCTAssertTrue(monitor.isRunning)
+        XCTAssertTrue(backgroundActivity.isActive)
+        XCTAssertEqual(controller.runtimeStatus, .active)
+    }
+
+    func testDisablingWindowControlDuringRecoveryCannotRestartIt() async {
+        let (controller, monitor, _) = makeRunningController()
+        defer { controller.stop() }
+        monitor.interrupt()
+        monitor.holdsRecovery = true
+        let started = expectation(description: "Recovery reached await")
+        monitor.recoveryStarted = { started.fulfill() }
+        let recovery = Task { await controller.recoverMonitoringIfNeeded() }
+        await fulfillment(of: [started], timeout: 1)
+
+        controller.isEnabled = false
+        monitor.completeRecovery()
+        await recovery.value
+
+        XCTAssertFalse(monitor.isRunning)
+        XCTAssertEqual(controller.runtimeStatus, .off)
+    }
+
+    func testWindowWakeAndSessionRecoveryObserversAreRemovedOnStop() async {
+        let notifications = NotificationCenter()
+        let (controller, monitor, _) = makeRunningController(notifications: notifications)
+        let recovered = expectation(description: "Wake and session recovered")
+        recovered.expectedFulfillmentCount = 2
+        monitor.recoveryStarted = { recovered.fulfill() }
+
+        notifications.post(name: NSWorkspace.didWakeNotification, object: nil)
+        await Task.yield()
+        notifications.post(name: NSWorkspace.sessionDidBecomeActiveNotification, object: nil)
+        await fulfillment(of: [recovered], timeout: 1)
+        XCTAssertEqual(monitor.recreateRequests, [true, true])
+
+        controller.stop()
+        notifications.post(name: NSWorkspace.didWakeNotification, object: nil)
+        await Task.yield()
+        XCTAssertEqual(monitor.recoverCount, 2)
+        XCTAssertFalse(monitor.isRunning)
+    }
+
+    private func makeRunningController(notifications: NotificationCenter? = nil) -> (
+        WindowControlController, TestWindowControlMonitor, TestWindowControlPermissionProvider
+    ) {
+        let defaults = UserDefaults(suiteName: "window-control-\(UUID().uuidString)")!
+        let monitor = TestWindowControlMonitor()
+        let permissions = TestWindowControlPermissionProvider(isAccessibilityGranted: true)
+        let controller = WindowControlController(
+            defaults: defaults,
+            monitor: monitor,
+            permissionProvider: permissions,
+            workspaceNotificationCenter: notifications
+        )
+        controller.setChord([.option], for: .move)
+        controller.setChord([.option, .shift], for: .resize)
+        controller.isEnabled = true
+        controller.start()
+        return (controller, monitor, permissions)
+    }
+
     private func testTarget() -> WindowControlTarget {
         WindowControlTarget(
             element: NSObject(),
@@ -740,6 +1006,12 @@ private final class TestWindowControlMonitor: WindowControlMonitoring {
     private(set) var startCount = 0
     private(set) var updateCount = 0
     private(set) var stopCount = 0
+    private(set) var recoverCount = 0
+    private(set) var recreateRequests: [Bool] = []
+    var recoverySucceeds = true
+    var holdsRecovery = false
+    var recoveryStarted: (() -> Void)?
+    private var pendingRecovery: CheckedContinuation<Void, Never>?
     private var activityHandler:
         (@MainActor @Sendable (WindowControlActivity) -> Void)?
 
@@ -767,11 +1039,35 @@ private final class TestWindowControlMonitor: WindowControlMonitoring {
         stopCount += 1
         isRunning = false
     }
+
+    func interrupt() { isRunning = false }
+
+    func recover(configuration: WindowControlConfiguration, recreate: Bool) async -> Bool {
+        recoverCount += 1
+        recreateRequests.append(recreate)
+        if holdsRecovery {
+            await withCheckedContinuation { continuation in
+                pendingRecovery = continuation
+                recoveryStarted?()
+            }
+        } else {
+            recoveryStarted?()
+        }
+        isRunning = recoverySucceeds
+        return recoverySucceeds
+    }
+
+    func completeRecovery() {
+        pendingRecovery?.resume()
+        pendingRecovery = nil
+    }
 }
 
 private final class TestWindowAccessor: WindowAccessing, @unchecked Sendable {
     var targetValue: WindowControlTarget?
     var acceptsUpdates = true
+    var targetLookupStarted: (@Sendable () -> Void)?
+    var targetLookupGate: DispatchSemaphore?
     private(set) var targetCount = 0
     private(set) var raiseCount = 0
     private(set) var movedPositions: [CGPoint] = []
@@ -787,6 +1083,8 @@ private final class TestWindowAccessor: WindowAccessing, @unchecked Sendable {
         operation: WindowControlOperation
     ) -> WindowControlTarget? {
         targetCount += 1
+        targetLookupStarted?()
+        if let targetLookupGate { _ = targetLookupGate.wait(timeout: .now() + 2) }
         return targetValue
     }
 

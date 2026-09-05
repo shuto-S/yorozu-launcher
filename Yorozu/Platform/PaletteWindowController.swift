@@ -66,8 +66,12 @@ enum PaletteKeyEventPolicy {
         route: PaletteRoute,
         isActionPanelPresented: Bool,
         isModalPresented: Bool = false,
-        isAIConversationPage: Bool = false
+        isAIConversationPage: Bool = false,
+        isRecordingModifierShortcut: Bool = false
     ) -> PaletteKeyEventAction {
+        // The recorder's local monitor owns Escape/Delete while recording.
+        // The palette monitor is installed first, so it must defer explicitly.
+        if isRecordingModifierShortcut { return .passThrough }
         let independentModifiers = modifiers.intersection(
             .deviceIndependentFlagsMask
         )
@@ -308,6 +312,7 @@ final class PaletteWindowController: NSWindowController, NSWindowDelegate {
     }
 
     func invalidate() {
+        WindowControlModifierCapture.cancelActiveRecording()
         NotificationCenter.default.removeObserver(
             self,
             name: NSApplication.didResignActiveNotification,
@@ -330,6 +335,7 @@ final class PaletteWindowController: NSWindowController, NSWindowDelegate {
     }
 
     func toggle(route: PaletteRoute = .root) {
+        WindowControlModifierCapture.cancelActiveRecording()
         guard let panel = window else { return }
         let startedAt = ProcessInfo.processInfo.systemUptime
         if panel.isVisible, viewModel.route == route {
@@ -354,6 +360,7 @@ final class PaletteWindowController: NSWindowController, NSWindowDelegate {
         route: PaletteRoute = .root,
         origin: PalettePresentationOrigin = .direct
     ) {
+        WindowControlModifierCapture.cancelActiveRecording()
         guard let panel = window else { return }
         let startedAt = ProcessInfo.processInfo.systemUptime
         if !panel.isVisible {
@@ -393,6 +400,7 @@ final class PaletteWindowController: NSWindowController, NSWindowDelegate {
     }
 
     func hide(restorePreviousApplication: Bool) {
+        WindowControlModifierCapture.cancelActiveRecording()
         viewModel.dismissActionPanel(restoreSearchFocus: false)
         viewModel.paletteDidHide()
         window?.orderOut(nil)
@@ -557,6 +565,7 @@ final class PaletteWindowController: NSWindowController, NSWindowDelegate {
     #endif
 
     func windowDidResignKey(_ notification: Notification) {
+        WindowControlModifierCapture.cancelActiveRecording()
         guard shouldHideWhenInactive,
               window?.isVisible == true,
               window?.attachedSheet == nil else {
@@ -565,8 +574,13 @@ final class PaletteWindowController: NSWindowController, NSWindowDelegate {
         hide(restorePreviousApplication: false)
     }
 
+    func windowWillClose(_ notification: Notification) {
+        WindowControlModifierCapture.cancelActiveRecording()
+    }
+
     @objc
     private func applicationDidResignActive(_ notification: Notification) {
+        WindowControlModifierCapture.cancelActiveRecording()
         guard shouldHideWhenInactive, window?.isVisible == true else {
             return
         }
@@ -636,9 +650,19 @@ final class PaletteWindowController: NSWindowController, NSWindowDelegate {
             guard let self else { return .writeFailedAndRestoreFailed }
             return await self.pasteCoordinator.copy(.text(text))
         }
+        for chat in viewModel.aiChatViewModelStore.orderedViewModels {
+            chat.copyText = { [weak self] text in
+                guard let self else { return .writeFailedAndRestoreFailed }
+                return await self.pasteCoordinator.copy(.text(text))
+            }
+        }
         viewModel.pasteContent = { [weak self] content, completion in
             guard let self else {
                 completion(.failed)
+                return
+            }
+            guard !self.pasteCoordinator.isOperationInProgress else {
+                completion(.busy)
                 return
             }
             let targetApplication = self.previousApplication
@@ -720,7 +744,8 @@ final class PaletteWindowController: NSWindowController, NSWindowDelegate {
                 isActionPanelPresented: self.viewModel.isActionPanelPresented,
                 isModalPresented: self.viewModel.isModalPresented,
                 isAIConversationPage: self.viewModel.route.isAI
-                    && !self.viewModel.aiChatViewModel.isListVisible
+                    && !self.viewModel.aiChatViewModel.isListVisible,
+                isRecordingModifierShortcut: WindowControlModifierCapture.isAnyRecording
             )
 
             switch action {
