@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import Sparkle
 
 struct SoftwareUpdateConfiguration: Equatable, Sendable {
@@ -44,22 +45,29 @@ enum SoftwareUpdatePolicy {
 }
 
 @MainActor
-final class AppUpdateController: NSObject {
+final class AppUpdateController: NSObject, ObservableObject {
     static let latestReleaseURL = URL(
         string: "https://github.com/shuto-S/yorozu-launcher/releases/latest"
     )!
 
-    private let updaterController: SPUStandardUpdaterController?
+    let isUpdaterConfigured: Bool
+    @Published private(set) var canCheckForUpdates: Bool
+    private let currentAvailability: @MainActor () -> Bool
+    private let performUpdateCheck: @MainActor () -> Void
+    private let onWillCheckForUpdates: @MainActor () -> Void
+    private var availabilityObservation: NSKeyValueObservation?
 
-    init(
+    convenience init(
         isDebugBuild: Bool,
         isUITesting: Bool,
-        bundle: Bundle = .main
+        bundle: Bundle = .main,
+        onWillCheckForUpdates: @escaping @MainActor () -> Void = {}
     ) {
         let configuration = SoftwareUpdateConfiguration(
             feedURLString: bundle.object(forInfoDictionaryKey: "SUFeedURL") as? String,
             publicEDKey: bundle.object(forInfoDictionaryKey: "SUPublicEDKey") as? String
         )
+        let updaterController: SPUStandardUpdaterController?
         if SoftwareUpdatePolicy.allowsUpdater(
             isDebugBuild: isDebugBuild,
             isUITesting: isUITesting,
@@ -73,18 +81,49 @@ final class AppUpdateController: NSObject {
         } else {
             updaterController = nil
         }
-        super.init()
+        self.init(
+            availabilitySource: updaterController?.updater,
+            availabilityKeyPath: \SPUUpdater.canCheckForUpdates,
+            performUpdateCheck: { updaterController?.checkForUpdates(nil) },
+            onWillCheckForUpdates: onWillCheckForUpdates
+        )
     }
 
-    var canCheckForUpdates: Bool {
-        updaterController?.updater.canCheckForUpdates == true
+    // Keeping the observable source injectable lets tests drive Sparkle's KVO
+    // contract without starting its network or installation services.
+    init<Source: NSObject>(
+        availabilitySource: Source?,
+        availabilityKeyPath: KeyPath<Source, Bool>,
+        performUpdateCheck: @escaping @MainActor () -> Void,
+        onWillCheckForUpdates: @escaping @MainActor () -> Void = {}
+    ) {
+        isUpdaterConfigured = availabilitySource != nil
+        canCheckForUpdates = availabilitySource?[keyPath: availabilityKeyPath] == true
+        currentAvailability = {
+            availabilitySource?[keyPath: availabilityKeyPath] == true
+        }
+        self.performUpdateCheck = performUpdateCheck
+        self.onWillCheckForUpdates = onWillCheckForUpdates
+        super.init()
+        availabilityObservation = availabilitySource?.observe(
+            availabilityKeyPath,
+            options: [.new]
+        ) { [weak self] _, _ in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                // Coalesce queued changes to the live value so delayed KVO
+                // delivery cannot restore an obsolete availability state.
+                self.canCheckForUpdates = self.currentAvailability()
+            }
+        }
     }
 
     func checkForUpdates() {
-        guard let updaterController, updaterController.updater.canCheckForUpdates else {
-            return
-        }
-        updaterController.checkForUpdates(nil)
+        // KVO delivery to SwiftUI may still be queued. Gate on the current
+        // updater state before hiding the palette or asking Sparkle to present UI.
+        guard isUpdaterConfigured, currentAvailability() else { return }
+        onWillCheckForUpdates()
+        performUpdateCheck()
     }
 
     func openLatestRelease() {

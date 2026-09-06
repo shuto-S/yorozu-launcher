@@ -1004,7 +1004,7 @@ private struct AIProviderConnectionSettingsView: View {
 
 private struct GeneralSettingsView: View {
     var viewModel: LauncherViewModel
-    var appUpdateController: AppUpdateController?
+    @ObservedObject private var appUpdateController: AppUpdateController
     @ObservedObject private var inputModeController: CommandInputModeController
     private var launchAtLoginController: LaunchAtLoginController
 
@@ -1013,7 +1013,10 @@ private struct GeneralSettingsView: View {
         appUpdateController: AppUpdateController?
     ) {
         self.viewModel = viewModel
-        self.appUpdateController = appUpdateController
+        self.appUpdateController = appUpdateController ?? AppUpdateController(
+            isDebugBuild: true,
+            isUITesting: true
+        )
         inputModeController = viewModel.commandInputModeController
         launchAtLoginController = viewModel.launchAtLoginController
     }
@@ -1298,26 +1301,20 @@ private struct GeneralSettingsView: View {
 
                 HStack {
                     Button {
-                        appUpdateController?.checkForUpdates()
+                        appUpdateController.checkForUpdates()
                     } label: {
                         Label(
                             String(localized: "menu.check-for-updates"),
                             systemImage: "arrow.down.circle"
                         )
                     }
-                    .disabled(appUpdateController?.canCheckForUpdates != true)
+                    .disabled(!appUpdateController.canCheckForUpdates)
                     .accessibilityIdentifier(
                         "settings.software-update.check"
                     )
 
                     Button {
-                        if let appUpdateController {
-                            appUpdateController.openLatestRelease()
-                        } else {
-                            NSWorkspace.shared.open(
-                                AppUpdateController.latestReleaseURL
-                            )
-                        }
+                        appUpdateController.openLatestRelease()
                     } label: {
                         Label(
                             String(localized: "menu.view-latest-release"),
@@ -1329,8 +1326,12 @@ private struct GeneralSettingsView: View {
                     )
                 }
 
-                if appUpdateController?.canCheckForUpdates != true {
+                if !appUpdateController.isUpdaterConfigured {
                     Text("Update checks are available in signed Release builds.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else if !appUpdateController.canCheckForUpdates {
+                    Text("An update check is already in progress.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }

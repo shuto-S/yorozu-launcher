@@ -1,7 +1,7 @@
 import AppKit
 
 @MainActor
-final class MenuBarController: NSObject, NSMenuDelegate {
+final class MenuBarController: NSObject, NSMenuDelegate, NSMenuItemValidation {
     private let statusItem: NSStatusItem
     private var keepAwakeStatusItem: NSStatusItem?
     private let viewModel: LauncherViewModel
@@ -52,6 +52,13 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         menu.delegate = self
         rebuildMainMenu(menu)
         return menu
+    }
+
+    func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        if menuItem.action == #selector(checkForUpdates) {
+            return appUpdateController?.canCheckForUpdates == true
+        }
+        return true
     }
 
     private func rebuildMainMenu(_ menu: NSMenu) {

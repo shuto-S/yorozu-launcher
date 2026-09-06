@@ -1213,6 +1213,32 @@ final class LauncherViewModelTests: XCTestCase {
         withExtendedLifetime(controller) {}
     }
 
+    func testMenuValidationKeepsUnavailableUpdateChecksDisabled() throws {
+        let fixture = try makeFixture(launcherShouldFail: false)
+        let controller = MenuBarController(
+            viewModel: fixture.viewModel,
+            openPalette: {},
+            openSettings: {}
+        )
+        let menu = NSMenu()
+        let updateItem = NSMenuItem(
+            title: "Check for Updates",
+            action: NSSelectorFromString("checkForUpdates"),
+            keyEquivalent: ""
+        )
+        updateItem.target = controller
+        menu.addItem(updateItem)
+
+        menu.update()
+
+        XCTAssertFalse(updateItem.isEnabled)
+        XCTAssertTrue(controller.validateMenuItem(NSMenuItem(
+            title: "Settings",
+            action: #selector(MenuBarController.showSettings),
+            keyEquivalent: ""
+        )))
+    }
+
     func testFeatureOpenedFromRootReturnsToRootOnEscape() async throws {
         let fixture = try makeFixture(launcherShouldFail: false)
         fixture.viewModel.prepareForPresentation(route: .root, origin: .direct)

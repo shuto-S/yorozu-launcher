@@ -640,10 +640,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // appears so normal launcher startup stays on its existing hot path.
         initialStatus: .notRegistered
     )
-    private lazy var appUpdateController = AppUpdateController(
+    private lazy var appUpdateController: AppUpdateController = AppUpdateController(
         isDebugBuild: Self.isDebugBuild,
         isUITesting: ProcessInfo.processInfo.arguments.contains("--ui-testing")
-            || ProcessInfo.processInfo.arguments.contains("--ui-testing-settings")
+            || ProcessInfo.processInfo.arguments.contains("--ui-testing-settings"),
+        onWillCheckForUpdates: { [weak self] in
+            // Sparkle uses normal windows; the floating Settings panel would cover them.
+            self?.paletteController.hide(restorePreviousApplication: false)
+            NSApp.activate()
+        }
     )
 
     lazy var viewModel = LauncherViewModel(

@@ -31,6 +31,10 @@ Sparkle is linked into the app but its updater is never started in Debug or UI-t
 builds. Only a non-test Release build with a valid HTTPS `SUFeedURL` and non-empty
 `SUPublicEDKey` starts the scheduler. Normal Root Search does not perform an update check.
 
+The Settings update button observes Sparkle's availability changes. User-initiated update
+checks dismiss the floating palette before presenting Sparkle's windows, so the update
+dialog remains accessible from both Settings and the menu bar.
+
 ## Local setup
 
 The shared Debug configuration builds ad hoc:
