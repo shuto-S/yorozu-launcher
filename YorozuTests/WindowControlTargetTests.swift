@@ -374,6 +374,43 @@ final class WindowControlEventPipelineTests: XCTestCase {
         XCTAssertEqual(accessor.frames, [CGRect(x: 0, y: 25, width: 720, height: 835)])
     }
 
+    func testRemappedMotionPreviewsSnapAndOnlyMouseUpCommits() async throws {
+        let accessor = EventPipelineWindowAccessor()
+        let previewed = expectation(description: "Remapped motion previews snap")
+        let finished = expectation(description: "Remapped motion snap completed")
+        let worker = makeWorker(accessor: accessor, isPrimaryButtonPressed: { true }, preview: { destination in
+            if destination != nil { previewed.fulfill() }
+        }) { activity in
+            if activity == .listening { finished.fulfill() }
+        }
+        XCTAssertTrue(worker.handle(type: .leftMouseDown, event: try event(.leftMouseDown, x: 200, y: 200, flags: moveFlags)))
+        XCTAssertTrue(worker.handle(type: .mouseMoved, event: try event(.mouseMoved, x: 2, y: 250, flags: moveFlags)))
+        await fulfillment(of: [previewed], timeout: 2)
+        XCTAssertEqual(accessor.positions.last, CGPoint(x: -98, y: 150))
+        XCTAssertTrue(accessor.frames.isEmpty)
+        XCTAssertTrue(accessor.sizes.isEmpty)
+        XCTAssertTrue(worker.handle(type: .leftMouseUp, event: try event(.leftMouseUp, x: 2, y: 250, flags: moveFlags)))
+        await fulfillment(of: [finished], timeout: 2)
+        XCTAssertEqual(accessor.frames, [CGRect(x: 0, y: 25, width: 720, height: 835)])
+        XCTAssertFalse(worker.handle(type: .mouseMoved, event: try event(.mouseMoved, x: 500, y: 400, flags: moveFlags)))
+        XCTAssertEqual(accessor.targetCount, 1)
+    }
+
+    func testChangingChordCancelsRemappedMotionWithoutRetargeting() async throws {
+        let accessor = EventPipelineWindowAccessor()
+        let cancelled = expectation(description: "Remapped motion cancelled")
+        let worker = makeWorker(accessor: accessor, isPrimaryButtonPressed: { true }) { activity in
+            if activity == .listening { cancelled.fulfill() }
+        }
+        XCTAssertTrue(worker.handle(type: .leftMouseDown, event: try event(.leftMouseDown, x: 200, y: 200, flags: moveFlags)))
+        XCTAssertTrue(worker.handle(type: .mouseMoved, event: try event(.mouseMoved, x: 2, y: 250, flags: resizeFlags)))
+        XCTAssertTrue(worker.handle(type: .leftMouseUp, event: try event(.leftMouseUp, x: 2, y: 250, flags: resizeFlags)))
+        await fulfillment(of: [cancelled], timeout: 2)
+        XCTAssertTrue(accessor.positions.isEmpty)
+        XCTAssertTrue(accessor.sizes.isEmpty)
+        XCTAssertTrue(accessor.frames.isEmpty)
+    }
+
     func testStopDuringSlowTargetLookupDoesNotRaiseOrUpdateWindow() async throws {
         for flags in [moveFlags, resizeFlags] {
             let started = expectation(description: "AX lookup started")
@@ -442,6 +479,7 @@ final class WindowControlEventPipelineTests: XCTestCase {
 
     private func makeWorker(
         accessor: any WindowAccessing,
+        isPrimaryButtonPressed: @escaping @Sendable () -> Bool = { false },
         preview: @escaping @MainActor @Sendable (WindowControlSnapDestination?) -> Void = { _ in },
         activity: @escaping @MainActor @Sendable (WindowControlActivity) -> Void
     ) -> WindowControlEventTapWorker {
@@ -451,6 +489,7 @@ final class WindowControlEventPipelineTests: XCTestCase {
             configuration: WindowControlConfiguration(moveChord: [.option], resizeChord: [.option, .shift]),
             windowAccessor: accessor,
             screenProvider: EventPipelineScreenProvider(),
+            isPrimaryButtonPressed: isPrimaryButtonPressed,
             previewHandler: preview,
             activityHandler: activity
         )

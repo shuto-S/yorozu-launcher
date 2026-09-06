@@ -428,6 +428,104 @@ final class WindowControlTests: XCTestCase {
         XCTAssertTrue(accessor.setFrames.isEmpty)
     }
 
+    func testButtonHeldMouseMovedIsHandledWithinAnExistingDrag() async throws {
+        for operation in WindowControlOperation.allCases {
+            let accessor = TestWindowAccessor(target: testTarget())
+            let finished = expectation(description: "Remapped \(operation) completed")
+            let worker = WindowControlEventTapWorker(
+                configuration: .init(moveChord: [.option], resizeChord: [.option, .shift]),
+                windowAccessor: accessor,
+                screenProvider: EmptyWindowControlScreenProvider(),
+                isPrimaryButtonPressed: { true },
+                previewHandler: { _ in },
+                activityHandler: { if $0 == .listening { finished.fulfill() } }
+            )
+            let flags: CGEventFlags = operation == .move ? .maskAlternate : [.maskAlternate, .maskShift]
+            XCTAssertTrue(worker.handle(type: .leftMouseDown, event: try pointerEvent(
+                .leftMouseDown, at: CGPoint(x: 200, y: 200), flags: flags
+            )))
+            XCTAssertTrue(worker.handle(type: .mouseMoved, event: try pointerEvent(
+                .mouseMoved, at: CGPoint(x: 240, y: 230), flags: flags
+            )), "Button-held motion must not disappear when delivered as mouseMoved")
+            XCTAssertTrue(worker.handle(type: .leftMouseUp, event: try pointerEvent(
+                .leftMouseUp, at: CGPoint(x: 240, y: 230), flags: flags
+            )))
+            await fulfillment(of: [finished], timeout: 1)
+            if operation == .move {
+                XCTAssertEqual(accessor.movedPositions.last, CGPoint(x: 140, y: 130))
+                XCTAssertTrue(accessor.resizedSizes.isEmpty)
+            } else {
+                XCTAssertEqual(accessor.resizedSizes.last, CGSize(width: 440, height: 330))
+                XCTAssertTrue(accessor.movedPositions.isEmpty)
+            }
+        }
+    }
+
+    func testWindowControlEventMaskIncludesRemappedMotionButNotKeyboardText() {
+        let mask = WindowControlEventTapConfiguration.eventMask
+        for type in [CGEventType.leftMouseDown, .leftMouseDragged, .mouseMoved, .leftMouseUp, .flagsChanged] {
+            XCTAssertNotEqual(mask & (CGEventMask(1) << type.rawValue), 0)
+        }
+        for type in [CGEventType.keyDown, .keyUp, .scrollWheel, .rightMouseDown, .otherMouseDragged] {
+            XCTAssertEqual(mask & (CGEventMask(1) << type.rawValue), 0)
+        }
+    }
+
+    func testMouseMovedWithoutAnOwnedDragNeverChecksButtonsOrAcquiresWindow() throws {
+        let accessor = TestWindowAccessor(target: testTarget())
+        let worker = WindowControlEventTapWorker(
+            configuration: .init(moveChord: [.option], resizeChord: [.option, .shift]),
+            windowAccessor: accessor,
+            screenProvider: EmptyWindowControlScreenProvider(),
+            isPrimaryButtonPressed: {
+                XCTFail("Ordinary pointer motion must return before querying button state")
+                return true
+            },
+            previewHandler: { _ in },
+            activityHandler: { _ in }
+        )
+        for flags: CGEventFlags in [[], .maskAlternate, [.maskAlternate, .maskShift], .maskCommand] {
+            XCTAssertFalse(worker.handle(type: .mouseMoved, event: try pointerEvent(
+                .mouseMoved, at: CGPoint(x: 240, y: 230), flags: flags
+            )))
+        }
+        XCTAssertEqual(accessor.targetCount, 0)
+    }
+
+    func testMouseMovedAfterMissedReleaseCancelsWithoutSnappingOrSwallowingNextClick() async throws {
+        let accessor = TestWindowAccessor(target: testTarget())
+        let acquired = expectation(description: "Drag target acquired")
+        let cancelled = expectation(description: "Missed release cancelled")
+        let worker = WindowControlEventTapWorker(
+            configuration: .init(moveChord: [.option], resizeChord: [.option, .shift]),
+            windowAccessor: accessor,
+            screenProvider: EmptyWindowControlScreenProvider(),
+            isPrimaryButtonPressed: { false },
+            previewHandler: { _ in },
+            activityHandler: {
+                if $0 == .tracking(.move) { acquired.fulfill() }
+                if $0 == .listening { cancelled.fulfill() }
+            }
+        )
+        XCTAssertTrue(worker.handle(type: .leftMouseDown, event: try pointerEvent(
+            .leftMouseDown, at: CGPoint(x: 200, y: 200), flags: .maskAlternate
+        )))
+        await fulfillment(of: [acquired], timeout: 1)
+        XCTAssertFalse(worker.handle(type: .mouseMoved, event: try pointerEvent(
+            .mouseMoved, at: CGPoint(x: 0, y: 230), flags: .maskAlternate
+        )))
+        await fulfillment(of: [cancelled], timeout: 1)
+        for type in [CGEventType.leftMouseUp, .leftMouseDown, .leftMouseDragged, .leftMouseUp] {
+            XCTAssertFalse(worker.handle(type: type, event: try pointerEvent(
+                type, at: CGPoint(x: 300, y: 300), flags: []
+            )))
+        }
+        XCTAssertEqual(accessor.targetCount, 1)
+        XCTAssertTrue(accessor.movedPositions.isEmpty)
+        XCTAssertTrue(accessor.resizedSizes.isEmpty)
+        XCTAssertTrue(accessor.setFrames.isEmpty)
+    }
+
     private func pointerEvent(_ type: CGEventType, at point: CGPoint, flags: CGEventFlags) throws -> CGEvent {
         let event = try XCTUnwrap(CGEvent(mouseEventSource: nil, mouseType: type, mouseCursorPosition: point, mouseButton: .left))
         event.flags = flags

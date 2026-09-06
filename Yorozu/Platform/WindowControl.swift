@@ -1271,6 +1271,15 @@ enum WindowControlEventTapConfiguration {
     // supported filtering point for a regular Accessibility-authorized app.
     static let location: CGEventTapLocation = .cgSessionEventTap
     static let placement: CGEventTapPlacement = .tailAppendEventTap
+    static let eventMask: CGEventMask = [
+        CGEventType.flagsChanged,
+        .leftMouseDown,
+        .leftMouseDragged,
+        .mouseMoved,
+        .leftMouseUp,
+    ].reduce(CGEventMask(0)) {
+        $0 | (CGEventMask(1) << CGEventMask($1.rawValue))
+    }
 }
 
 struct WindowControlPrimaryDragSession: Equatable, Sendable {
@@ -1347,6 +1356,7 @@ final class WindowControlEventTapWorker: @unchecked Sendable {
 
     private let lock = NSLock()
     private let pointerProcessor: WindowControlPointerProcessor
+    private let isPrimaryButtonPressed: @Sendable () -> Bool
     private var configuration: WindowControlConfiguration
     private var runLoop: CFRunLoop?
     private var eventTap: CFMachPort?
@@ -1359,12 +1369,17 @@ final class WindowControlEventTapWorker: @unchecked Sendable {
         configuration: WindowControlConfiguration,
         windowAccessor: any WindowAccessing,
         screenProvider: any WindowControlScreenProviding,
+        isPrimaryButtonPressed: @escaping @Sendable () -> Bool = {
+            CGEventSource.buttonState(.combinedSessionState, button: .left)
+                || CGEventSource.buttonState(.hidSystemState, button: .left)
+        },
         previewHandler: @escaping @MainActor @Sendable (
             WindowControlSnapDestination?
         ) -> Void,
         activityHandler: @escaping @MainActor @Sendable (WindowControlActivity) -> Void
     ) {
         self.configuration = configuration
+        self.isPrimaryButtonPressed = isPrimaryButtonPressed
         pointerProcessor = WindowControlPointerProcessor(
             windowAccessor: windowAccessor,
             screenProvider: screenProvider,
@@ -1457,15 +1472,6 @@ final class WindowControlEventTapWorker: @unchecked Sendable {
         result: StartResult,
         semaphore: DispatchSemaphore
     ) {
-        let eventTypes: [CGEventType] = [
-            .flagsChanged,
-            .leftMouseDown,
-            .leftMouseDragged,
-            .leftMouseUp,
-        ]
-        let mask = eventTypes.reduce(CGEventMask(0)) {
-            $0 | (CGEventMask(1) << CGEventMask($1.rawValue))
-        }
         let userInfo = Unmanaged.passUnretained(self).toOpaque()
         guard let eventTap = CGEvent.tapCreate(
             tap: WindowControlEventTapConfiguration.location,
@@ -1473,7 +1479,7 @@ final class WindowControlEventTapWorker: @unchecked Sendable {
             // of the chain. Let it cancel its candidate before we consume a drag.
             place: WindowControlEventTapConfiguration.placement,
             options: .defaultTap,
-            eventsOfInterest: mask,
+            eventsOfInterest: WindowControlEventTapConfiguration.eventMask,
             callback: { _, type, event, userInfo in
                 guard let userInfo else {
                     return Unmanaged.passUnretained(event)
@@ -1579,8 +1585,17 @@ final class WindowControlEventTapWorker: @unchecked Sendable {
             )
             return true
 
-        case .leftMouseDragged:
+        case .leftMouseDragged, .mouseMoved:
             guard dragSession.isConsuming else { return false }
+            // Some virtual pointing devices deliver button-held motion as
+            // mouseMoved. Admit it only after our own matching mouse-down and
+            // while a button is still held. A missed release must not turn
+            // ordinary pointer motion into window movement or commit a snap.
+            if type == .mouseMoved, !isPrimaryButtonPressed() {
+                dragSession.reset()
+                pointerProcessor.reset()
+                return false
+            }
             guard !dragSession.isCancelled,
                   let operation = dragSession.operation,
                   configuration.operation(for: event.flags) == operation else {
