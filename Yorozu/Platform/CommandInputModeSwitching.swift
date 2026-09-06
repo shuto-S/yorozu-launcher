@@ -195,6 +195,9 @@ final class SystemCommandInputSourceSwitcher: CommandInputSourceSwitching {
     func switchInputMode(
         _ action: CommandInputModeAction
     ) async -> CommandInputModeSwitchReport {
+        guard !Task.isCancelled else {
+            return report(action: action, result: .cancelled, before: nil, after: nil)
+        }
         let sourceIDBefore = system.currentSourceID()
         let candidates = system.candidates()
         let targetSourceID = CommandInputSourceResolver.sourceID(
@@ -220,6 +223,14 @@ final class SystemCommandInputSourceSwitcher: CommandInputSourceSwitching {
                 result: .alreadySelected(sourceID: sourceIDBefore ?? targetSourceID),
                 before: sourceIDBefore,
                 after: sourceIDBefore
+            )
+        }
+        // A stopped tap may cancel a switch queued for the main actor. Never
+        // send its key pair after monitoring has been suspended.
+        guard !Task.isCancelled else {
+            return report(
+                action: action, result: .cancelled,
+                before: sourceIDBefore, after: sourceIDBefore
             )
         }
         guard eventPoster.post(action) else {
@@ -635,6 +646,7 @@ protocol CommandInputModeMonitoring: AnyObject {
 protocol CommandInputModePermissionProviding: AnyObject {
     var isAccessibilityGranted: Bool { get }
     var authorizationSnapshot: CommandInputModeAuthorizationSnapshot { get }
+    var isSystemSettingsActive: Bool { get }
 
     func requestAccessibilityAccess()
     func openAccessibilitySettings()
@@ -644,6 +656,8 @@ protocol CommandInputModePermissionProviding: AnyObject {
 }
 
 extension CommandInputModePermissionProviding {
+    var isSystemSettingsActive: Bool { false }
+
     var authorizationSnapshot: CommandInputModeAuthorizationSnapshot {
         CommandInputModeAuthorizationSnapshot(
             accessibilityGranted: isAccessibilityGranted,
@@ -727,6 +741,10 @@ final class NoOpCommandInputModeBackgroundActivityManager:
 
 @MainActor
 final class SystemCommandInputModePermissionProvider: CommandInputModePermissionProviding {
+    var isSystemSettingsActive: Bool {
+        NSWorkspace.shared.frontmostApplication?.bundleIdentifier == "com.apple.systempreferences"
+    }
+
     var isAccessibilityGranted: Bool {
         AXIsProcessTrusted()
     }
@@ -837,7 +855,7 @@ final class SystemCommandInputModeCodeSigningStatusProvider:
     }
 }
 
-private struct CommandInputModeMonitorDiagnostics: Sendable {
+struct CommandInputModeMonitorDiagnostics: Sendable {
     let sequence: UInt64
     let status: CommandInputModeMonitorStatus
     let lastCommandEventAt: Date?
@@ -846,7 +864,7 @@ private struct CommandInputModeMonitorDiagnostics: Sendable {
     let lastSwitchReport: CommandInputModeSwitchReport?
 }
 
-private final class CommandInputModeEventTapWorker: @unchecked Sendable {
+final class CommandInputModeEventTapWorker: @unchecked Sendable {
     private final class StartResult: @unchecked Sendable {
         private let lock = NSLock()
         private var value: Bool?
@@ -979,11 +997,21 @@ private final class CommandInputModeEventTapWorker: @unchecked Sendable {
         diagnosticsSequence &+= 1
         let diagnostics = makeDiagnosticsLocked()
         let runLoop = runLoop
+        let eventTap = eventTap
         lock.unlock()
 
         switchTask?.cancel()
+        // Detach from the system input path even if the worker run loop is busy.
+        // Invalidation also prevents a racing startup from enabling this port again.
+        if let eventTap {
+            CGEvent.tapEnable(tap: eventTap, enable: false)
+            CFMachPortInvalidate(eventTap)
+        }
         diagnosticsHandler(diagnostics)
         if let runLoop {
+            CFRunLoopPerformBlock(runLoop, CFRunLoopMode.commonModes.rawValue) {
+                CFRunLoopStop(runLoop)
+            }
             CFRunLoopStop(runLoop)
             CFRunLoopWakeUp(runLoop)
         }
@@ -991,44 +1019,6 @@ private final class CommandInputModeEventTapWorker: @unchecked Sendable {
 
     func switchForTesting(_ action: CommandInputModeAction) {
         beginSwitch(action)
-    }
-
-    func reenableIfPossible() -> Bool {
-        lock.lock()
-        guard !stopRequested,
-              let eventTap,
-              let runLoop,
-              CFMachPortIsValid(eventTap) else {
-            lock.unlock()
-            return false
-        }
-        lock.unlock()
-
-        CGEvent.tapEnable(tap: eventTap, enable: true)
-        guard CGEvent.tapIsEnabled(tap: eventTap) else { return false }
-
-        CFRunLoopPerformBlock(
-            runLoop,
-            CFRunLoopMode.commonModes.rawValue as CFString
-        ) { [weak self] in
-            self?.stateMachine.synchronizePressedCommands(
-                Self.currentlyPressedCommandSides()
-            )
-        }
-        CFRunLoopWakeUp(runLoop)
-
-        lock.lock()
-        guard !stopRequested else {
-            lock.unlock()
-            return false
-        }
-        running = true
-        status = .running
-        diagnosticsSequence &+= 1
-        let diagnostics = makeDiagnosticsLocked()
-        lock.unlock()
-        diagnosticsHandler(diagnostics)
-        return true
     }
 
     private func runEventTap(
@@ -1094,7 +1084,8 @@ private final class CommandInputModeEventTapWorker: @unchecked Sendable {
         lock.unlock()
 
         CFRunLoopAddSource(currentRunLoop, source, .commonModes)
-        CGEvent.tapEnable(tap: eventTap, enable: true)
+        // tapCreate enables the port. Do not re-enable it if stop invalidated
+        // the port while this run-loop source was being installed.
         stateMachine.synchronizePressedCommands(
             Self.currentlyPressedCommandSides()
         )
@@ -1151,10 +1142,9 @@ private final class CommandInputModeEventTapWorker: @unchecked Sendable {
         semaphore.signal()
     }
 
-    private func handle(type: CGEventType, event: CGEvent) {
+    func handle(type: CGEventType, event: CGEvent) {
         lock.lock()
         let shouldIgnore = stopRequested
-        let currentEventTap = eventTap
         lock.unlock()
         guard !shouldIgnore else { return }
 
@@ -1183,22 +1173,9 @@ private final class CommandInputModeEventTapWorker: @unchecked Sendable {
             stateMachine.handleMouseActivity()
         case .tapDisabledByTimeout, .tapDisabledByUserInput:
             stateMachine.reset()
-            publishDiagnostics {
-                status = .temporarilyDisabled
-            }
-            if let currentEventTap {
-                CGEvent.tapEnable(tap: currentEventTap, enable: true)
-                let recovered = CGEvent.tapIsEnabled(tap: currentEventTap)
-                lock.lock()
-                running = recovered
-                lock.unlock()
-                publishDiagnostics {
-                    status = recovered ? .running : .temporarilyDisabled
-                }
-            }
-            stateMachine.synchronizePressedCommands(
-                Self.currentlyPressedCommandSides()
-            )
+            // Permission may have been revoked. Only the controller may recover,
+            // after a fresh authorization check outside the input callback.
+            stop()
         default:
             stateMachine.reset()
         }
@@ -1308,6 +1285,7 @@ private final class CommandInputModeEventTapWorker: @unchecked Sendable {
 
 @MainActor
 final class CommandInputModeMonitor: CommandInputModeMonitoring {
+    private var monitoringRevision: UInt64 = 0
     private let inputSourceSwitcher: any CommandInputSourceSwitching
     private lazy var worker = CommandInputModeEventTapWorker(
         inputSourceSwitcher: inputSourceSwitcher
@@ -1340,17 +1318,18 @@ final class CommandInputModeMonitor: CommandInputModeMonitoring {
     }
 
     func stop() {
+        monitoringRevision &+= 1
         worker.stop()
         apply(worker.diagnostics)
     }
 
     func recover(recreate: Bool) async -> Bool {
-        if !recreate, worker.reenableIfPossible() {
-            apply(worker.diagnostics)
+        if !recreate, worker.isRunning {
             return true
         }
 
-        worker.stop()
+        stop()
+        let revision = monitoringRevision
         for _ in 0 ..< 50 {
             guard !worker.isStopped else { break }
             do {
@@ -1360,7 +1339,7 @@ final class CommandInputModeMonitor: CommandInputModeMonitoring {
                 return false
             }
         }
-        guard worker.isStopped else {
+        guard worker.isStopped, monitoringRevision == revision, !Task.isCancelled else {
             apply(worker.diagnostics)
             return false
         }
@@ -1394,6 +1373,7 @@ final class CommandInputModeController: ObservableObject {
     enum RuntimeStatus: Equatable {
         case off
         case active
+        case pausedForSystemSettings
         case permissionRequired
         case unavailable
 
@@ -1403,6 +1383,8 @@ final class CommandInputModeController: ObservableObject {
                 "Off"
             case .active:
                 "Active"
+            case .pausedForSystemSettings:
+                "Paused in System Settings"
             case .permissionRequired:
                 "Permission Required"
             case .unavailable:
@@ -1445,10 +1427,16 @@ final class CommandInputModeController: ObservableObject {
     private let inputSourceStatusProvider:
         any CommandInputSourceStatusProviding
     private let workspaceNotificationCenter: NotificationCenter?
+    private let monitoringHealthInterval: Duration
     private var hasStarted = false
     private var monitoringHealthTask: Task<Void, Never>?
     private var workspaceRecoveryTokens: [any NSObjectProtocol] = []
     private var isRecoveringMonitor = false
+    private var systemSettingsActivationPending = false
+
+    private var shouldSuspendForSystemSettings: Bool {
+        systemSettingsActivationPending || permissionProvider.isSystemSettingsActive
+    }
 
     init(
         defaults: UserDefaults,
@@ -1462,7 +1450,8 @@ final class CommandInputModeController: ObservableObject {
         inputSourceStatusProvider:
             any CommandInputSourceStatusProviding =
             DisabledCommandInputSourceStatusProvider(),
-        workspaceNotificationCenter: NotificationCenter? = nil
+        workspaceNotificationCenter: NotificationCenter? = nil,
+        monitoringHealthInterval: Duration = .seconds(5)
     ) {
         self.defaults = defaults
         self.monitor = monitor
@@ -1471,6 +1460,7 @@ final class CommandInputModeController: ObservableObject {
         self.backgroundActivityManager = backgroundActivityManager
         self.inputSourceStatusProvider = inputSourceStatusProvider
         self.workspaceNotificationCenter = workspaceNotificationCenter
+        self.monitoringHealthInterval = monitoringHealthInterval
         self.codeSigningStatus = codeSigningStatusProvider.status
         self.isEnabled = defaults.bool(forKey: DefaultsKey.isEnabled)
         self.monitor.diagnosticsDidChange = { [weak self] in
@@ -1530,10 +1520,6 @@ final class CommandInputModeController: ObservableObject {
     }
 
     func refreshAuthorization() {
-        let authorization = permissionProvider.authorizationSnapshot
-        isAccessibilityGranted = authorization.accessibilityGranted
-        isInputMonitoringGranted = authorization.listenEventGranted
-        isEventPostingGranted = authorization.postEventGranted
         codeSigningStatus = codeSigningStatusProvider.status
         inputSourceStatusProvider.refresh()
         reconcile()
@@ -1563,13 +1549,22 @@ final class CommandInputModeController: ObservableObject {
     }
 
     func testSwitch(_ action: CommandInputModeAction) {
-        guard isEnabled, hasRequiredEventAccess else { return }
+        updateAuthorizationSnapshot()
+        guard isEnabled, hasRequiredEventAccess,
+              !shouldSuspendForSystemSettings else { return }
         monitor.switchForTesting(action)
         refreshDiagnostics()
     }
 
     func recoverMonitoringIfNeeded(recreate: Bool = false) async {
-        guard hasStarted, isEnabled, hasRequiredEventAccess else { return }
+        guard hasStarted, isEnabled else { return }
+        updateAuthorizationSnapshot()
+        guard hasRequiredEventAccess, !shouldSuspendForSystemSettings else {
+            reconcile()
+            refreshDiagnostics()
+            return
+        }
+        backgroundActivityManager.begin()
         guard !isRecoveringMonitor else { return }
         guard recreate || !monitor.isRunning else {
             runtimeStatus = .active
@@ -1579,8 +1574,11 @@ final class CommandInputModeController: ObservableObject {
         isRecoveringMonitor = true
         let recovered = await monitor.recover(recreate: recreate)
         isRecoveringMonitor = false
-        guard hasStarted, isEnabled, hasRequiredEventAccess else {
+        updateAuthorizationSnapshot()
+        guard hasStarted, isEnabled, hasRequiredEventAccess,
+              !shouldSuspendForSystemSettings else {
             monitor.stop()
+            reconcile()
             refreshDiagnostics()
             return
         }
@@ -1589,6 +1587,7 @@ final class CommandInputModeController: ObservableObject {
     }
 
     private func reconcile() {
+        updateAuthorizationSnapshot()
         guard hasStarted else {
             stopMonitoringHealthChecks()
             backgroundActivityManager.end()
@@ -1602,31 +1601,48 @@ final class CommandInputModeController: ObservableObject {
             runtimeStatus = .off
             return
         }
+        // Keep checking while enabled so a re-grant can recover in the background.
+        startMonitoringHealthChecks()
+        // macOS can stall system input when an active filtering tap loses access.
+        // Remove the tap before the user can revoke access in System Settings.
+        if shouldSuspendForSystemSettings {
+            monitor.stop()
+            backgroundActivityManager.end()
+            runtimeStatus = .pausedForSystemSettings
+            return
+        }
         // The active event tap and the Eisu/Kana key pair are both governed by
         // Accessibility. Unlike direct TIS selection, the posted key updates
         // the focused application's own text input context.
         guard hasRequiredEventAccess else {
             monitor.stop()
-            stopMonitoringHealthChecks()
             backgroundActivityManager.end()
             runtimeStatus = .permissionRequired
             return
         }
         backgroundActivityManager.begin()
+        guard !isRecoveringMonitor else { return }
         if monitor.isRunning {
             runtimeStatus = .active
         } else {
             runtimeStatus = monitor.start() ? .active : .unavailable
         }
-        startMonitoringHealthChecks()
+    }
+
+    private func updateAuthorizationSnapshot() {
+        let authorization = permissionProvider.authorizationSnapshot
+        isAccessibilityGranted = authorization.accessibilityGranted
+        isInputMonitoringGranted = authorization.listenEventGranted
+        isEventPostingGranted = authorization.postEventGranted
     }
 
     private func startMonitoringHealthChecks() {
         guard monitoringHealthTask == nil else { return }
+        let interval = monitoringHealthInterval
         monitoringHealthTask = Task { @MainActor [weak self] in
             while !Task.isCancelled {
                 do {
-                    try await Task.sleep(for: .seconds(5))
+                    try await Task.sleep(for: interval)
                 } catch {
                     return
                 }
@@ -1680,9 +1696,28 @@ final class CommandInputModeController: ObservableObject {
                 }
             }
         }
+        workspaceRecoveryTokens.append(workspaceNotificationCenter.addObserver(
+            forName: NSWorkspace.didActivateApplicationNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            let application = notification.userInfo?[NSWorkspace.applicationUserInfoKey]
+                as? NSRunningApplication
+            let isSystemSettings = application?.bundleIdentifier == "com.apple.systempreferences"
+            // The observer runs on the main queue: stop synchronously, before
+            // another user action can remove the Accessibility entry.
+            MainActor.assumeIsolated {
+                self?.systemSettingsActivationPending = isSystemSettings
+                self?.refreshAuthorization()
+            }
+            Task { @MainActor [weak self] in
+                await self?.recoverMonitoringIfNeeded()
+            }
+        })
     }
 
     private func stopWorkspaceRecoveryObservers() {
+        systemSettingsActivationPending = false
         guard let workspaceNotificationCenter else { return }
         workspaceRecoveryTokens.forEach {
             workspaceNotificationCenter.removeObserver($0)

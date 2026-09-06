@@ -294,7 +294,7 @@ private struct WindowControlSettingsView: View {
             .green
         case .permissionRequired, .unavailable:
             .orange
-        case .off, .needsConfiguration:
+        case .off, .needsConfiguration, .pausedForSystemSettings:
             .secondary
         }
     }

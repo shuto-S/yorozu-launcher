@@ -110,6 +110,25 @@ final class CommandInputModeSwitchingTests: XCTestCase {
         XCTAssertEqual(CommandInputModeAction.switchToJapanese.inputModeKeyCode, 104)
     }
 
+    func testCancelledInputSourceSwitchNeverPostsAKey() async {
+        let system = TestCommandInputSourceSystem(
+            currentSourceID: "english",
+            candidates: [
+                candidate(id: "english", ascii: true),
+                candidate(id: "japanese", languages: ["ja"]),
+            ]
+        )
+        let poster = TestCommandInputModeEventPoster()
+        let switcher = SystemCommandInputSourceSwitcher(system: system, eventPoster: poster)
+        let task = Task { @MainActor in
+            withUnsafeCurrentTask { $0?.cancel() }
+            return await switcher.switchInputMode(.switchToJapanese)
+        }
+        let report = await task.value
+        XCTAssertEqual(report.result, .cancelled)
+        XCTAssertTrue(poster.postedActions.isEmpty)
+    }
+
     func testInputSourceSwitcherSelectsAndVerifiesTarget() async {
         let system = TestCommandInputSourceSystem(
             currentSourceID: "english",
@@ -847,6 +866,165 @@ final class CommandInputModeSwitchingTests: XCTestCase {
         XCTAssertEqual(controller.monitorStatus, .stopped)
     }
 
+    func testHealthCheckStopsRevokedAccessWithoutForegroundRefresh() async {
+        for invalidateMonitor in [false, true] {
+            let monitor = TestCommandInputModeMonitor()
+            let permissions = TestCommandInputModePermissionProvider(
+                isAccessibilityGranted: true, isEventPostingGranted: true
+            )
+            let activity = TestCommandInputModeBackgroundActivityManager()
+            let controller = CommandInputModeController(
+                defaults: UserDefaults(suiteName: UUID().uuidString)!,
+                monitor: monitor, permissionProvider: permissions,
+                backgroundActivityManager: activity
+            )
+            controller.isEnabled = true
+            controller.start()
+            defer { controller.stop() }
+
+            permissions.isAccessibilityGranted = false
+            permissions.isEventPostingGranted = false
+            if invalidateMonitor { monitor.simulateInvalidation() }
+            await controller.recoverMonitoringIfNeeded()
+
+            XCTAssertFalse(controller.isAccessibilityGranted)
+            XCTAssertFalse(monitor.isRunning)
+            XCTAssertFalse(activity.isActive)
+            XCTAssertTrue(monitor.recoverRequests.isEmpty)
+            XCTAssertEqual(controller.runtimeStatus, .permissionRequired)
+        }
+    }
+
+    func testSystemSettingsActivationPausesBeforeRevocationAndRequiresFreshAccessToResume() async {
+        let workspace = NotificationCenter()
+        let monitor = TestCommandInputModeMonitor()
+        let permissions = TestCommandInputModePermissionProvider(
+            isAccessibilityGranted: true, isEventPostingGranted: true
+        )
+        let activity = TestCommandInputModeBackgroundActivityManager()
+        let controller = CommandInputModeController(
+            defaults: UserDefaults(suiteName: UUID().uuidString)!,
+            monitor: monitor, permissionProvider: permissions,
+            backgroundActivityManager: activity, workspaceNotificationCenter: workspace
+        )
+        controller.isEnabled = true
+        controller.start()
+        defer { controller.stop() }
+
+        permissions.isSystemSettingsActive = true
+        workspace.post(name: NSWorkspace.didActivateApplicationNotification, object: nil)
+        // Suspension must happen in the notification, before another main-loop turn.
+        XCTAssertFalse(monitor.isRunning)
+        XCTAssertFalse(activity.isActive)
+        XCTAssertTrue(controller.isEnabled)
+        XCTAssertEqual(controller.runtimeStatus, .pausedForSystemSettings)
+        for recreate in [false, true] {
+            await controller.recoverMonitoringIfNeeded(recreate: recreate)
+        }
+        controller.testSwitch(.switchToJapanese)
+        XCTAssertTrue(monitor.recoverRequests.isEmpty)
+        XCTAssertEqual(monitor.testSwitchCount, 0)
+
+        permissions.isAccessibilityGranted = false
+        permissions.isEventPostingGranted = false
+        permissions.isSystemSettingsActive = false
+        workspace.post(name: NSWorkspace.didActivateApplicationNotification, object: nil)
+        await controller.recoverMonitoringIfNeeded()
+        XCTAssertFalse(monitor.isRunning)
+        XCTAssertEqual(controller.runtimeStatus, .permissionRequired)
+
+        permissions.isAccessibilityGranted = true
+        permissions.isEventPostingGranted = true
+        await controller.recoverMonitoringIfNeeded()
+        XCTAssertTrue(monitor.isRunning)
+        XCTAssertTrue(activity.isActive)
+        XCTAssertEqual(controller.runtimeStatus, .active)
+    }
+
+    func testStartupAndEnableDoNotInstallMonitorWhileSystemSettingsIsActive() {
+        let monitor = TestCommandInputModeMonitor()
+        let permissions = TestCommandInputModePermissionProvider(
+            isAccessibilityGranted: true, isEventPostingGranted: true
+        )
+        permissions.isSystemSettingsActive = true
+        let controller = CommandInputModeController(
+            defaults: UserDefaults(suiteName: UUID().uuidString)!,
+            monitor: monitor, permissionProvider: permissions
+        )
+        controller.start()
+        controller.isEnabled = true
+        defer { controller.stop() }
+        XCTAssertEqual(monitor.startCount, 0)
+        XCTAssertEqual(controller.runtimeStatus, .pausedForSystemSettings)
+    }
+
+    func testRecoveryCannotReactivateAfterPermissionOrSystemSettingsChangesDuringAwait() async {
+        for opensSettings in [false, true] {
+            let monitor = TestCommandInputModeMonitor()
+            let permissions = TestCommandInputModePermissionProvider(
+                isAccessibilityGranted: true, isEventPostingGranted: true
+            )
+            let controller = CommandInputModeController(
+                defaults: UserDefaults(suiteName: UUID().uuidString)!,
+                monitor: monitor, permissionProvider: permissions
+            )
+            controller.isEnabled = true
+            controller.start()
+            defer { controller.stop() }
+            monitor.simulateInvalidation()
+            monitor.duringRecovery = {
+                await Task.yield()
+                if opensSettings {
+                    permissions.isSystemSettingsActive = true
+                } else {
+                    permissions.isEventPostingGranted = false
+                }
+            }
+            await controller.recoverMonitoringIfNeeded()
+            XCTAssertFalse(monitor.isRunning)
+            XCTAssertEqual(controller.runtimeStatus, opensSettings ? .pausedForSystemSettings : .permissionRequired)
+        }
+    }
+
+    func testHealthCheckDetectsRegrantWithoutForegroundingApplication() async {
+        let monitor = TestCommandInputModeMonitor()
+        let permissions = TestCommandInputModePermissionProvider()
+        let controller = CommandInputModeController(
+            defaults: UserDefaults(suiteName: UUID().uuidString)!,
+            monitor: monitor, permissionProvider: permissions,
+            monitoringHealthInterval: .milliseconds(20)
+        )
+        controller.isEnabled = true
+        controller.start()
+        defer { controller.stop() }
+        XCTAssertFalse(monitor.isRunning)
+
+        let recovered = expectation(description: "Periodic check observes permission re-grant")
+        monitor.duringRecovery = { recovered.fulfill() }
+        permissions.isAccessibilityGranted = true
+        permissions.isEventPostingGranted = true
+        await fulfillment(of: [recovered], timeout: 1)
+        XCTAssertTrue(monitor.isRunning)
+        XCTAssertEqual(controller.runtimeStatus, .active)
+    }
+
+    func testTapDisabledNotificationsStopWorkerAndCancelSubsequentSwitches() async throws {
+        for type in [CGEventType.tapDisabledByTimeout, .tapDisabledByUserInput] {
+            let switcher = RecordingCommandInputSourceSwitcher()
+            let worker = CommandInputModeEventTapWorker(
+                inputSourceSwitcher: switcher, diagnosticsHandler: { _ in }
+            )
+            let event = try XCTUnwrap(CGEvent(source: nil))
+            worker.handle(type: type, event: event)
+            worker.switchForTesting(.switchToJapanese)
+            await Task.yield()
+            XCTAssertFalse(worker.isRunning)
+            XCTAssertEqual(worker.diagnostics.status, .stopped)
+            let switches = await switcher.switchCount
+            XCTAssertEqual(switches, 0)
+        }
+    }
+
     private func candidate(
         id: String,
         languages: [String] = [],
@@ -959,6 +1137,7 @@ private final class TestCommandInputModeMonitor: CommandInputModeMonitoring {
     private(set) var testSwitchCount = 0
     private(set) var recoverRequests: [Bool] = []
     private let startResult: Bool
+    var duringRecovery: (() async -> Void)?
 
     init(startResult: Bool = true) {
         self.startResult = startResult
@@ -981,6 +1160,7 @@ private final class TestCommandInputModeMonitor: CommandInputModeMonitoring {
 
     func recover(recreate: Bool) async -> Bool {
         recoverRequests.append(recreate)
+        await duringRecovery?()
         isRunning = startResult
         status = startResult ? .running : .creationFailed
         diagnosticsDidChange?()
@@ -1038,6 +1218,7 @@ private final class TestCommandInputSourceStatusProvider:
 
 @MainActor
 private final class TestCommandInputModePermissionProvider: CommandInputModePermissionProviding {
+    var isSystemSettingsActive = false
     var isAccessibilityGranted: Bool
     var isInputMonitoringGranted: Bool
     var isEventPostingGranted: Bool
@@ -1072,6 +1253,18 @@ private final class TestCommandInputModePermissionProvider: CommandInputModePerm
     func openAccessibilitySettings() {}
     func openInputMonitoringSettings() {}
     func revealCurrentBuild() {}
+}
+
+private actor RecordingCommandInputSourceSwitcher: CommandInputSourceSwitching {
+    private(set) var switchCount = 0
+
+    func switchInputMode(_ action: CommandInputModeAction) async -> CommandInputModeSwitchReport {
+        switchCount += 1
+        return CommandInputModeSwitchReport(
+            action: action, result: .cancelled, sourceIDBefore: nil,
+            sourceIDAfter: nil, completedAt: Date()
+        )
+    }
 }
 
 @MainActor

@@ -1456,7 +1456,12 @@ final class WindowControlEventTapWorker: @unchecked Sendable {
         dragSession.reset()
         pointerProcessor.reset()
         lock.unlock()
-        if let eventTap { CGEvent.tapEnable(tap: eventTap, enable: false) }
+        if let eventTap {
+            // Remove the tap from the input path before waiting for its worker.
+            // Invalidation also prevents startup from re-enabling a stopped tap.
+            CGEvent.tapEnable(tap: eventTap, enable: false)
+            CFMachPortInvalidate(eventTap)
+        }
         if let runLoop {
             // A stop can race with startup just before CFRunLoopRun. Keep a
             // queued stop as well so a newly entered run-loop cannot survive it.
@@ -1517,15 +1522,17 @@ final class WindowControlEventTapWorker: @unchecked Sendable {
         }
         runLoop = currentRunLoop
         self.eventTap = eventTap
-        running = true
         lock.unlock()
 
         CFRunLoopAddSource(currentRunLoop, source, .commonModes)
-        CGEvent.tapEnable(tap: eventTap, enable: true)
+        // A newly created tap is already enabled. Do not re-enable it here:
+        // stop() may have invalidated it after it was published above.
+        let enabled = CFMachPortIsValid(eventTap) && CGEvent.tapIsEnabled(tap: eventTap)
         lock.lock()
-        let shouldRun = !stopRequested
+        let shouldRun = !stopRequested && enabled
+        running = shouldRun
         lock.unlock()
-        result.complete(shouldRun && CGEvent.tapIsEnabled(tap: eventTap))
+        result.complete(shouldRun)
         semaphore.signal()
         if shouldRun {
             pointerProcessor.report(.listening)
@@ -1549,25 +1556,18 @@ final class WindowControlEventTapWorker: @unchecked Sendable {
         type: CGEventType,
         event: CGEvent
     ) -> Bool {
+        if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
+            // Recovery must first recheck authorization and the foreground app.
+            // stop() takes this lock itself, so handle disabled taps before it.
+            stop()
+            return false
+        }
         lock.lock()
         defer { lock.unlock() }
         // Only bounded state changes and queue submissions happen under this
         // lock. This serializes event admission with stop/configuration changes;
         // Accessibility requests continue to run on the separate AX queue.
         guard !stopRequested else { return false }
-        if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
-            dragSession.reset()
-            pointerProcessor.reset()
-            let eventTap = eventTap
-            if let eventTap {
-                CGEvent.tapEnable(tap: eventTap, enable: true)
-                if CFMachPortIsValid(eventTap), CGEvent.tapIsEnabled(tap: eventTap) {
-                    pointerProcessor.report(.monitorRecovered)
-                }
-            }
-            return false
-        }
-
         switch type {
         case .leftMouseDown:
             // A duplicate down cannot replace the original target or starting
@@ -1804,6 +1804,7 @@ final class WindowControlController: ObservableObject {
         case off
         case needsConfiguration
         case permissionRequired
+        case pausedForSystemSettings
         case active
         case unavailable
 
@@ -1815,6 +1816,8 @@ final class WindowControlController: ObservableObject {
                 "Set Both Key Combinations"
             case .permissionRequired:
                 "Permission Required"
+            case .pausedForSystemSettings:
+                "Paused in System Settings"
             case .active:
                 "Active"
             case .unavailable:
@@ -1855,6 +1858,7 @@ final class WindowControlController: ObservableObject {
     private var isRecoveringMonitor = false
     private var monitoringHealthTask: Task<Void, Never>?
     private var workspaceRecoveryTokens: [any NSObjectProtocol] = []
+    private var systemSettingsActivationPending = false
 
     init(
         defaults: UserDefaults,
@@ -1958,7 +1962,6 @@ final class WindowControlController: ObservableObject {
     }
 
     func refreshAuthorization() {
-        isAccessibilityGranted = permissionProvider.isAccessibilityGranted
         codeSigningStatus = codeSigningStatusProvider.status
         reconcile()
     }
@@ -1966,7 +1969,7 @@ final class WindowControlController: ObservableObject {
     func recoverMonitoringIfNeeded(recreate: Bool = false) async {
         guard hasStarted, isEnabled, configuration.isValid else { return }
         isAccessibilityGranted = permissionProvider.isAccessibilityGranted
-        guard isAccessibilityGranted else {
+        guard isAccessibilityGranted, !shouldSuspendForSystemSettings else {
             reconcile()
             return
         }
@@ -1981,7 +1984,8 @@ final class WindowControlController: ObservableObject {
         isRecoveringMonitor = false
         // A permission or configuration change may arrive while the old tap stops.
         isAccessibilityGranted = permissionProvider.isAccessibilityGranted
-        guard hasStarted, isEnabled, configuration.isValid, isAccessibilityGranted else {
+        guard hasStarted, isEnabled, configuration.isValid, isAccessibilityGranted,
+              !shouldSuspendForSystemSettings else {
             monitor.stop()
             reconcile()
             return
@@ -2005,6 +2009,7 @@ final class WindowControlController: ObservableObject {
     }
 
     private func reconcile() {
+        isAccessibilityGranted = permissionProvider.isAccessibilityGranted
         guard hasStarted else {
             stopMonitoringHealthChecks()
             runtimeStatus = isEnabled ? preflightStatus : .off
@@ -2029,6 +2034,13 @@ final class WindowControlController: ObservableObject {
         // Keep the existing health check while this feature is enabled, so a
         // permission re-grant can recover without bringing Yorozu to the front.
         startMonitoringHealthChecks()
+        guard !shouldSuspendForSystemSettings else {
+            monitor.stop()
+            backgroundActivityManager.end()
+            runtimeStatus = .pausedForSystemSettings
+            lastActivity = nil
+            return
+        }
         guard isAccessibilityGranted else {
             monitor.stop()
             backgroundActivityManager.end()
@@ -2083,9 +2095,32 @@ final class WindowControlController: ObservableObject {
                 }
             }
         }
+        workspaceRecoveryTokens.append(
+            workspaceNotificationCenter.addObserver(
+                forName: NSWorkspace.didActivateApplicationNotification,
+                object: nil,
+                queue: .main
+            ) { [weak self] notification in
+                // Pause synchronously when System Settings comes forward, before
+                // a user can revoke Accessibility access from an active tap.
+                let activatedApplication = notification.userInfo?[
+                    NSWorkspace.applicationUserInfoKey
+                ] as? NSRunningApplication
+                let isSystemSettings = activatedApplication?.bundleIdentifier
+                    == "com.apple.systempreferences"
+                MainActor.assumeIsolated {
+                    self?.systemSettingsActivationPending = isSystemSettings
+                    self?.refreshAuthorization()
+                }
+                Task { @MainActor [weak self] in
+                    await self?.recoverMonitoringIfNeeded()
+                }
+            }
+        )
     }
 
     private func stopWorkspaceRecoveryObservers() {
+        systemSettingsActivationPending = false
         guard let workspaceNotificationCenter else { return }
         workspaceRecoveryTokens.forEach { workspaceNotificationCenter.removeObserver($0) }
         workspaceRecoveryTokens.removeAll()
@@ -2093,8 +2128,13 @@ final class WindowControlController: ObservableObject {
 
     private var preflightStatus: RuntimeStatus {
         if !configuration.isValid { return .needsConfiguration }
+        if shouldSuspendForSystemSettings { return .pausedForSystemSettings }
         if !isAccessibilityGranted { return .permissionRequired }
         return .off
+    }
+
+    private var shouldSuspendForSystemSettings: Bool {
+        systemSettingsActivationPending || permissionProvider.isSystemSettingsActive
     }
 
     private func saveChord(

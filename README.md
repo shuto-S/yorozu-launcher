@@ -54,6 +54,10 @@ run only while the feature is enabled, and allow normal idle system sleep. Durin
 the top, left, and right edges show a system glass preview. Releasing the drag applies the
 previewed frame; the bottom edge does not snap.
 
+Input Mode Switching and Window Control pause while macOS System Settings is frontmost
+so Accessibility permissions can be changed without keeping their input monitors active.
+They resume after leaving System Settings if permission is still granted.
+
 When Root Search recognizes a supported arithmetic expression, the result is shown as a
 copyable command. `Return` copies the result; the Action Panel also offers `Copy Result`
 and `Copy Expression`. Natural-language arithmetic, Unicode operators, and division by

@@ -101,6 +101,23 @@ main AppKit run loop or the application being active. A lightweight health check
 an invalidated tap. Monitoring, the health check, and the activity are all stopped
 immediately when the feature is disabled or the app terminates.
 
+Both input-mode switching and Window Control suspend their event taps while System
+Settings is frontmost. macOS has been reported to stall system-wide input when
+Accessibility is revoked from a process with an active filtering tap, even when its
+callback returns every event unchanged. Suspending before a user edits permissions
+avoids that active-tap condition. Returning to another application resumes monitoring
+only after checking current permissions. Enabled features continue checking for a
+permission re-grant in the background; permission checks never request access.
+Tap-disabled callbacks stop and invalidate the tap instead of re-enabling it in the
+input callback. Recovery creates a new tap after a fresh permission check.
+
+This is a defensive workaround for the reported macOS behavior, not evidence that
+every permission-revocation path is safe. External revocation (for example, a policy
+change) can still occur before the next health check. Validate actual permission
+removal separately on a disposable test account with a recovery path; do not revoke
+the working user's Accessibility grant as part of automated tests. See the
+[Apple Developer Forums report](https://developer.apple.com/forums/thread/844416).
+
 Window Control follows the same permission and signing rules. Its active session event tap is
 created only after the feature is enabled, two distinct modifier combinations are set,
 and the current process is trusted. It listens for modifier changes and primary-button

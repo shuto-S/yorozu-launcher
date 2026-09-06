@@ -374,6 +374,44 @@ final class WindowControlTests: XCTestCase {
         }
     }
 
+    func testDisabledTapCancelsPendingDragAndPassesSubsequentInputThrough() async throws {
+        for disabledType in [CGEventType.tapDisabledByTimeout, .tapDisabledByUserInput] {
+            let accessor = TestWindowAccessor(target: testTarget())
+            let lookupStarted = expectation(description: "AX lookup started before tap disable")
+            let cancelled = expectation(description: "Disabled tap cancelled pending drag")
+            let lookupGate = DispatchSemaphore(value: 0)
+            accessor.targetLookupStarted = { lookupStarted.fulfill() }
+            accessor.targetLookupGate = lookupGate
+            let worker = WindowControlEventTapWorker(
+                configuration: .init(moveChord: [.option], resizeChord: [.option, .shift]),
+                windowAccessor: accessor,
+                screenProvider: EmptyWindowControlScreenProvider(),
+                previewHandler: { _ in },
+                activityHandler: { if $0 == .listening { cancelled.fulfill() } }
+            )
+            let event = try pointerEvent(
+                .leftMouseDown, at: CGPoint(x: 200, y: 200), flags: .maskAlternate
+            )
+            XCTAssertTrue(worker.handle(type: .leftMouseDown, event: event))
+            await fulfillment(of: [lookupStarted], timeout: 1)
+            XCTAssertTrue(worker.handle(type: .leftMouseDragged, event: try pointerEvent(
+                .leftMouseDragged, at: CGPoint(x: 400, y: 400), flags: .maskAlternate
+            )))
+
+            XCTAssertFalse(worker.handle(type: disabledType, event: event))
+            for type in [CGEventType.leftMouseUp, .leftMouseDown, .leftMouseDragged,
+                         .mouseMoved, .rightMouseDown, .keyDown, .flagsChanged, .scrollWheel] {
+                XCTAssertFalse(worker.handle(type: type, event: event))
+            }
+            lookupGate.signal()
+
+            await fulfillment(of: [cancelled], timeout: 1)
+            XCTAssertTrue(accessor.movedPositions.isEmpty)
+            XCTAssertTrue(accessor.resizedSizes.isEmpty)
+            XCTAssertTrue(accessor.setFrames.isEmpty)
+        }
+    }
+
     func testDuplicateMouseDownDoesNotReplaceGestureAnchor() async throws {
         let accessor = TestWindowAccessor(target: testTarget())
         let finished = expectation(description: "Original gesture completed")
@@ -999,6 +1037,125 @@ final class WindowControlTests: XCTestCase {
         XCTAssertEqual(controller.runtimeStatus, .permissionRequired)
     }
 
+    func testSystemSettingsPausesSynchronouslyAndBlocksRecoveryUntilSafeToResume() async {
+        let notifications = NotificationCenter()
+        let backgroundActivity = TestWindowControlBackgroundActivityManager()
+        let (controller, monitor, permissions) = makeRunningController(
+            notifications: notifications, backgroundActivity: backgroundActivity
+        )
+        defer { controller.stop() }
+        XCTAssertTrue(backgroundActivity.isActive)
+
+        permissions.isSystemSettingsActive = true
+        notifications.post(name: NSWorkspace.didActivateApplicationNotification, object: nil)
+
+        // The notification must remove the tap before yielding to another task.
+        XCTAssertFalse(monitor.isRunning)
+        XCTAssertFalse(backgroundActivity.isActive)
+        XCTAssertEqual(controller.runtimeStatus, .pausedForSystemSettings)
+        await controller.recoverMonitoringIfNeeded()
+        await controller.recoverMonitoringIfNeeded(recreate: true)
+        notifications.post(name: NSWorkspace.didWakeNotification, object: nil)
+        await Task.yield()
+        XCTAssertEqual(monitor.startCount, 1)
+        XCTAssertEqual(monitor.recoverCount, 0)
+
+        permissions.isAccessibilityGranted = false
+        permissions.isSystemSettingsActive = false
+        notifications.post(name: NSWorkspace.didActivateApplicationNotification, object: nil)
+        await controller.recoverMonitoringIfNeeded()
+        XCTAssertFalse(monitor.isRunning)
+        XCTAssertFalse(backgroundActivity.isActive)
+        XCTAssertEqual(controller.runtimeStatus, .permissionRequired)
+        XCTAssertEqual(monitor.recoverCount, 0)
+
+        permissions.isAccessibilityGranted = true
+        await controller.recoverMonitoringIfNeeded()
+        XCTAssertTrue(monitor.isRunning)
+        XCTAssertTrue(backgroundActivity.isActive)
+        XCTAssertEqual(controller.runtimeStatus, .active)
+        XCTAssertEqual(monitor.recoverCount, 1)
+    }
+
+    func testLeavingSystemSettingsResumesWithExistingPermission() async {
+        let notifications = NotificationCenter()
+        let (controller, monitor, permissions) = makeRunningController(notifications: notifications)
+        defer { controller.stop() }
+
+        permissions.isSystemSettingsActive = true
+        notifications.post(name: NSWorkspace.didActivateApplicationNotification, object: nil)
+        await Task.yield()
+        XCTAssertFalse(monitor.isRunning)
+
+        permissions.isSystemSettingsActive = false
+        notifications.post(name: NSWorkspace.didActivateApplicationNotification, object: nil)
+        XCTAssertTrue(monitor.isRunning)
+        XCTAssertEqual(controller.runtimeStatus, .active)
+        XCTAssertEqual(monitor.startCount, 2)
+    }
+
+    func testWindowHealthCheckRemainsAvailableWhilePausedInSystemSettings() async {
+        let monitor = TestWindowControlMonitor()
+        let permissions = TestWindowControlPermissionProvider(isAccessibilityGranted: true)
+        permissions.isSystemSettingsActive = true
+        let controller = WindowControlController(
+            defaults: UserDefaults(suiteName: "window-control-\(UUID().uuidString)")!,
+            monitor: monitor,
+            permissionProvider: permissions,
+            monitoringHealthInterval: .milliseconds(20)
+        )
+        controller.setChord([.option], for: .move)
+        controller.setChord([.option, .shift], for: .resize)
+        controller.isEnabled = true
+        controller.start()
+        defer { controller.stop() }
+        XCTAssertEqual(controller.runtimeStatus, .pausedForSystemSettings)
+        XCTAssertEqual(monitor.startCount, 0)
+
+        let recovered = expectation(description: "Paused health task detects Settings exit")
+        monitor.recoveryStarted = { recovered.fulfill() }
+        permissions.isSystemSettingsActive = false
+        await fulfillment(of: [recovered], timeout: 1)
+
+        XCTAssertTrue(monitor.isRunning)
+        XCTAssertEqual(controller.runtimeStatus, .active)
+        XCTAssertEqual(monitor.recoverCount, 1)
+    }
+
+    func testSystemSettingsEnteringDuringRecoveryCannotRestartWindowControl() async {
+        let (controller, monitor, permissions) = makeRunningController()
+        defer { controller.stop() }
+        monitor.interrupt()
+        monitor.holdsRecovery = true
+        let started = expectation(description: "Window recovery reached await")
+        monitor.recoveryStarted = { started.fulfill() }
+        let recovery = Task { await controller.recoverMonitoringIfNeeded() }
+        await fulfillment(of: [started], timeout: 1)
+
+        // Exercise the post-await check even before a workspace notification arrives.
+        permissions.isSystemSettingsActive = true
+        monitor.completeRecovery()
+        await recovery.value
+
+        XCTAssertFalse(monitor.isRunning)
+        XCTAssertEqual(controller.runtimeStatus, .pausedForSystemSettings)
+        await controller.recoverMonitoringIfNeeded()
+        XCTAssertEqual(monitor.recoverCount, 1)
+    }
+
+    func testChangingWindowBindingRechecksRevokedPermission() {
+        let (controller, monitor, permissions) = makeRunningController()
+        defer { controller.stop() }
+        permissions.isAccessibilityGranted = false
+
+        controller.setChord([.control], for: .move)
+
+        XCTAssertFalse(monitor.isRunning)
+        XCTAssertFalse(controller.isAccessibilityGranted)
+        XCTAssertEqual(controller.runtimeStatus, .permissionRequired)
+        XCTAssertEqual(monitor.startCount, 1)
+    }
+
     func testPermissionRegrantRecoversWithoutForegroundAndRestoresBackgroundActivity() async {
         let defaults = UserDefaults(suiteName: "window-control-\(UUID().uuidString)")!
         let monitor = TestWindowControlMonitor()
@@ -1051,7 +1208,7 @@ final class WindowControlTests: XCTestCase {
 
     func testWindowWakeAndSessionRecoveryObserversAreRemovedOnStop() async {
         let notifications = NotificationCenter()
-        let (controller, monitor, _) = makeRunningController(notifications: notifications)
+        let (controller, monitor, permissions) = makeRunningController(notifications: notifications)
         let recovered = expectation(description: "Wake and session recovered")
         recovered.expectedFulfillmentCount = 2
         monitor.recoveryStarted = { recovered.fulfill() }
@@ -1063,13 +1220,19 @@ final class WindowControlTests: XCTestCase {
         XCTAssertEqual(monitor.recreateRequests, [true, true])
 
         controller.stop()
+        permissions.isSystemSettingsActive = true
         notifications.post(name: NSWorkspace.didWakeNotification, object: nil)
+        notifications.post(name: NSWorkspace.didActivateApplicationNotification, object: nil)
         await Task.yield()
         XCTAssertEqual(monitor.recoverCount, 2)
         XCTAssertFalse(monitor.isRunning)
+        XCTAssertEqual(controller.runtimeStatus, .off)
     }
 
-    private func makeRunningController(notifications: NotificationCenter? = nil) -> (
+    private func makeRunningController(
+        notifications: NotificationCenter? = nil,
+        backgroundActivity: TestWindowControlBackgroundActivityManager? = nil
+    ) -> (
         WindowControlController, TestWindowControlMonitor, TestWindowControlPermissionProvider
     ) {
         let defaults = UserDefaults(suiteName: "window-control-\(UUID().uuidString)")!
@@ -1079,6 +1242,7 @@ final class WindowControlTests: XCTestCase {
             defaults: defaults,
             monitor: monitor,
             permissionProvider: permissions,
+            backgroundActivityManager: backgroundActivity ?? TestWindowControlBackgroundActivityManager(),
             workspaceNotificationCenter: notifications
         )
         controller.setChord([.option], for: .move)
@@ -1247,6 +1411,7 @@ private final class TestWindowControlPreviewRecorder: @unchecked Sendable {
 private final class TestWindowControlPermissionProvider:
     CommandInputModePermissionProviding {
     var isAccessibilityGranted: Bool
+    var isSystemSettingsActive = false
 
     init(isAccessibilityGranted: Bool = false) {
         self.isAccessibilityGranted = isAccessibilityGranted
