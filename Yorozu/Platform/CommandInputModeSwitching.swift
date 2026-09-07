@@ -882,7 +882,7 @@ final class CommandInputModeEventTapWorker: @unchecked Sendable {
         }
     }
 
-    private static let eventMask: CGEventMask = [
+    static let eventMask: CGEventMask = [
         CGEventType.flagsChanged,
         .keyDown,
         .keyUp,
@@ -895,6 +895,7 @@ final class CommandInputModeEventTapWorker: @unchecked Sendable {
         .otherMouseDown,
         .otherMouseUp,
         .otherMouseDragged,
+        .mouseMoved,
         .scrollWheel,
     ].reduce(CGEventMask(0)) {
         $0 | (CGEventMask(1) << CGEventMask($1.rawValue))
@@ -1169,7 +1170,7 @@ final class CommandInputModeEventTapWorker: @unchecked Sendable {
         case .leftMouseDown, .leftMouseUp,
              .leftMouseDragged, .rightMouseDown, .rightMouseUp,
              .rightMouseDragged, .otherMouseDown, .otherMouseUp,
-             .otherMouseDragged, .scrollWheel:
+             .otherMouseDragged, .mouseMoved, .scrollWheel:
             stateMachine.handleMouseActivity()
         case .tapDisabledByTimeout, .tapDisabledByUserInput:
             stateMachine.reset()

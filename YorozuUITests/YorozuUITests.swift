@@ -211,19 +211,24 @@ final class YorozuUITests: XCTestCase {
         XCTAssertTrue(resizeRecorder.isEnabled)
         XCTAssertEqual(moveRecorder.label, "Move Window Key Combination")
         XCTAssertEqual(resizeRecorder.label, "Resize Window Key Combination")
+        XCTAssertEqual(moveRecorder.value as? String, "⌃")
+        XCTAssertEqual(resizeRecorder.value as? String, "⌃⌘")
         for operation in ["move", "resize"] {
             let clear = application.buttons["settings.window-control.\(operation)-clear"]
             XCTAssertTrue(clear.exists)
-            XCTAssertFalse(clear.isEnabled)
+            XCTAssertTrue(clear.isEnabled)
         }
 
         let enableToggle = application.switches[
             "settings.window-control.enabled"
         ]
         XCTAssertTrue(enableToggle.exists)
-        XCTAssertFalse(enableToggle.isEnabled)
+        XCTAssertTrue(enableToggle.isEnabled)
         XCTAssertTrue(application.staticTexts["Off"].exists)
         XCTAssertTrue(application.staticTexts["Not Allowed"].exists)
+        application.buttons["settings.window-control.move-clear"].click()
+        XCTAssertEqual(moveRecorder.value as? String, "Not Set")
+        XCTAssertFalse(enableToggle.isEnabled)
     }
 
     @MainActor

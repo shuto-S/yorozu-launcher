@@ -124,17 +124,21 @@ the working user's Accessibility grant as part of automated tests. See the
 
 Window Control follows the same permission and signing rules. Its active session event tap is
 created only after the feature is enabled, two distinct modifier combinations are set,
-and the current process is trusted. It listens for modifier changes and primary-button
-events, including button-held motion delivered as `mouseMoved` by virtual pointing devices.
-Ordinary pointer motion returns immediately without AX work or button-state queries.
-Remapped motion is accepted only within an owned drag while the primary button remains
-pressed. Check both session and HID button state: consuming the mouse-down at the session
-tap can leave session button state clear while the HID button is still held. A missed
-release cancels the gesture without committing a snap. Matching gestures are coalesced
+and the current process is trusted. It observes modifier changes and `mouseMoved`
+without consuming any events. Pressing a matching chord arms a pointer anchor but does
+not access AX or activate a window until the pointer moves. Initial bindings are Control
+for move and Control+Command for resize; existing custom bindings are retained and an
+explicitly cleared binding remains unset. Unmodified motion returns without AX work or
+button-state queries. While the chord is held, successive pointer movements keep the
+same target, including separate strokes on a trackpad. Mode changes finish the old
+operation without snapping and arm a new anchor. Key-down (without inspecting text),
+click, drag, or scroll events cancel until all modifiers are released, preserving normal
+shortcuts and clicks. A missed modifier release stops at the last observed motion
+without committing a snap. Matching gestures are coalesced
 before performing Accessibility work on a dedicated serial queue. Move gestures use
 cached screen snapshots and preview top, left,
 and right edge targets against `NSScreen.visibleFrame`; the target frame is applied only
-on `leftMouseUp`. Releasing the modifier first cancels the snap. The preview panel exists
+when all modifiers are released via `flagsChanged`. No mouse-up is required. The preview panel exists
 only while a snap candidate is active, and screen snapshots refresh only when the display
 configuration changes. It uses a user-initiated activity that still permits idle system
 sleep.
@@ -144,12 +148,13 @@ The shared project must remain buildable without a personal Apple account. Never
 Window Control validates the actual event-tap port and enabled state, checks health every
 five seconds only while enabled, and recreates monitoring after wake or session recovery.
 The same check also detects Accessibility re-grants without foregrounding Yorozu; it
-does not request permission automatically. Rebinding a chord cancels an active drag.
-Its filtering tap runs after the Command-alone observer, so a Command-modified drag does
-not become an input-mode switch. Stopping the feature cancels pending mouse-up frame and
-snap updates as well as pending drag samples. A failed target lookup stays attached to that
+does not request permission automatically. Rebinding a chord cancels an active gesture
+and waits for modifier release. The Command-alone observer also sees pointer movement,
+so a custom Command-only window binding does not become an input-mode switch.
+Stopping the feature cancels pending key-release frame and snap updates as well as
+pending pointer samples. A failed target lookup stays attached to that
 gesture; moving over another window does not silently select a different target. Failures
-remain visible in Settings after the mouse button is released.
+remain visible in Settings after the modifier keys are released.
 Cancellation is checked again after slow AX replies and before deferred activation or
 snap previews. An individual AX write already sent to another process cannot be undone,
 but cancellation prevents later steps from being applied.
@@ -191,7 +196,11 @@ The tests start and foreground only their own fixture, check target lookup throu
 content, check real position/size read-back after move, resize and snap-frame writes,
 and terminate the fixture. Missing existing permission, screen lock, or another window
 covering the hit-test fixture is an explicit skip, not a pass.
-It does not validate physical pointer delivery or replace unlocked drag acceptance tests.
+It does not validate physical pointer delivery or replace unlocked click-free acceptance tests.
+For manual acceptance, check Control plus pointer motion (without a click), Control+Command
+plus pointer motion, continuing across finger lifts, modifier release, direct mode changes,
+edge-preview completion, and cancellation on normal clicks/shortcuts. Synthetic click
+drags are not a substitute for this interaction.
 
 ### Public-repository safety
 

@@ -170,7 +170,7 @@ private struct WindowControlSettingsView: View {
             } header: {
                 Text("Window Control")
             } footer: {
-                Text("Hold the configured keys and drag with the primary mouse button or trackpad click. A preview appears at the top, left, or right edge. Release the drag to apply it.")
+                Text("Hold the configured keys and move the mouse or slide a finger on the trackpad. No click is needed. Release the keys to stop. While moving, a preview appears at the top, left, or right edge; release all modifier keys to apply it.")
             }
 
             Section("Gestures") {

@@ -303,7 +303,7 @@ final class WindowControlEventPipelineTests: XCTestCase {
     private let moveFlags: CGEventFlags = .maskAlternate
     private let resizeFlags: CGEventFlags = [.maskAlternate, .maskShift]
 
-    func testMoveAndResizeAreRoutedSeparatelyAndFlushMouseUpPosition() async throws {
+    func testMoveAndResizeAreRoutedSeparatelyAndFlushMotionOnKeyRelease() async throws {
         for operation in [WindowControlOperation.move, .resize] {
             let accessor = EventPipelineWindowAccessor()
             let finished = expectation(description: "Gesture completed")
@@ -311,9 +311,9 @@ final class WindowControlEventPipelineTests: XCTestCase {
                 if activity == .listening { finished.fulfill() }
             }
             let flags = operation == .move ? moveFlags : resizeFlags
-            XCTAssertTrue(worker.handle(type: .leftMouseDown, event: try event(.leftMouseDown, x: 200, y: 200, flags: flags)))
-            XCTAssertTrue(worker.handle(type: .leftMouseDragged, event: try event(.leftMouseDragged, x: 220, y: 210, flags: flags)))
-            XCTAssertTrue(worker.handle(type: .leftMouseUp, event: try event(.leftMouseUp, x: 260, y: 240, flags: flags)))
+            XCTAssertFalse(worker.handle(type: .flagsChanged, event: try event(.flagsChanged, x: 200, y: 200, flags: flags)))
+            XCTAssertFalse(worker.handle(type: .mouseMoved, event: try event(.mouseMoved, x: 260, y: 240, flags: flags)))
+            XCTAssertFalse(worker.handle(type: .flagsChanged, event: try event(.flagsChanged, x: 260, y: 240, flags: [])))
             await fulfillment(of: [finished], timeout: 2)
             XCTAssertEqual(accessor.targetCount, 1)
             if operation == .move {
@@ -327,35 +327,36 @@ final class WindowControlEventPipelineTests: XCTestCase {
         }
     }
 
-    func testUnmodifiedClicksKeysAndModifierOnlyMotionPassThrough() throws {
+    func testClicksAndKeyboardShortcutsPassThroughWithoutAcquiringWindows() throws {
+        for type in [CGEventType.leftMouseDown, .rightMouseDown, .otherMouseDown, .keyDown, .scrollWheel] {
+            let accessor = EventPipelineWindowAccessor()
+            let worker = makeWorker(accessor: accessor) { _ in }
+            XCTAssertFalse(worker.handle(type: .flagsChanged, event: try event(.flagsChanged, x: 200, y: 200, flags: moveFlags)))
+            XCTAssertFalse(worker.handle(type: type, event: try event(type, x: 200, y: 200, flags: moveFlags)))
+            XCTAssertFalse(worker.handle(type: .mouseMoved, event: try event(.mouseMoved, x: 250, y: 220, flags: moveFlags)))
+            XCTAssertFalse(worker.handle(type: .flagsChanged, event: try event(.flagsChanged, x: 250, y: 220, flags: [])))
+            XCTAssertEqual(accessor.targetCount, 0)
+        }
+    }
+
+    func testChangingMoveChordToResizeFlushesThenRebasesWithoutSnapping() async throws {
         let accessor = EventPipelineWindowAccessor()
+        let resized = expectation(description: "Resize applied after move")
+        accessor.didResize = { resized.fulfill() }
         let worker = makeWorker(accessor: accessor) { _ in }
-        for type in [CGEventType.leftMouseDown, .leftMouseDragged, .leftMouseUp, .keyDown] {
-            XCTAssertFalse(worker.handle(type: type, event: try event(type, x: 200, y: 200, flags: [])))
-        }
         XCTAssertFalse(worker.handle(type: .flagsChanged, event: try event(.flagsChanged, x: 200, y: 200, flags: moveFlags)))
-        XCTAssertFalse(worker.handle(type: .mouseMoved, event: try event(.mouseMoved, x: 250, y: 220, flags: moveFlags)))
-        XCTAssertEqual(accessor.targetCount, 0)
-    }
-
-    func testChangingMoveChordToResizeCancelsInsteadOfSwitchingOperations() async throws {
-        let accessor = EventPipelineWindowAccessor()
-        let finished = expectation(description: "Gesture cancelled")
-        let worker = makeWorker(accessor: accessor) { activity in
-            if activity == .listening { finished.fulfill() }
-        }
-        XCTAssertTrue(worker.handle(type: .leftMouseDown, event: try event(.leftMouseDown, x: 200, y: 200, flags: moveFlags)))
-        XCTAssertFalse(worker.handle(type: .flagsChanged, event: try event(.flagsChanged, x: 200, y: 200, flags: resizeFlags)))
-        XCTAssertTrue(worker.handle(type: .leftMouseDragged, event: try event(.leftMouseDragged, x: 300, y: 260, flags: resizeFlags)))
-        XCTAssertTrue(worker.handle(type: .leftMouseUp, event: try event(.leftMouseUp, x: 300, y: 260, flags: resizeFlags)))
-        await fulfillment(of: [finished], timeout: 2)
-        XCTAssertTrue(accessor.positions.isEmpty)
-        XCTAssertTrue(accessor.sizes.isEmpty)
+        XCTAssertFalse(worker.handle(type: .mouseMoved, event: try event(.mouseMoved, x: 230, y: 220, flags: moveFlags)))
+        XCTAssertFalse(worker.handle(type: .flagsChanged, event: try event(.flagsChanged, x: 230, y: 220, flags: resizeFlags)))
+        XCTAssertFalse(worker.handle(type: .mouseMoved, event: try event(.mouseMoved, x: 260, y: 240, flags: resizeFlags)))
+        XCTAssertFalse(worker.handle(type: .flagsChanged, event: try event(.flagsChanged, x: 260, y: 240, flags: [])))
+        await fulfillment(of: [resized], timeout: 2)
+        XCTAssertEqual(accessor.targetCount, 2)
+        XCTAssertEqual(accessor.positions.last, CGPoint(x: 130, y: 120))
+        XCTAssertEqual(accessor.sizes.last, CGSize(width: 430, height: 320))
         XCTAssertTrue(accessor.frames.isEmpty)
-        XCTAssertFalse(worker.handle(type: .leftMouseDown, event: try event(.leftMouseDown, x: 200, y: 200, flags: [])))
     }
 
-    func testSnapPreviewDoesNotResizeUntilMouseUp() async throws {
+    func testSnapPreviewDoesNotResizeUntilAllModifiersAreReleased() async throws {
         let accessor = EventPipelineWindowAccessor()
         let previewed = expectation(description: "Snap preview")
         let finished = expectation(description: "Snap completed")
@@ -364,48 +365,54 @@ final class WindowControlEventPipelineTests: XCTestCase {
         }) { activity in
             if activity == .listening { finished.fulfill() }
         }
-        XCTAssertTrue(worker.handle(type: .leftMouseDown, event: try event(.leftMouseDown, x: 200, y: 200, flags: moveFlags)))
-        XCTAssertTrue(worker.handle(type: .leftMouseDragged, event: try event(.leftMouseDragged, x: 2, y: 250, flags: moveFlags)))
+        XCTAssertFalse(worker.handle(type: .flagsChanged, event: try event(.flagsChanged, x: 200, y: 200, flags: moveFlags)))
+        XCTAssertFalse(worker.handle(type: .mouseMoved, event: try event(.mouseMoved, x: 2, y: 250, flags: moveFlags)))
         await fulfillment(of: [previewed], timeout: 2)
         XCTAssertTrue(accessor.frames.isEmpty)
         XCTAssertTrue(accessor.sizes.isEmpty)
-        XCTAssertTrue(worker.handle(type: .leftMouseUp, event: try event(.leftMouseUp, x: 2, y: 250, flags: moveFlags)))
+        XCTAssertFalse(worker.handle(type: .flagsChanged, event: try event(.flagsChanged, x: 2, y: 250, flags: [])))
         await fulfillment(of: [finished], timeout: 2)
         XCTAssertEqual(accessor.frames, [CGRect(x: 0, y: 25, width: 720, height: 835)])
+        XCTAssertFalse(worker.handle(type: .mouseMoved, event: try event(.mouseMoved, x: 500, y: 400, flags: [])))
+        XCTAssertEqual(accessor.targetCount, 1)
     }
 
-    func testRemappedMotionPreviewsSnapAndOnlyMouseUpCommits() async throws {
+    func testMissedKeyReleaseClearsPreviewWithoutCommittingSnap() async throws {
         let accessor = EventPipelineWindowAccessor()
-        let previewed = expectation(description: "Remapped motion previews snap")
-        let finished = expectation(description: "Remapped motion snap completed")
-        let worker = makeWorker(accessor: accessor, isPrimaryButtonPressed: { true }, preview: { destination in
+        let previewed = expectation(description: "Snap preview")
+        let finished = expectation(description: "Missed release handled")
+        let worker = makeWorker(accessor: accessor, preview: { destination in
             if destination != nil { previewed.fulfill() }
         }) { activity in
             if activity == .listening { finished.fulfill() }
         }
-        XCTAssertTrue(worker.handle(type: .leftMouseDown, event: try event(.leftMouseDown, x: 200, y: 200, flags: moveFlags)))
-        XCTAssertTrue(worker.handle(type: .mouseMoved, event: try event(.mouseMoved, x: 2, y: 250, flags: moveFlags)))
+        XCTAssertFalse(worker.handle(type: .mouseMoved, event: try event(.mouseMoved, x: 200, y: 200, flags: moveFlags)))
+        XCTAssertFalse(worker.handle(type: .mouseMoved, event: try event(.mouseMoved, x: 2, y: 250, flags: moveFlags)))
         await fulfillment(of: [previewed], timeout: 2)
         XCTAssertEqual(accessor.positions.last, CGPoint(x: -98, y: 150))
+        XCTAssertFalse(worker.handle(type: .mouseMoved, event: try event(.mouseMoved, x: 500, y: 400, flags: [])))
+        await fulfillment(of: [finished], timeout: 2)
         XCTAssertTrue(accessor.frames.isEmpty)
         XCTAssertTrue(accessor.sizes.isEmpty)
-        XCTAssertTrue(worker.handle(type: .leftMouseUp, event: try event(.leftMouseUp, x: 2, y: 250, flags: moveFlags)))
-        await fulfillment(of: [finished], timeout: 2)
-        XCTAssertEqual(accessor.frames, [CGRect(x: 0, y: 25, width: 720, height: 835)])
-        XCTAssertFalse(worker.handle(type: .mouseMoved, event: try event(.mouseMoved, x: 500, y: 400, flags: moveFlags)))
         XCTAssertEqual(accessor.targetCount, 1)
     }
 
-    func testChangingChordCancelsRemappedMotionWithoutRetargeting() async throws {
+    func testClickDuringMoveCancelsPreviewAndDoesNotRetargetUntilRelease() async throws {
         let accessor = EventPipelineWindowAccessor()
-        let cancelled = expectation(description: "Remapped motion cancelled")
-        let worker = makeWorker(accessor: accessor, isPrimaryButtonPressed: { true }) { activity in
+        let acquired = expectation(description: "Target acquired")
+        let cancelled = expectation(description: "Click cancelled gesture")
+        let worker = makeWorker(accessor: accessor) { activity in
+            if activity == .tracking(.move) { acquired.fulfill() }
             if activity == .listening { cancelled.fulfill() }
         }
-        XCTAssertTrue(worker.handle(type: .leftMouseDown, event: try event(.leftMouseDown, x: 200, y: 200, flags: moveFlags)))
-        XCTAssertTrue(worker.handle(type: .mouseMoved, event: try event(.mouseMoved, x: 2, y: 250, flags: resizeFlags)))
-        XCTAssertTrue(worker.handle(type: .leftMouseUp, event: try event(.leftMouseUp, x: 2, y: 250, flags: resizeFlags)))
+        XCTAssertFalse(worker.handle(type: .mouseMoved, event: try event(.mouseMoved, x: 200, y: 200, flags: moveFlags)))
+        await fulfillment(of: [acquired], timeout: 2)
+        XCTAssertFalse(worker.handle(type: .leftMouseDown, event: try event(.leftMouseDown, x: 200, y: 200, flags: moveFlags)))
+        XCTAssertFalse(worker.handle(type: .mouseMoved, event: try event(.mouseMoved, x: 2, y: 250, flags: moveFlags)))
+        XCTAssertFalse(worker.handle(type: .leftMouseUp, event: try event(.leftMouseUp, x: 2, y: 250, flags: moveFlags)))
+        XCTAssertFalse(worker.handle(type: .flagsChanged, event: try event(.flagsChanged, x: 2, y: 250, flags: [])))
         await fulfillment(of: [cancelled], timeout: 2)
+        XCTAssertEqual(accessor.targetCount, 1)
         XCTAssertTrue(accessor.positions.isEmpty)
         XCTAssertTrue(accessor.sizes.isEmpty)
         XCTAssertTrue(accessor.frames.isEmpty)
@@ -419,7 +426,7 @@ final class WindowControlEventPipelineTests: XCTestCase {
             let worker = makeWorker(accessor: accessor) { activity in
                 if activity == .listening { stopped.fulfill() }
             }
-            XCTAssertTrue(worker.handle(type: .leftMouseDown, event: try event(.leftMouseDown, x: 200, y: 200, flags: flags)))
+            XCTAssertFalse(worker.handle(type: .mouseMoved, event: try event(.mouseMoved, x: 200, y: 200, flags: flags)))
             await fulfillment(of: [started], timeout: 2)
             worker.stop()
             accessor.lookupGate.signal()
@@ -439,8 +446,8 @@ final class WindowControlEventPipelineTests: XCTestCase {
         }) { activity in
             if activity == .listening { stopped.fulfill() }
         }
-        XCTAssertTrue(worker.handle(type: .leftMouseDown, event: try event(.leftMouseDown, x: 200, y: 200, flags: moveFlags)))
-        XCTAssertTrue(worker.handle(type: .leftMouseDragged, event: try event(.leftMouseDragged, x: 2, y: 250, flags: moveFlags)))
+        XCTAssertFalse(worker.handle(type: .mouseMoved, event: try event(.mouseMoved, x: 200, y: 200, flags: moveFlags)))
+        XCTAssertFalse(worker.handle(type: .mouseMoved, event: try event(.mouseMoved, x: 2, y: 250, flags: moveFlags)))
         await fulfillment(of: [started], timeout: 2)
         worker.stop()
         accessor.moveGate.signal()
@@ -479,7 +486,6 @@ final class WindowControlEventPipelineTests: XCTestCase {
 
     private func makeWorker(
         accessor: any WindowAccessing,
-        isPrimaryButtonPressed: @escaping @Sendable () -> Bool = { false },
         preview: @escaping @MainActor @Sendable (WindowControlSnapDestination?) -> Void = { _ in },
         activity: @escaping @MainActor @Sendable (WindowControlActivity) -> Void
     ) -> WindowControlEventTapWorker {
@@ -489,7 +495,6 @@ final class WindowControlEventPipelineTests: XCTestCase {
             configuration: WindowControlConfiguration(moveChord: [.option], resizeChord: [.option, .shift]),
             windowAccessor: accessor,
             screenProvider: EventPipelineScreenProvider(),
-            isPrimaryButtonPressed: isPrimaryButtonPressed,
             previewHandler: preview,
             activityHandler: activity
         )
@@ -549,6 +554,7 @@ private final class EventPipelineScreenProvider: WindowControlScreenProviding, @
 }
 
 private final class EventPipelineWindowAccessor: WindowAccessing, @unchecked Sendable {
+    var didResize: (@Sendable () -> Void)?
     private(set) var targetCount = 0
     private(set) var positions: [CGPoint] = []
     private(set) var sizes: [CGSize] = []
@@ -561,6 +567,10 @@ private final class EventPipelineWindowAccessor: WindowAccessing, @unchecked Sen
     }
     func raiseAndActivate(_ target: WindowControlTarget) {}
     func move(_ target: WindowControlTarget, to position: CGPoint) -> Bool { positions.append(position); return true }
-    func resize(_ target: WindowControlTarget, to size: CGSize) -> Bool { sizes.append(size); return true }
+    func resize(_ target: WindowControlTarget, to size: CGSize) -> Bool {
+        sizes.append(size)
+        didResize?()
+        return true
+    }
     func setFrame(_ target: WindowControlTarget, to frame: CGRect) -> Bool { frames.append(frame); return true }
 }

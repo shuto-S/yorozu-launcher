@@ -21,7 +21,7 @@ Yorozu is a lightweight, keyboard-first launcher for macOS. It brings applicatio
 - Configurable global shortcuts
 - Optional launch at login using the macOS Login Items service
 - Optional Left/Right Command-alone input-mode switching for English and Japanese
-- Optional modifier-drag window moving and bottom-right resizing
+- Optional click-free modifier-key window moving and bottom-right resizing
 - Keyboard-first navigation with mouse support
 - Japanese IME-safe command handling
 - Native AppKit and SwiftUI interface
@@ -47,12 +47,16 @@ active application, matching the focused application's text input context. Comma
 shortcuts and regular Command-clicks continue to work normally. Once enabled, the
 event monitor remains available while Yorozu is not the active application.
 
-Window Control is also disabled by default. Configure two different modifier-key
-combinations in **Settings → Window Control**, then hold one combination and drag with
-the primary mouse button or trackpad click. Move and resize gestures use Accessibility,
+Window Control is also disabled by default. In **Settings → Window Control**, the
+initial bindings are **Control** to move and **Control + Command** to resize; saved
+custom bindings are preserved, and the two combinations must differ. Hold a combination
+and move the mouse or slide a finger on the trackpad—no click is needed. Releasing the
+combination stops that operation. Move and resize gestures use Accessibility,
 run only while the feature is enabled, and allow normal idle system sleep. During a move,
-the top, left, and right edges show a system glass preview. Releasing the drag applies the
-previewed frame; the bottom edge does not snap.
+the top, left, and right edges show a system glass preview. Releasing all modifier keys
+applies the previewed frame; changing directly to resize does not snap. The bottom edge
+does not snap. Clicking, scrolling, or typing cancels window control until the modifier
+keys are released, leaving those normal interactions to the target application.
 
 Input Mode Switching and Window Control pause while macOS System Settings is frontmost
 so Accessibility permissions can be changed without keeping their input monitors active.

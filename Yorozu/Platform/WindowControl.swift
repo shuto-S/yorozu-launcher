@@ -468,7 +468,7 @@ enum WindowControlActivity: Equatable, Sendable {
     var message: String {
         switch self {
         case .listening:
-            "Hold a configured key combination and drag with the primary button."
+            "Hold a configured key combination and move the pointer. No click is needed."
         case .tracking(.move):
             "Moving the window under the pointer."
         case .tracking(.resize):
@@ -1092,6 +1092,9 @@ final class WindowControlPointerProcessor: @unchecked Sendable {
     private var initialSample: PendingSample?
     private var pendingSample: PendingSample?
     private var generation: UInt64 = 0
+    // AX-queue confined. A timer queued for one gesture must not read the next
+    // gesture's samples before the previous completion has reset its target.
+    private var coordinatorGeneration: UInt64 = 0
     private var cancellationRevision: UInt64 = 0
     private var isScheduled = false
     private var isGestureActive = false
@@ -1173,6 +1176,7 @@ final class WindowControlPointerProcessor: @unchecked Sendable {
             ? pendingSample?.value
             : nil
         let completionRevision = cancellationRevision
+        let completedGeneration = generation
         isGestureActive = false
         generation &+= 1
         self.initialSample = nil
@@ -1192,6 +1196,7 @@ final class WindowControlPointerProcessor: @unchecked Sendable {
             }
             guard isCompletionCurrent(completionRevision) else { return }
             let activity = coordinator.finish(commitSnap: commitSnap, isCancelled: isCancelled)
+            coordinatorGeneration = completedGeneration &+ 1
             guard !isCancelled() else { return }
             publish(activity)
         }
@@ -1199,10 +1204,11 @@ final class WindowControlPointerProcessor: @unchecked Sendable {
 
     func reset() {
         lock.lock()
-        // Mouse-up may already have queued its final update. Cancellation must
+        // Key release may already have queued its final update. Cancellation must
         // invalidate that completion even after isGestureActive became false.
         cancellationRevision &+= 1
         generation &+= 1
+        let resetGeneration = generation
         isGestureActive = false
         initialSample = nil
         pendingSample = nil
@@ -1210,6 +1216,7 @@ final class WindowControlPointerProcessor: @unchecked Sendable {
         queue.async { [weak self] in
             guard let self else { return }
             coordinator.reset()
+            coordinatorGeneration = resetGeneration
             publish(.listening)
         }
     }
@@ -1225,6 +1232,15 @@ final class WindowControlPointerProcessor: @unchecked Sendable {
         guard let sample = initialSample ?? pendingSample else {
             isScheduled = false
             lock.unlock()
+            return
+        }
+        guard sample.generation == coordinatorGeneration else {
+            // finish/reset is queued behind this previously scheduled drain.
+            // Leave the new initial sample intact for that gesture's completion.
+            lock.unlock()
+            queue.asyncAfter(deadline: .now() + Self.updateInterval) { [weak self] in
+                self?.processPendingSample()
+            }
             return
         }
         if initialSample != nil {
@@ -1273,53 +1289,107 @@ enum WindowControlEventTapConfiguration {
     static let placement: CGEventTapPlacement = .tailAppendEventTap
     static let eventMask: CGEventMask = [
         CGEventType.flagsChanged,
+        .keyDown,
+        .scrollWheel,
         .leftMouseDown,
+        .rightMouseDown,
+        .otherMouseDown,
         .leftMouseDragged,
+        .rightMouseDragged,
+        .otherMouseDragged,
         .mouseMoved,
-        .leftMouseUp,
     ].reduce(CGEventMask(0)) {
         $0 | (CGEventMask(1) << CGEventMask($1.rawValue))
     }
 }
 
-struct WindowControlPrimaryDragSession: Equatable, Sendable {
+/// Event-only admission: no AX requests, timers, or mouse-button ownership.
+struct WindowControlModifierSession: Sendable {
     struct Completion: Equatable, Sendable {
-        let shouldApplyPendingUpdate: Bool
         let shouldCommitSnap: Bool
     }
 
+    struct Transition: Equatable, Sendable {
+        var completion: Completion?
+        var begin: WindowControlPointerSample?
+        var update: WindowControlPointerSample?
+        var shouldCancel = false
+    }
+
     private(set) var operation: WindowControlOperation?
-    private(set) var isConsuming = false
-    private(set) var isCancelled = false
+    private var armedSample: WindowControlPointerSample?
+    private var waitsForRelease = false
 
-    mutating func begin(operation: WindowControlOperation) {
-        self.operation = operation
-        isConsuming = true
-        isCancelled = false
-    }
-
-    @discardableResult
-    mutating func cancel() -> Bool {
-        guard isConsuming, !isCancelled else { return false }
+    mutating func cancelUntilRelease() {
         operation = nil
-        isCancelled = true
-        return true
+        armedSample = nil
+        waitsForRelease = true
     }
 
-    mutating func finish() -> Completion? {
-        guard isConsuming else { return nil }
-        let completion = Completion(
-            shouldApplyPendingUpdate: !isCancelled,
-            shouldCommitSnap: !isCancelled && operation == .move
-        )
-        reset()
-        return completion
-    }
+    mutating func handle(
+        type: CGEventType,
+        flags: CGEventFlags,
+        location: CGPoint,
+        configuration: WindowControlConfiguration
+    ) -> Transition {
+        let pressed = WindowControlModifierChord(eventFlags: flags)
+        if waitsForRelease {
+            if pressed.isEmpty { waitsForRelease = false }
+            return Transition()
+        }
 
-    mutating func reset() {
-        operation = nil
-        isConsuming = false
-        isCancelled = false
+        switch type {
+        case .flagsChanged, .mouseMoved:
+            let nextOperation = configuration.operation(for: flags)
+            var transition = Transition()
+            if operation != nextOperation {
+                if let operation {
+                    // A real key release commits a move's preview. Changing mode
+                    // or recovering a missed release must not unexpectedly snap.
+                    transition.completion = Completion(
+                        shouldCommitSnap: operation == .move
+                            && type == .flagsChanged && pressed.isEmpty
+                    )
+                }
+                operation = nil
+                if armedSample?.operation != nextOperation { armedSample = nil }
+            }
+            guard let nextOperation else { return transition }
+
+            if type == .flagsChanged {
+                // Merely pressing Control (e.g. Control-C) must not raise a window.
+                if operation == nil {
+                    armedSample = .init(operation: nextOperation, location: location)
+                }
+            } else {
+                let sample = WindowControlPointerSample(
+                    operation: nextOperation, location: location
+                )
+                if operation == nil {
+                    let initial = armedSample ?? sample
+                    transition.begin = initial
+                    operation = nextOperation
+                    armedSample = nil
+                    if initial.location != location { transition.update = sample }
+                } else {
+                    transition.update = sample
+                }
+            }
+            return transition
+
+        case .keyDown, .scrollWheel,
+             .leftMouseDown, .rightMouseDown, .otherMouseDown,
+             .leftMouseDragged, .rightMouseDragged, .otherMouseDragged:
+            // Clicks/shortcuts belong to the target app. Do not reinterpret their
+            // subsequent pointer motion as a window gesture until keys are released.
+            let shouldCancel = operation != nil || armedSample != nil
+            cancelUntilRelease()
+            waitsForRelease = !pressed.isEmpty
+            return Transition(shouldCancel: shouldCancel)
+
+        default:
+            return Transition()
+        }
     }
 }
 
@@ -1356,30 +1426,24 @@ final class WindowControlEventTapWorker: @unchecked Sendable {
 
     private let lock = NSLock()
     private let pointerProcessor: WindowControlPointerProcessor
-    private let isPrimaryButtonPressed: @Sendable () -> Bool
     private var configuration: WindowControlConfiguration
     private var runLoop: CFRunLoop?
     private var eventTap: CFMachPort?
     private var thread: Thread?
     private var running = false
     private var stopRequested = false
-    private var dragSession = WindowControlPrimaryDragSession()
+    private var modifierSession = WindowControlModifierSession()
 
     init(
         configuration: WindowControlConfiguration,
         windowAccessor: any WindowAccessing,
         screenProvider: any WindowControlScreenProviding,
-        isPrimaryButtonPressed: @escaping @Sendable () -> Bool = {
-            CGEventSource.buttonState(.combinedSessionState, button: .left)
-                || CGEventSource.buttonState(.hidSystemState, button: .left)
-        },
         previewHandler: @escaping @MainActor @Sendable (
             WindowControlSnapDestination?
         ) -> Void,
         activityHandler: @escaping @MainActor @Sendable (WindowControlActivity) -> Void
     ) {
         self.configuration = configuration
-        self.isPrimaryButtonPressed = isPrimaryButtonPressed
         pointerProcessor = WindowControlPointerProcessor(
             windowAccessor: windowAccessor,
             screenProvider: screenProvider,
@@ -1441,8 +1505,8 @@ final class WindowControlEventTapWorker: @unchecked Sendable {
         }
         self.configuration = configuration
         // A new binding must not reinterpret a gesture already in progress.
-        // Keep consuming its matching mouse-up, but discard queued geometry.
-        dragSession.cancel()
+        // Discard queued geometry and wait for release before using the new keys.
+        modifierSession.cancelUntilRelease()
         pointerProcessor.reset()
         lock.unlock()
     }
@@ -1453,7 +1517,7 @@ final class WindowControlEventTapWorker: @unchecked Sendable {
         running = false
         let runLoop = runLoop
         let eventTap = eventTap
-        dragSession.reset()
+        modifierSession.cancelUntilRelease()
         pointerProcessor.reset()
         lock.unlock()
         if let eventTap {
@@ -1481,7 +1545,7 @@ final class WindowControlEventTapWorker: @unchecked Sendable {
         guard let eventTap = CGEvent.tapCreate(
             tap: WindowControlEventTapConfiguration.location,
             // Command-alone input switching observes mouse activity at the head
-            // of the chain. Let it cancel its candidate before we consume a drag.
+            // of the chain. Neither observer consumes click-free pointer events.
             place: WindowControlEventTapConfiguration.placement,
             options: .defaultTap,
             eventsOfInterest: WindowControlEventTapConfiguration.eventMask,
@@ -1568,78 +1632,22 @@ final class WindowControlEventTapWorker: @unchecked Sendable {
         // lock. This serializes event admission with stop/configuration changes;
         // Accessibility requests continue to run on the separate AX queue.
         guard !stopRequested else { return false }
-        switch type {
-        case .leftMouseDown:
-            // A duplicate down cannot replace the original target or starting
-            // pointer while its matching mouse-up is still outstanding.
-            guard !dragSession.isConsuming else { return true }
-            guard let operation = configuration.operation(for: event.flags) else {
-                return false
-            }
-            dragSession.begin(operation: operation)
-            pointerProcessor.begin(
-                WindowControlPointerSample(
-                    operation: operation,
-                    location: event.location
-                )
-            )
-            return true
-
-        case .leftMouseDragged, .mouseMoved:
-            guard dragSession.isConsuming else { return false }
-            // Some virtual pointing devices deliver button-held motion as
-            // mouseMoved. Admit it only after our own matching mouse-down and
-            // while a button is still held. A missed release must not turn
-            // ordinary pointer motion into window movement or commit a snap.
-            if type == .mouseMoved, !isPrimaryButtonPressed() {
-                dragSession.reset()
-                pointerProcessor.reset()
-                return false
-            }
-            guard !dragSession.isCancelled,
-                  let operation = dragSession.operation,
-                  configuration.operation(for: event.flags) == operation else {
-                cancelActiveDragIfNeeded()
-                return true
-            }
-            pointerProcessor.submit(
-                WindowControlPointerSample(
-                    operation: operation,
-                    location: event.location
-                )
-            )
-            return true
-
-        case .leftMouseUp:
-            let operation = dragSession.operation
-            guard let completion = dragSession.finish() else { return false }
-            if completion.shouldApplyPendingUpdate, let operation {
-                pointerProcessor.submit(
-                    WindowControlPointerSample(operation: operation, location: event.location)
-                )
-            }
+        let transition = modifierSession.handle(
+            type: type, flags: event.flags, location: event.location,
+            configuration: configuration
+        )
+        if transition.shouldCancel { pointerProcessor.reset() }
+        if let completion = transition.completion {
             pointerProcessor.finish(
-                applyPendingUpdate: completion.shouldApplyPendingUpdate,
+                applyPendingUpdate: true,
                 commitSnap: completion.shouldCommitSnap
             )
-            return true
-
-        case .flagsChanged:
-            if dragSession.isConsuming,
-               let operation = dragSession.operation,
-               configuration.operation(for: event.flags) != operation {
-                cancelActiveDragIfNeeded()
-            }
-            return false
-
-        default:
-            return false
         }
-    }
-
-    private func cancelActiveDragIfNeeded() {
-        guard dragSession.cancel() else { return }
-        pointerProcessor.reset()
+        if let initial = transition.begin { pointerProcessor.begin(initial) }
+        if let sample = transition.update { pointerProcessor.submit(sample) }
+        // Never swallow pointer, modifier, click, or keyboard events. Window
+        // manipulation no longer owns a mouse-down/up pair.
+        return false
     }
 
 }
@@ -1879,8 +1887,8 @@ final class WindowControlController: ObservableObject {
         self.workspaceNotificationCenter = workspaceNotificationCenter
         self.monitoringHealthInterval = monitoringHealthInterval
         isEnabled = defaults.bool(forKey: DefaultsKey.isEnabled)
-        moveChord = Self.loadChord(defaults, key: DefaultsKey.moveChord)
-        resizeChord = Self.loadChord(defaults, key: DefaultsKey.resizeChord)
+        moveChord = Self.loadChord(defaults, key: DefaultsKey.moveChord, fallback: [.control])
+        resizeChord = Self.loadChord(defaults, key: DefaultsKey.resizeChord, fallback: [.control, .command])
         codeSigningStatus = codeSigningStatusProvider.status
         monitor.setActivityHandler { [weak self] activity in
             self?.lastActivity = activity
@@ -2144,17 +2152,21 @@ final class WindowControlController: ObservableObject {
         if let chord {
             defaults.set(NSNumber(value: chord.rawValue), forKey: key)
         } else {
-            defaults.removeObject(forKey: key)
+            // Explicitly cleared bindings must stay unset instead of reverting
+            // to the first-run defaults on the next launch.
+            defaults.set(NSNumber(value: UInt64(0)), forKey: key)
         }
     }
 
     private static func loadChord(
         _ defaults: UserDefaults,
-        key: String
+        key: String,
+        fallback: WindowControlModifierChord
     ) -> WindowControlModifierChord? {
-        guard let value = defaults.object(forKey: key) as? NSNumber else {
-            return nil
+        guard let storedValue = defaults.object(forKey: key) else {
+            return fallback
         }
+        guard let value = storedValue as? NSNumber else { return nil }
         let chord = WindowControlModifierChord(rawValue: value.uint64Value)
         return chord.isEmpty ? nil : chord
     }

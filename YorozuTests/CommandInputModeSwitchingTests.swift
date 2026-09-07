@@ -429,6 +429,18 @@ final class CommandInputModeSwitchingTests: XCTestCase {
         XCTAssertNil(state.handleFlagsChanged(keyCode: 54, flags: []))
     }
 
+    func testClickFreePointerMotionIsObservedAndCancelsCommandAlone() {
+        XCTAssertNotEqual(
+            CommandInputModeEventTapWorker.eventMask & (CGEventMask(1) << CGEventType.mouseMoved.rawValue), 0
+        )
+        for keyCode: CGKeyCode in [54, 55] {
+            var state = CommandInputModeStateMachine()
+            _ = state.handleFlagsChanged(keyCode: keyCode, flags: .maskCommand)
+            state.handleMouseActivity()
+            XCTAssertNil(state.handleFlagsChanged(keyCode: keyCode, flags: []))
+        }
+    }
+
     func testResetPreventsStaleCommandAction() {
         var state = CommandInputModeStateMachine()
 
