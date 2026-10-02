@@ -37,8 +37,19 @@ Yorozu is a lightweight, keyboard-first launcher for macOS. It brings applicatio
 | Open the Action Panel | `⌘ K` |
 | Go back or close | `Esc` |
 | Open Settings | `⌘ ,` |
+| Focus search or the chat/translation input | `⌘ F` |
+| Close the palette | `⌘ W` |
+| Move one page in a focused list | `Page Up` / `Page Down` |
+| Select the first/last item in a focused list | `Home` / `End` |
 
 Feature-specific global shortcuts can be configured in Settings.
+
+Text inputs retain standard macOS editing shortcuts: `⌘ Delete` deletes text back
+to the beginning of the line, and modified arrows move or select text. Item deletion
+and `⌘ E` editing apply when the list has focus; the Action Panel remains available
+from search with `⌘ K`. Press `Esc` in a model, language, or duration picker to return
+to the parent Action Panel. Reserved system shortcuts are warned about by the shortcut
+recorder; other apps may also use a chosen global shortcut.
 
 Input Mode Switching is disabled by default. Enable it from **Settings → General** to
 use Left Command alone for English and Right Command alone for Japanese. It requires
@@ -50,7 +61,8 @@ event monitor remains available while Yorozu is not the active application.
 Window Control is also disabled by default. In **Settings → Window Control**, the
 initial bindings are **Control** to move and **Control + Command** to resize; saved
 custom bindings are preserved, and the two combinations must differ. Hold a combination
-and move the mouse or slide a finger on the trackpad—no click is needed. Releasing the
+and move the mouse or slide a finger on the trackpad—no click is needed. A 6-point
+movement threshold ignores small pointer drift before a Control-click. Releasing the
 combination stops that operation. Move and resize gestures use Accessibility,
 run only while the feature is enabled, and allow normal idle system sleep. During a move,
 the top, left, and right edges show a system glass preview. Releasing all modifier keys
