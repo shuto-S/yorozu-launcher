@@ -2,6 +2,128 @@ import XCTest
 
 final class YorozuUITests: XCTestCase {
     @MainActor
+    func testRootKeyboardScrollReversesWithoutJumping() {
+        verifyKeyboardScroll(routeSearch: nil, idPrefix: "application:bundle:test.yorozu.scroll.")
+    }
+
+    @MainActor
+    func testClipboardKeyboardScrollReversesWithoutJumping() {
+        verifyKeyboardScroll(routeSearch: "Clipboard History", idPrefix: "clipboard:")
+    }
+
+    @MainActor
+    func testSnippetsKeyboardScrollReversesWithoutJumping() {
+        verifyKeyboardScroll(routeSearch: "Snippets", idPrefix: "snippet:")
+    }
+
+    @MainActor
+    func testRapidKeyboardScrollDirectionChanges() {
+        continueAfterFailure = false
+        let application = XCUIApplication()
+        application.launchArguments = ["--ui-testing", "--ui-testing-sticky", "--ui-testing-scroll"]
+        application.launch()
+        let search = application.searchFields["launcher.search"]
+        XCTAssertTrue(search.waitForExistence(timeout: 5))
+        search.typeText("Scroll Fixture")
+        let first = application.descendants(matching: .any)["launcher.row.application:bundle:test.yorozu.scroll.0"]
+        let last = application.descendants(matching: .any)["launcher.row.application:bundle:test.yorozu.scroll.19"]
+        XCTAssertTrue(first.waitForExistence(timeout: 5))
+        for _ in 0..<3 {
+            application.typeText(String(repeating: XCUIKeyboardKey.downArrow.rawValue, count: 19))
+            assertFullyVisible(last, in: application.scrollViews.firstMatch)
+            application.typeText(String(repeating: XCUIKeyboardKey.upArrow.rawValue, count: 19))
+            assertFullyVisible(first, in: application.scrollViews.firstMatch)
+        }
+        application.terminate()
+    }
+
+    @MainActor
+    func testActionPanelKeyboardScrollReversesWithoutJumping() {
+        continueAfterFailure = false
+        let application = XCUIApplication()
+        application.launchArguments = ["--ui-testing", "--ui-testing-sticky"]
+        application.launch()
+        let search = application.searchFields["launcher.search"]
+        XCTAssertTrue(search.waitForExistence(timeout: 5))
+        search.typeText("Keep Awake")
+        XCTAssertTrue(application.descendants(matching: .any)["launcher.row.feature:keepAwake"].waitForExistence(timeout: 5))
+        application.typeKey("k", modifierFlags: .command)
+        let duration = application.buttons["launcher.action.keepAwakeSetDuration"]
+        XCTAssertTrue(duration.waitForExistence(timeout: 2))
+        duration.click()
+        let viewport = application.scrollViews.element(boundBy: 1)
+        func row(_ index: Int) -> XCUIElement {
+            application.buttons["launcher.action.keepAwakeDuration.\(index * 5)"]
+        }
+        XCTAssertTrue(row(0).waitForExistence(timeout: 2))
+        for index in 1...24 {
+            application.typeKey(.downArrow, modifierFlags: [])
+            assertFullyVisible(row(index), in: viewport)
+        }
+        for index in stride(from: 23, through: 0, by: -1) {
+            let before = row(index).frame
+            let wasVisible = viewport.frame.insetBy(dx: -1, dy: -1).contains(before)
+            application.typeKey(.upArrow, modifierFlags: [])
+            assertFullyVisible(row(index), in: viewport)
+            if wasVisible {
+                XCTAssertEqual(row(index).frame.minY, before.minY, accuracy: 1)
+            }
+        }
+        application.terminate()
+    }
+
+    @MainActor
+    private func verifyKeyboardScroll(routeSearch: String?, idPrefix: String) {
+        continueAfterFailure = false
+        let application = XCUIApplication()
+        application.launchArguments = ["--ui-testing", "--ui-testing-sticky", "--ui-testing-scroll"]
+        application.launch()
+        let search = application.searchFields["launcher.search"]
+        XCTAssertTrue(search.waitForExistence(timeout: 5))
+        if let routeSearch {
+            search.typeText(routeSearch)
+            let featureID = routeSearch == "Snippets" ? "snippets" : "clipboardHistory"
+            XCTAssertTrue(application.descendants(matching: .any)["launcher.row.feature:\(featureID)"].waitForExistence(timeout: 5))
+            application.typeKey(.return, modifierFlags: [])
+        }
+        search.click()
+        search.typeText("Scroll Fixture")
+        let viewport = application.scrollViews.firstMatch
+        func row(_ index: Int) -> XCUIElement {
+            let suffix = routeSearch == nil
+                ? String(index)
+                : String(format: "00000000-0000-0000-0000-%012d", index + 1)
+            return application.descendants(matching: .any)["launcher.row.\(idPrefix)\(suffix)"]
+        }
+        XCTAssertTrue(row(0).waitForExistence(timeout: 5))
+        let lastIndex = routeSearch == nil ? 19 : 24
+        for index in 1...lastIndex {
+            application.typeKey(.downArrow, modifierFlags: [])
+            assertFullyVisible(row(index), in: viewport)
+        }
+        for index in stride(from: lastIndex - 1, through: 0, by: -1) {
+            let before = row(index).frame
+            let wasVisible = viewport.frame.insetBy(dx: -1, dy: -1).contains(before)
+            application.typeKey(.upArrow, modifierFlags: [])
+            assertFullyVisible(row(index), in: viewport)
+            if wasVisible {
+                XCTAssertEqual(row(index).frame.minY, before.minY, accuracy: 1,
+                               "An already-visible row must not jump to the top edge")
+            }
+        }
+        application.terminate()
+    }
+
+    @MainActor
+    private func assertFullyVisible(_ row: XCUIElement, in viewport: XCUIElement) {
+        let predicate = NSPredicate { _, _ in
+            row.exists && !row.frame.isEmpty
+                && viewport.frame.insetBy(dx: -1, dy: -1).contains(row.frame)
+        }
+        XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(predicate: predicate, object: nil)], timeout: 2), .completed)
+    }
+
+    @MainActor
     func testKeyboardEditingDoesNotInvokeItemActions() {
         continueAfterFailure = false
         let application = XCUIApplication()

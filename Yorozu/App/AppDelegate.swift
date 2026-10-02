@@ -122,7 +122,7 @@ private final class UITestSleepActivityManager: SleepActivityManaging {
 
 private actor UITestApplicationDiscoverer: ApplicationDiscovering {
     func discoverApplications() async throws -> [DiscoveredApplication] {
-        [
+        let applications = [
             DiscoveredApplication(
                 id: ApplicationIdentity(rawValue: "bundle:com.microsoft.vscode"),
                 bundleIdentifier: "com.microsoft.vscode",
@@ -144,6 +144,20 @@ private actor UITestApplicationDiscoverer: ApplicationDiscovering {
                 rootPriority: 0
             ),
         ]
+        guard ProcessInfo.processInfo.arguments.contains("--ui-testing-scroll") else {
+            return applications
+        }
+        return applications + (0..<32).map { index in
+            let name = String(format: "Scroll Fixture %02d", index)
+            let identifier = "test.yorozu.scroll.\(index)"
+            return DiscoveredApplication(
+                id: ApplicationIdentity(rawValue: "bundle:\(identifier)"),
+                bundleIdentifier: identifier,
+                canonicalURL: URL(fileURLWithPath: "/Applications/\(name).app"),
+                displayName: name, localizedName: nil, version: "1.0",
+                normalizedSearchText: name.launcherNormalized, rootPriority: 0
+            )
+        }
     }
 }
 
@@ -752,7 +766,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
 
+        #if DEBUG
+        if isUITesting, arguments.contains("--ui-testing-scroll") {
+            Task {
+                do {
+                    try await seedScrollFixtures()
+                    viewModel.start()
+                } catch {
+                    preconditionFailure("Isolated scroll fixtures could not be prepared")
+                }
+            }
+        } else {
+            viewModel.start()
+        }
+        #else
         viewModel.start()
+        #endif
         startApplicationDirectoryMonitorIfNeeded()
         if let store, !aiProviderPreferences.isEnabled(.openAIAPI) {
             Task { @MainActor [weak self] in
@@ -867,6 +896,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func showSettings() {
         paletteController.show(route: .settings, origin: .direct)
     }
+
+    #if DEBUG
+    private func seedScrollFixtures() async throws {
+        guard let store = environment.storeOpenResult.store else {
+            throw LauncherStoreError.storeClosed
+        }
+        // Only the disposable UI-testing store is populated; no real clipboard,
+        // application launcher, network, or standard defaults are involved.
+        clipboardPreferences.isEnabled = true
+        for index in 0..<32 {
+            let id = UUID(uuidString: String(format: "00000000-0000-0000-0000-%012d", index + 1))!
+            let name = String(format: "Scroll Fixture %02d", index)
+            let date = Date().addingTimeInterval(-Double(index))
+            _ = try await store.recordClipboardCapture(
+                ClipboardCapture(
+                    id: id, kind: .text, contentHash: name, textContent: name,
+                    filePaths: [], imageData: nil, imageWidth: nil, imageHeight: nil,
+                    normalizedSearchText: name.launcherNormalized,
+                    sourceBundleIdentifier: nil, sourceApplicationName: nil, copiedAt: date
+                ),
+                retentionDays: 30, maximumItems: 2_000
+            )
+            try await store.saveSnippet(Snippet(
+                id: id, name: name, keyword: nil, content: name, useCount: 0,
+                lastUsedAt: nil, createdAt: date, updatedAt: date
+            ))
+        }
+    }
+    #endif
 
     func applicationDidBecomeActive(_ notification: Notification) {
         commandInputModeController.refreshAuthorization()

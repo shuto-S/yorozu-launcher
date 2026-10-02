@@ -321,6 +321,14 @@ Action Panel hover selection requires an actual change in screen pointer positio
 Keyboard-driven scrolling under a stationary pointer must not replace the keyboard
 selection. This uses event-driven hover callbacks, not another monitor or timer.
 
+Result lists and Action Panel selection use `ScrollViewProxy.scrollTo` without an
+explicit anchor so only the minimum movement needed to reveal the complete row is
+performed. Do not gate this on asynchronous visibility callbacks or force each newly
+selected row to the top/center/bottom. Deferred snapshot scrolls must still match the
+current route, result revision, and selection. The `--ui-testing-scroll` fixture mode
+populates only isolated UI-test storage and exercises down/up reversals in Root,
+Clipboard History, Snippets, and the Action Panel.
+
 ### Translation and Calculator
 
 Translation is an explicit Root Search feature. It can use selected text when Accessibility

@@ -650,7 +650,6 @@ private struct CommandResultsListView: View {
     @Bindable var viewModel: LauncherViewModel
     let compact: Bool
 
-    @State private var visibleResults = ResultVisibilityTracker()
     @State private var hoveredResultID: CommandResultID?
     @FocusState private var focusedResultID: CommandResultID?
 
@@ -716,13 +715,6 @@ private struct CommandResultsListView: View {
                                     hoveredResultID = nil
                                 }
                             }
-                            .onScrollVisibilityChange(threshold: 0.999) { isVisible in
-                                if isVisible {
-                                    visibleResults.ids.insert(result.id)
-                                } else {
-                                    visibleResults.ids.remove(result.id)
-                                }
-                            }
                             .contextMenu {
                                 contextMenu(for: result)
                             }
@@ -732,28 +724,26 @@ private struct CommandResultsListView: View {
             }
             .scrollIndicators(.automatic)
             .background(Color.clear)
-            .onChange(of: viewModel.selectedID) { previousID, selectedID in
+            .onChange(of: viewModel.selectedID) { _, selectedID in
                 if focusedResultID != nil {
                     focusedResultID = selectedID
                 }
-                guard let selectedID,
-                      !visibleResults.ids.contains(selectedID) else {
-                    return
-                }
-                proxy.scrollTo(
-                    selectedID,
-                    anchor: selectionScrollAnchor(
-                        from: previousID,
-                        to: selectedID
-                    )
-                )
+                guard let selectedID else { return }
+                // A nil anchor reveals the whole row with the minimum movement.
+                // Visibility callbacks arrive after layout and can be stale while
+                // reversing direction or repeating arrow keys.
+                proxy.scrollTo(selectedID)
             }
             .onChange(of: viewModel.resultsRevision) {
-                visibleResults.ids.removeAll()
                 guard let selectedID = viewModel.selectedID else { return }
+                let revision = viewModel.resultsRevision
+                let route = viewModel.route
                 Task { @MainActor in
                     await Task.yield()
-                    proxy.scrollTo(selectedID, anchor: .center)
+                    guard viewModel.resultsRevision == revision,
+                          viewModel.route == route,
+                          viewModel.selectedID == selectedID else { return }
+                    proxy.scrollTo(selectedID)
                 }
             }
             .onChange(of: focusedResultID) { _, focusedResultID in
@@ -764,10 +754,9 @@ private struct CommandResultsListView: View {
                 viewModel.selectedID = focusedResultID
             }
             .task(id: viewModel.route) {
-                visibleResults.ids.removeAll()
                 await Task.yield()
-                guard let selectedID = viewModel.selectedID else { return }
-                proxy.scrollTo(selectedID, anchor: .center)
+                guard !Task.isCancelled, let selectedID = viewModel.selectedID else { return }
+                proxy.scrollTo(selectedID)
             }
         }
     }
@@ -783,25 +772,6 @@ private struct CommandResultsListView: View {
         } else {
             CommandResultRow(result: result)
         }
-    }
-
-    private func selectionScrollAnchor(
-        from previousID: CommandResultID?,
-        to selectedID: CommandResultID
-    ) -> UnitPoint {
-        guard let previousID,
-              let previousIndex = viewModel.resultIndex(for: previousID),
-              let selectedIndex = viewModel.resultIndex(for: selectedID) else {
-            return .center
-        }
-
-        if selectedIndex > previousIndex {
-            return .bottom
-        }
-        if selectedIndex < previousIndex {
-            return .top
-        }
-        return .center
     }
 
     @ViewBuilder
@@ -919,16 +889,6 @@ private struct CommandResultsListView: View {
 }
 
 @MainActor
-private final class ResultVisibilityTracker {
-    var ids: Set<CommandResultID> = []
-}
-
-@MainActor
-private final class ActionVisibilityTracker {
-    var ids: Set<LauncherActionID> = []
-}
-
-@MainActor
 final class PaletteHoverSelectionTracker {
     private var pointerLocation: CGPoint?
 
@@ -953,7 +913,6 @@ final class PaletteHoverSelectionTracker {
 
 private struct ActionPanelView: View {
     @Bindable var viewModel: LauncherViewModel
-    @State private var visibleActions = ActionVisibilityTracker()
     @State private var hoverSelection = PaletteHoverSelectionTracker()
     @FocusState private var isSearchFocused: Bool
 
@@ -973,13 +932,6 @@ private struct ActionPanelView: View {
                         ForEach(viewModel.filteredActionItems) { action in
                             actionRow(action)
                                 .id(action.id)
-                                .onScrollVisibilityChange(threshold: 0.999) { isVisible in
-                                    if isVisible {
-                                        visibleActions.ids.insert(action.id)
-                                    } else {
-                                        visibleActions.ids.remove(action.id)
-                                    }
-                                }
                         }
 
                         if viewModel.filteredActionItems.isEmpty {
@@ -994,29 +946,20 @@ private struct ActionPanelView: View {
                     .padding(.bottom, 8)
                 }
                 .scrollIndicators(.never)
-                .onChange(of: viewModel.selectedActionID) { previousID, selectedID in
+                .onChange(of: viewModel.selectedActionID) { _, selectedID in
                     hoverSelection.recordPointer(at: NSEvent.mouseLocation)
-                    guard let selectedID,
-                          !visibleActions.ids.contains(selectedID) else {
-                        return
-                    }
-                    proxy.scrollTo(
-                        selectedID,
-                        anchor: selectionScrollAnchor(
-                            from: previousID,
-                            to: selectedID
-                        )
-                    )
+                    guard let selectedID else { return }
+                    proxy.scrollTo(selectedID)
                 }
-                .onChange(of: viewModel.filteredActionItems.map(\.id)) { _, _ in
+                .onChange(of: viewModel.filteredActionItems.map(\.id)) { _, actionIDs in
                     hoverSelection.recordPointer(at: NSEvent.mouseLocation)
-                    visibleActions.ids.removeAll()
                     guard let selectedID = viewModel.selectedActionID else { return }
                     Task { @MainActor in
                         await Task.yield()
-                        guard selectedID == viewModel.selectedActionID else { return }
+                        guard selectedID == viewModel.selectedActionID,
+                              actionIDs == viewModel.filteredActionItems.map(\.id) else { return }
                         hoverSelection.recordPointer(at: NSEvent.mouseLocation)
-                        proxy.scrollTo(selectedID, anchor: .center)
+                        proxy.scrollTo(selectedID)
                     }
                 }
             }
@@ -1107,24 +1050,6 @@ private struct ActionPanelView: View {
         }
     }
 
-    private func selectionScrollAnchor(
-        from previousID: LauncherActionID?,
-        to selectedID: LauncherActionID
-    ) -> UnitPoint {
-        let actionIDs = viewModel.filteredActionItems.map(\.id)
-        guard let previousID,
-              let previousIndex = actionIDs.firstIndex(of: previousID),
-              let selectedIndex = actionIDs.firstIndex(of: selectedID) else {
-            return .center
-        }
-        if selectedIndex > previousIndex {
-            return .bottom
-        }
-        if selectedIndex < previousIndex {
-            return .top
-        }
-        return .center
-    }
 }
 
 private struct AdaptiveActionPanelSurface: ViewModifier {

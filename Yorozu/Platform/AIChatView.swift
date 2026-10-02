@@ -232,7 +232,7 @@ private struct AIConversationList: View {
             .scrollIndicators(.automatic)
             .onChange(of: viewModel.selectedListID) { _, selectedID in
                 guard let selectedID else { return }
-                proxy.scrollTo(selectedID, anchor: .center)
+                proxy.scrollTo(selectedID)
             }
         }
     }
