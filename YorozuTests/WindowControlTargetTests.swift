@@ -406,6 +406,7 @@ final class WindowControlEventPipelineTests: XCTestCase {
             if activity == .listening { cancelled.fulfill() }
         }
         XCTAssertFalse(worker.handle(type: .mouseMoved, event: try event(.mouseMoved, x: 200, y: 200, flags: moveFlags)))
+        XCTAssertFalse(worker.handle(type: .mouseMoved, event: try event(.mouseMoved, x: 210, y: 200, flags: moveFlags)))
         await fulfillment(of: [acquired], timeout: 2)
         XCTAssertFalse(worker.handle(type: .leftMouseDown, event: try event(.leftMouseDown, x: 200, y: 200, flags: moveFlags)))
         XCTAssertFalse(worker.handle(type: .mouseMoved, event: try event(.mouseMoved, x: 2, y: 250, flags: moveFlags)))
@@ -413,7 +414,7 @@ final class WindowControlEventPipelineTests: XCTestCase {
         XCTAssertFalse(worker.handle(type: .flagsChanged, event: try event(.flagsChanged, x: 2, y: 250, flags: [])))
         await fulfillment(of: [cancelled], timeout: 2)
         XCTAssertEqual(accessor.targetCount, 1)
-        XCTAssertTrue(accessor.positions.isEmpty)
+        XCTAssertTrue(accessor.positions.allSatisfy { $0 == CGPoint(x: 110, y: 100) })
         XCTAssertTrue(accessor.sizes.isEmpty)
         XCTAssertTrue(accessor.frames.isEmpty)
     }
@@ -427,6 +428,7 @@ final class WindowControlEventPipelineTests: XCTestCase {
                 if activity == .listening { stopped.fulfill() }
             }
             XCTAssertFalse(worker.handle(type: .mouseMoved, event: try event(.mouseMoved, x: 200, y: 200, flags: flags)))
+            XCTAssertFalse(worker.handle(type: .mouseMoved, event: try event(.mouseMoved, x: 210, y: 200, flags: flags)))
             await fulfillment(of: [started], timeout: 2)
             worker.stop()
             accessor.lookupGate.signal()

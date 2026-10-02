@@ -126,7 +126,8 @@ Window Control follows the same permission and signing rules. Its active session
 created only after the feature is enabled, two distinct modifier combinations are set,
 and the current process is trusted. It observes modifier changes and `mouseMoved`
 without consuming any events. Pressing a matching chord arms a pointer anchor but does
-not access AX or activate a window until the pointer moves. Initial bindings are Control
+not access AX or activate a window until the pointer moves at least 6 points from the
+armed position. Repeated modifier events preserve that position. Initial bindings are Control
 for move and Control+Command for resize; existing custom bindings are retained and an
 explicitly cleared binding remains unset. Unmodified motion returns without AX work or
 button-state queries. While the chord is held, successive pointer movements keep the

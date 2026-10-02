@@ -1305,6 +1305,8 @@ enum WindowControlEventTapConfiguration {
 
 /// Event-only admission: no AX requests, timers, or mouse-button ownership.
 struct WindowControlModifierSession: Sendable {
+    // Ignore small pointer drift while preparing a Control-click or shortcut.
+    static let activationDistance: CGFloat = 6
     struct Completion: Equatable, Sendable {
         let shouldCommitSnap: Bool
     }
@@ -1358,7 +1360,7 @@ struct WindowControlModifierSession: Sendable {
 
             if type == .flagsChanged {
                 // Merely pressing Control (e.g. Control-C) must not raise a window.
-                if operation == nil {
+                if operation == nil, armedSample == nil {
                     armedSample = .init(operation: nextOperation, location: location)
                 }
             } else {
@@ -1366,7 +1368,12 @@ struct WindowControlModifierSession: Sendable {
                     operation: nextOperation, location: location
                 )
                 if operation == nil {
-                    let initial = armedSample ?? sample
+                    guard let initial = armedSample else {
+                        armedSample = sample
+                        return transition
+                    }
+                    guard hypot(location.x - initial.location.x, location.y - initial.location.y)
+                        >= Self.activationDistance else { return transition }
                     transition.begin = initial
                     operation = nextOperation
                     armedSample = nil

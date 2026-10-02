@@ -445,6 +445,9 @@ final class WindowControlTests: XCTestCase {
                 .mouseMoved, at: CGPoint(x: 200, y: 200), flags: .maskAlternate
             )
             XCTAssertFalse(worker.handle(type: .mouseMoved, event: event))
+            XCTAssertFalse(worker.handle(type: .mouseMoved, event: try pointerEvent(
+                .mouseMoved, at: CGPoint(x: 210, y: 200), flags: .maskAlternate
+            )))
             await fulfillment(of: [lookupStarted], timeout: 1)
             XCTAssertFalse(worker.handle(type: .mouseMoved, event: try pointerEvent(
                 .mouseMoved, at: CGPoint(x: 400, y: 400), flags: .maskAlternate
@@ -503,6 +506,9 @@ final class WindowControlTests: XCTestCase {
         XCTAssertFalse(worker.handle(type: .mouseMoved, event: try pointerEvent(
             .mouseMoved, at: CGPoint(x: 200, y: 200), flags: .maskAlternate
         )))
+        XCTAssertFalse(worker.handle(type: .mouseMoved, event: try pointerEvent(
+            .mouseMoved, at: CGPoint(x: 210, y: 200), flags: .maskAlternate
+        )))
         await fulfillment(of: [acquired], timeout: 1)
 
         worker.update(configuration: .init(moveChord: [.command], resizeChord: [.command, .shift]))
@@ -510,7 +516,7 @@ final class WindowControlTests: XCTestCase {
             .mouseMoved, at: CGPoint(x: 0, y: 200), flags: .maskAlternate
         )))
         await fulfillment(of: [cancelled], timeout: 1)
-        XCTAssertTrue(accessor.movedPositions.isEmpty)
+        XCTAssertTrue(accessor.movedPositions.allSatisfy { $0 == CGPoint(x: 110, y: 100) })
         XCTAssertTrue(accessor.resizedSizes.isEmpty)
         XCTAssertTrue(accessor.setFrames.isEmpty)
     }
@@ -586,6 +592,9 @@ final class WindowControlTests: XCTestCase {
             .mouseMoved, at: CGPoint(x: 200, y: 200), flags: .maskControl
         )))
         XCTAssertFalse(worker.handle(type: .mouseMoved, event: try pointerEvent(
+            .mouseMoved, at: CGPoint(x: 210, y: 200), flags: .maskControl
+        )))
+        XCTAssertFalse(worker.handle(type: .mouseMoved, event: try pointerEvent(
             .mouseMoved, at: CGPoint(x: 0, y: 230), flags: []
         )))
         await fulfillment(of: [finished], timeout: 1)
@@ -593,7 +602,7 @@ final class WindowControlTests: XCTestCase {
             XCTAssertFalse(worker.handle(type: type, event: try pointerEvent(type, at: .zero, flags: [])))
         }
         XCTAssertEqual(accessor.targetCount, 1)
-        XCTAssertTrue(accessor.movedPositions.isEmpty)
+        XCTAssertEqual(accessor.movedPositions.last, CGPoint(x: 110, y: 100))
         XCTAssertTrue(accessor.resizedSizes.isEmpty)
         XCTAssertTrue(accessor.setFrames.isEmpty)
     }
@@ -740,10 +749,36 @@ final class WindowControlTests: XCTestCase {
         }
     }
 
+    func testPointerDriftBeforeControlClickCannotMoveOrSnapAWindow() {
+        let configuration = WindowControlConfiguration(moveChord: [.control], resizeChord: [.control, .command])
+        var session = WindowControlModifierSession()
+        _ = session.handle(type: .flagsChanged, flags: .maskControl, location: .zero, configuration: configuration)
+        for point in [CGPoint(x: 1, y: 1), CGPoint(x: 3, y: 4), .zero] {
+            XCTAssertEqual(session.handle(type: .mouseMoved, flags: .maskControl, location: point, configuration: configuration), .init())
+        }
+        XCTAssertNil(session.operation)
+        _ = session.handle(type: .rightMouseDown, flags: .maskControl, location: .zero, configuration: configuration)
+        XCTAssertEqual(session.handle(type: .mouseMoved, flags: .maskControl, location: CGPoint(x: 30, y: 0), configuration: configuration), .init())
+        XCTAssertNil(session.handle(type: .flagsChanged, flags: [], location: .zero, configuration: configuration).completion)
+    }
+
+    func testPointerThresholdAccumulatesFromContactStartWithoutRetargeting() {
+        let configuration = WindowControlConfiguration(moveChord: [.control], resizeChord: [.control, .command])
+        var session = WindowControlModifierSession()
+        let start = CGPoint(x: 100, y: 100)
+        _ = session.handle(type: .mouseMoved, flags: .maskControl, location: start, configuration: configuration)
+        XCTAssertNil(session.handle(type: .mouseMoved, flags: .maskControl, location: CGPoint(x: 103, y: 100), configuration: configuration).begin)
+        let transition = session.handle(type: .mouseMoved, flags: .maskControl, location: CGPoint(x: 106, y: 100), configuration: configuration)
+        XCTAssertEqual(transition.begin?.location, start)
+        XCTAssertEqual(transition.update?.location, CGPoint(x: 106, y: 100))
+        XCTAssertEqual(session.operation, .move)
+    }
+
     func testModifierSessionRebasesWhenSwitchingBetweenMoveAndResize() {
         let configuration = WindowControlConfiguration(moveChord: [.control], resizeChord: [.control, .command])
         var session = WindowControlModifierSession()
         _ = session.handle(type: .mouseMoved, flags: .maskControl, location: .zero, configuration: configuration)
+        _ = session.handle(type: .mouseMoved, flags: .maskControl, location: CGPoint(x: 10, y: 0), configuration: configuration)
         let switchPoint = CGPoint(x: 30, y: 40)
         let changed = session.handle(type: .flagsChanged, flags: [.maskControl, .maskCommand], location: switchPoint, configuration: configuration)
         XCTAssertEqual(changed.completion?.shouldCommitSnap, false)
@@ -760,7 +795,8 @@ final class WindowControlTests: XCTestCase {
         let configuration = WindowControlConfiguration(moveChord: [.control], resizeChord: [.control, .command])
         var session = WindowControlModifierSession()
         _ = session.handle(type: .mouseMoved, flags: .maskControl, location: .zero, configuration: configuration)
-        for x in 1...100 {
+        XCTAssertNotNil(session.handle(type: .mouseMoved, flags: .maskControl, location: CGPoint(x: 10, y: 20), configuration: configuration).begin)
+        for x in 11...110 {
             let point = CGPoint(x: x, y: 20)
             let transition = session.handle(type: .mouseMoved, flags: .maskControl, location: point, configuration: configuration)
             XCTAssertNil(transition.begin, "Lifting and placing a finger must not retarget the gesture")
@@ -775,10 +811,12 @@ final class WindowControlTests: XCTestCase {
                      .otherMouseDown, .leftMouseDragged, .rightMouseDragged, .otherMouseDragged] {
             var session = WindowControlModifierSession()
             _ = session.handle(type: .mouseMoved, flags: .maskControl, location: .zero, configuration: configuration)
+            _ = session.handle(type: .mouseMoved, flags: .maskControl, location: CGPoint(x: 10, y: 0), configuration: configuration)
             XCTAssertTrue(session.handle(type: type, flags: .maskControl, location: .zero, configuration: configuration).shouldCancel)
             XCTAssertEqual(session.handle(type: .mouseMoved, flags: .maskControl, location: .zero, configuration: configuration), .init())
             XCTAssertEqual(session.handle(type: .flagsChanged, flags: [], location: .zero, configuration: configuration), .init())
-            XCTAssertNotNil(session.handle(type: .mouseMoved, flags: .maskControl, location: .zero, configuration: configuration).begin)
+            XCTAssertNil(session.handle(type: .mouseMoved, flags: .maskControl, location: .zero, configuration: configuration).begin)
+            XCTAssertNotNil(session.handle(type: .mouseMoved, flags: .maskControl, location: CGPoint(x: 10, y: 0), configuration: configuration).begin)
         }
     }
 
@@ -790,6 +828,7 @@ final class WindowControlTests: XCTestCase {
         ] {
             var session = WindowControlModifierSession()
             _ = session.handle(type: .mouseMoved, flags: .maskControl, location: .zero, configuration: configuration)
+            _ = session.handle(type: .mouseMoved, flags: .maskControl, location: CGPoint(x: 10, y: 0), configuration: configuration)
             let transition = session.handle(type: type, flags: flags, location: .zero, configuration: configuration)
             XCTAssertEqual(transition.completion?.shouldCommitSnap, false)
         }
