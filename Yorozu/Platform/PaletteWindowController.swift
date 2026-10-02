@@ -780,68 +780,96 @@ final class PaletteWindowController: NSWindowController, NSWindowDelegate {
 
     private func installKeyMonitor() {
         keyEventMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
-            guard let self,
-                  self.window?.isKeyWindow == true else {
-                return event
-            }
+            guard let self else { return event }
+            return self.handleMonitoredKeyEvent(event)
+        }
+    }
 
-            let action = PaletteKeyEventPolicy.action(
-                keyCode: event.keyCode,
-                modifiers: event.modifierFlags,
-                hasMarkedText: self.fieldEditorHasMarkedText,
-                route: self.viewModel.route,
-                isActionPanelPresented: self.viewModel.isActionPanelPresented,
-                isModalPresented: self.viewModel.isModalPresented,
-                isAIConversationPage: self.viewModel.route.isAI
-                    && !self.viewModel.aiChatViewModel.isListVisible,
-                isRecordingModifierShortcut: WindowControlModifierCapture.isAnyRecording
-                    || self.window?.firstResponder is KeyboardShortcuts.RecorderCocoa
-                    || (self.window?.firstResponder as? NSTextView)?.delegate is KeyboardShortcuts.RecorderCocoa,
-                isEditingText: self.activeTextEditor != nil && !self.isSearchEditor
-                    && !self.viewModel.isActionPanelPresented,
-                isAliasApplicationPicker: self.viewModel.paletteModal == .aliasApplicationPicker
-                    && self.activeTextEditor != nil,
-                isTextInputFocused: self.activeTextEditor != nil
+    private func handleMonitoredKeyEvent(_ event: NSEvent) -> NSEvent? {
+        guard self.window?.isKeyWindow == true else {
+            return event
+        }
+
+        return handleKeyAction(keyAction(for: event), event: event)
+    }
+
+    // Keep responder inspection separate from dispatch: Swift 6.3/6.4's
+    // Release optimizer crashes when these borrowed AppKit values are combined.
+    @inline(never)
+    private func keyAction(for event: NSEvent) -> PaletteKeyEventAction {
+        let hasTextEditor = activeTextEditor != nil
+        var isRecording = WindowControlModifierCapture.isAnyRecording
+        if window?.firstResponder is KeyboardShortcuts.RecorderCocoa { isRecording = true }
+        if isRecordingShortcutInFieldEditor { isRecording = true }
+        var isConversation = false
+        if viewModel.route.isAI { isConversation = !viewModel.aiChatViewModel.isListVisible }
+        var isEditing = false
+        var isPickingApplication = false
+        if hasTextEditor {
+            if !isSearchEditor { isEditing = !viewModel.isActionPanelPresented }
+            isPickingApplication = viewModel.paletteModal == .aliasApplicationPicker
+        }
+
+        return PaletteKeyEventPolicy.action(
+            keyCode: event.keyCode,
+            modifiers: event.modifierFlags,
+            hasMarkedText: self.fieldEditorHasMarkedText,
+            route: self.viewModel.route,
+            isActionPanelPresented: self.viewModel.isActionPanelPresented,
+            isModalPresented: self.viewModel.isModalPresented,
+            isAIConversationPage: isConversation,
+            isRecordingModifierShortcut: isRecording,
+            isEditingText: isEditing,
+            isAliasApplicationPicker: isPickingApplication,
+            isTextInputFocused: hasTextEditor
+        )
+    }
+
+    @inline(never)
+    private var isRecordingShortcutInFieldEditor: Bool {
+        guard let editor = activeTextEditor else { return false }
+        return editor.delegate is KeyboardShortcuts.RecorderCocoa
+    }
+
+    @inline(never)
+    private func handleKeyAction(_ action: PaletteKeyEventAction, event: NSEvent) -> NSEvent? {
+        switch action {
+        case .passThrough:
+            return event
+        case .handleCommandShortcut:
+            let modifiers = event.modifierFlags.intersection(
+                .deviceIndependentFlagsMask
             )
-
-            switch action {
-            case .passThrough:
-                return event
-            case .handleCommandShortcut:
-                let modifiers = event.modifierFlags.intersection(
-                    .deviceIndependentFlagsMask
-                )
-                if self.handleCommandShortcut(event, modifiers: modifiers) {
-                    return nil
-                }
-                return event
-            case let .moveSelection(offset):
-                if self.viewModel.paletteModal == .aliasApplicationPicker {
-                    self.viewModel.moveAliasApplicationSelection(by: offset)
-                } else if self.viewModel.isActionPanelPresented {
-                    self.viewModel.moveActionSelection(by: offset)
-                } else {
-                    self.viewModel.moveSelection(by: offset)
-                }
-                return nil
-            case .performPrimaryAction:
-                if self.viewModel.isActionPanelPresented {
-                    self.viewModel.performSelectedAction()
-                } else {
-                    self.viewModel.performPrimaryAction()
-                }
-                return nil
-            case .submitModal:
-                self.viewModel.performModalSubmit()
-                return nil
-            case .escape:
-                if self.viewModel.isActionPanelPresented {
-                    self.viewModel.escapeActionPanel()
-                } else {
-                    self.viewModel.escape()
-                }
+            if self.handleCommandShortcut(event, modifiers: modifiers) {
                 return nil
             }
+            return event
+        case let .moveSelection(offset):
+            if self.viewModel.paletteModal == .aliasApplicationPicker {
+                self.viewModel.moveAliasApplicationSelection(by: offset)
+            } else if self.viewModel.isActionPanelPresented {
+                self.viewModel.moveActionSelection(by: offset)
+            } else {
+                self.viewModel.moveSelection(by: offset)
+            }
+            return nil
+        case .performPrimaryAction:
+            if self.viewModel.isActionPanelPresented {
+                self.viewModel.performSelectedAction()
+            } else {
+                self.viewModel.performPrimaryAction()
+            }
+            return nil
+        case .submitModal:
+            self.viewModel.performModalSubmit()
+            return nil
+        case .escape:
+            if self.viewModel.isActionPanelPresented {
+                self.viewModel.escapeActionPanel()
+            } else {
+                self.viewModel.escape()
+            }
+            return nil
         }
     }
 
