@@ -1468,6 +1468,7 @@ private struct ShortcutsSettingsView: View {
                 Text("settings.shortcuts.global-section")
             } footer: {
                 Text("settings.shortcuts.footer")
+                Text("Command-Space is normally used by Spotlight; Control-Space switches input sources. If a shortcut conflicts with macOS or another app, choose another combination or change it in System Settings → Keyboard → Keyboard Shortcuts.")
             }
         }
         .formStyle(.grouped)

@@ -1026,6 +1026,9 @@ private struct ActionPanelView: View {
             TextField("Search for actions…", text: $viewModel.actionQuery)
                 .textFieldStyle(.plain)
                 .focused($isSearchFocused)
+                .onChange(of: viewModel.actionFocusRequest) { _, _ in
+                    isSearchFocused = true
+                }
                 .accessibilityIdentifier("launcher.action-search")
                 .accessibilityLabel("Search actions")
                 .font(.body)

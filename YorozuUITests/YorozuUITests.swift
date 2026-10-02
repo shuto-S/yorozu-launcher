@@ -2,6 +2,33 @@ import XCTest
 
 final class YorozuUITests: XCTestCase {
     @MainActor
+    func testKeyboardEditingDoesNotInvokeItemActions() {
+        continueAfterFailure = false
+        let application = XCUIApplication()
+        application.launchArguments = ["--ui-testing", "--ui-testing-sticky"]
+        application.launch()
+        let search = application.searchFields["launcher.search"]
+        XCTAssertTrue(search.waitForExistence(timeout: 5))
+        search.click()
+        search.typeText("vsc")
+        XCTAssertTrue(application.descendants(matching: .any)["launcher.row.application:bundle:com.microsoft.vscode"].waitForExistence(timeout: 5))
+        application.typeKey("e", modifierFlags: .command)
+        XCTAssertFalse(application.descendants(matching: .any)["palette.modal"].exists)
+        application.typeKey(.delete, modifierFlags: .command)
+        XCTAssertEqual(search.value as? String, "")
+        XCTAssertFalse(application.descendants(matching: .any)["palette.modal"].exists)
+        search.typeText("vsc")
+        application.typeKey("p", modifierFlags: [.command, .shift])
+        application.typeKey("k", modifierFlags: .command)
+        XCTAssertTrue(application.buttons["launcher.action.togglePin"].waitForExistence(timeout: 2))
+        XCTAssertEqual(application.buttons["launcher.action.togglePin"].label, "Pin")
+        application.typeKey(.escape, modifierFlags: [])
+        application.typeKey("f", modifierFlags: .command)
+        application.typeKey(.delete, modifierFlags: .command)
+        XCTAssertEqual(search.value as? String, "")
+    }
+
+    @MainActor
     func testSettingsRemainVisibleWhenApplicationDeactivates() {
         continueAfterFailure = false
         let application = XCUIApplication()

@@ -569,6 +569,11 @@ final class AIChatViewModel {
         selectedListID = id
     }
 
+    func requestInputFocus() {
+        if isListVisible { focusRequest += 1 }
+        else { composerFocusRequest += 1 }
+    }
+
     func moveSelection(by delta: Int) {
         guard isListVisible else { return }
         let ids = (showsNewChatCommand ? [Self.newChatSelectionID] : [])
@@ -2211,6 +2216,10 @@ final class TranslationViewModel {
         isChoosingProvider = false
         isChoosingModel = false
         isChoosingReasoningEffort = false
+    }
+
+    var isChoosingAction: Bool {
+        isChoosingTargetLanguage || isChoosingProvider || isChoosingModel || isChoosingReasoningEffort
     }
 
     /// Performs a translation-specific Action Panel action. Returning true keeps

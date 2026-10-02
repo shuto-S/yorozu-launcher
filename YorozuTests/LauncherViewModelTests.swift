@@ -5,6 +5,57 @@ import XCTest
 
 @MainActor
 final class LauncherViewModelTests: XCTestCase {
+    func testCommandMatcherPreservesTextEditingAndRequiresExactModifiers() {
+        for key in [UInt16(51), 117] {
+            XCTAssertNil(PaletteCommandShortcut.match(keyCode: key, characters: nil, modifiers: .command, isEditingText: true))
+            XCTAssertEqual(PaletteCommandShortcut.match(keyCode: key, characters: nil, modifiers: .command, isEditingText: false), .delete)
+        }
+        XCTAssertNil(PaletteCommandShortcut.match(keyCode: 14, characters: "e", modifiers: .command, isEditingText: true))
+        for extra: NSEvent.ModifierFlags in [.shift, .option, .control] {
+            XCTAssertNil(PaletteCommandShortcut.match(keyCode: 35, characters: "p", modifiers: [.command, extra], isEditingText: false))
+            XCTAssertNil(PaletteCommandShortcut.match(keyCode: 51, characters: nil, modifiers: [.command, extra], isEditingText: false))
+        }
+        XCTAssertEqual(PaletteCommandShortcut.match(keyCode: 3, characters: "F", modifiers: [.command, .shift], isEditingText: false), .reveal)
+    }
+
+    func testCommandMatcherUsesLayoutCharactersInsteadOfPhysicalLetterPosition() {
+        XCTAssertEqual(PaletteCommandShortcut.match(keyCode: 0, characters: "k", modifiers: .command, isEditingText: true), .actions)
+        XCTAssertEqual(PaletteCommandShortcut.match(keyCode: 40, characters: "f", modifiers: .command, isEditingText: true), .search)
+        XCTAssertEqual(PaletteCommandShortcut.match(keyCode: 13, characters: "w", modifiers: .command, isEditingText: true), .close)
+    }
+
+    func testChatComposerOnlySendsOnItsDefinedReturnCombinations() {
+        XCTAssertTrue(AIComposerKeyPolicy.shouldSend(modifiers: []))
+        XCTAssertTrue(AIComposerKeyPolicy.shouldSend(modifiers: .command))
+        for modifiers: NSEvent.ModifierFlags in [.shift, .option, .control, [.command, .option], [.command, .shift]] {
+            XCTAssertFalse(AIComposerKeyPolicy.shouldSend(modifiers: modifiers))
+        }
+    }
+
+    func testModifiedArrowsRemainTextEditingCommands() {
+        for modifier: NSEvent.ModifierFlags in [.option, .shift, .control] {
+            for key: UInt16 in [125, 126] {
+                XCTAssertEqual(PaletteKeyEventPolicy.action(keyCode: key, modifiers: modifier, hasMarkedText: false, route: .root, isActionPanelPresented: false), .passThrough)
+            }
+        }
+        XCTAssertEqual(PaletteKeyEventPolicy.action(keyCode: 36, modifiers: .command, hasMarkedText: true, route: .root, isActionPanelPresented: false), .passThrough)
+    }
+
+    func testAliasPickerNavigationAndCompositionAreIsolatedFromUnderlyingList() {
+        for (key, action): (UInt16, PaletteKeyEventAction) in [(125, .moveSelection(1)), (126, .moveSelection(-1)), (36, .submitModal)] {
+            XCTAssertEqual(PaletteKeyEventPolicy.action(keyCode: key, modifiers: [], hasMarkedText: false, route: .aliases, isActionPanelPresented: false, isModalPresented: true, isAliasApplicationPicker: true), action)
+            XCTAssertEqual(PaletteKeyEventPolicy.action(keyCode: key, modifiers: [], hasMarkedText: true, route: .aliases, isActionPanelPresented: false, isModalPresented: true, isAliasApplicationPicker: true), .passThrough)
+        }
+        XCTAssertEqual(PaletteKeyEventPolicy.action(keyCode: 36, modifiers: [.command, .shift], hasMarkedText: false, route: .root, isActionPanelPresented: false, isModalPresented: true), .passThrough)
+    }
+
+    func testPageAndBoundaryNavigationOnlyInterceptsListFocus() {
+        for (key, action): (UInt16, PaletteKeyEventAction) in [(116, .moveSelection(-8)), (121, .moveSelection(8)), (115, .moveSelection(-Int(Int32.max))), (119, .moveSelection(Int(Int32.max)))] {
+            XCTAssertEqual(PaletteKeyEventPolicy.action(keyCode: key, modifiers: [], hasMarkedText: false, route: .root, isActionPanelPresented: false), action)
+            XCTAssertEqual(PaletteKeyEventPolicy.action(keyCode: key, modifiers: [], hasMarkedText: false, route: .root, isActionPanelPresented: false, isTextInputFocused: true), .passThrough)
+        }
+    }
+
     func testUITestEnvironmentUsesOnlyIsolatedDependencies() async throws {
         let runID = "unit-\(UUID().uuidString)"
         let suiteName = "com.yorozu.app.ui-tests.\(runID)"
@@ -1905,6 +1956,11 @@ final class LauncherViewModelTests: XCTestCase {
         )
         fixture.viewModel.performAction(.keepAwakeSetDuration)
         XCTAssertEqual(fixture.viewModel.actionItems.count, 49)
+
+        fixture.viewModel.escape()
+        XCTAssertTrue(fixture.viewModel.isActionPanelPresented)
+        XCTAssertTrue(fixture.viewModel.actionItems.contains(where: { $0.id == .keepAwakeSetDuration }))
+        fixture.viewModel.performAction(.keepAwakeSetDuration)
 
         fixture.viewModel.performAction(.keepAwakeDuration(.minutes(10)))
         XCTAssertEqual(fixture.viewModel.keepAwakeController.activeDuration, .minutes(10))

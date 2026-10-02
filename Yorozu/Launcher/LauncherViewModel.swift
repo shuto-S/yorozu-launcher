@@ -207,6 +207,7 @@ final class LauncherViewModel {
             reconcileActionSelection()
         }
     }
+    private(set) var actionFocusRequest = 0
     var selectedActionID: LauncherActionID?
     private(set) var isChoosingKeepAwakeDuration = false
     private(set) var aliasEditorMode: AliasEditorMode?
@@ -916,6 +917,32 @@ final class LauncherViewModel {
         let currentIndex = selectedID.flatMap { resultIndexByID[$0] } ?? 0
         let nextIndex = min(max(currentIndex + delta, 0), results.count - 1)
         selectedID = results[nextIndex].id
+    }
+
+    func requestSearchFocus() {
+        if isActionPanelPresented {
+            // Recreate only the search control's focus request, not the list.
+            actionFocusRequest += 1
+        } else if route.isAI {
+            aiChatViewModel.requestInputFocus()
+        } else if route == .translation {
+            translationViewModel.requestInputFocus()
+        } else if route != .settings {
+            focusRequest += 1
+        }
+    }
+
+    func escapeActionPanel() {
+        let isNested = isChoosingKeepAwakeDuration
+            || (route.isAI && (aiChatViewModel.isChoosingModel || aiChatViewModel.isChoosingReasoningEffort))
+            || (route == .translation && translationViewModel.isChoosingAction)
+        guard isNested else { dismissActionPanel(); return }
+        isChoosingKeepAwakeDuration = false
+        if route.isAI { aiChatViewModel.cancelActionNavigation() }
+        if route == .translation { translationViewModel.cancelActionNavigation() }
+        actionQuery = ""
+        selectedActionID = filteredActionItems.first?.id
+        actionFocusRequest += 1
     }
 
     func performPrimaryAction() {
@@ -1635,7 +1662,7 @@ final class LauncherViewModel {
         if paletteModal != nil {
             dismissModal()
         } else if isActionPanelPresented {
-            dismissActionPanel()
+            escapeActionPanel()
         } else if route.isAI, aiChatViewModel.handleEscape() {
             return
         } else if aliasEditorMode != nil {
@@ -1922,7 +1949,7 @@ final class LauncherViewModel {
         selectedAliasApplicationID = candidates.first?.id
     }
 
-    private func moveAliasApplicationSelection(by delta: Int) {
+    func moveAliasApplicationSelection(by delta: Int) {
         let candidates = aliasApplicationCandidates
         guard !candidates.isEmpty else { return }
         let currentIndex = selectedAliasApplicationID.flatMap { identity in
