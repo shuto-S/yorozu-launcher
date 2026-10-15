@@ -6,7 +6,11 @@ struct YorozuApp: App {
 
     init() {
         // Keep dependency-provided controls in English even when macOS uses another language.
-        UserDefaults.standard.set(["en"], forKey: "AppleLanguages")
+        let arguments = ProcessInfo.processInfo.arguments
+        if !arguments.contains("--ui-testing")
+            && !arguments.contains("--ui-testing-settings") {
+            UserDefaults.standard.set(["en"], forKey: "AppleLanguages")
+        }
     }
 
     var body: some Scene {

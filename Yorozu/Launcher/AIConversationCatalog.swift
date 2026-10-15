@@ -25,7 +25,6 @@ actor AIConversationCatalog {
         if hasLoaded {
             return snapshot()
         }
-        hasLoaded = true
         guard let store else {
             return snapshot(
                 storageAvailable: false,
@@ -38,6 +37,7 @@ actor AIConversationCatalog {
                 conversations = persisted
             }
             sort()
+            hasLoaded = true
             return snapshot()
         } catch {
             return snapshot(

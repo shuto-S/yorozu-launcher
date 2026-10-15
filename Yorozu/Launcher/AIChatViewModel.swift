@@ -1887,6 +1887,7 @@ final class TranslationViewModel {
     private(set) var focusRequest = 0
 
     private var translationTask: Task<Void, Never>?
+    private var translationRevision = 0
     private var prepareTask: Task<Void, Never>?
     private var modelLoadTask: Task<Void, Never>?
     private var modelLoadRevision = 0
@@ -2072,6 +2073,7 @@ final class TranslationViewModel {
     }
 
     func clearOutput() {
+        stop()
         outputText = ""
         errorMessage = nil
     }
@@ -2113,8 +2115,7 @@ final class TranslationViewModel {
         initialText: String? = nil,
         selectionPermissionUnavailable: Bool = false
     ) {
-        translationTask?.cancel()
-        prepareTask?.cancel()
+        stop()
         inputText = initialText ?? ""
         outputText = ""
         errorMessage = nil
@@ -2142,6 +2143,8 @@ final class TranslationViewModel {
         guard canTranslate,
               let provider = selectedProvider else { return }
         translationTask?.cancel()
+        translationRevision += 1
+        let revision = translationRevision
         errorMessage = nil
         outputText = ""
         isTranslating = true
@@ -2150,7 +2153,7 @@ final class TranslationViewModel {
         let model = selectedModel
         let reasoningEffort = selectedReasoningEffort
         translationTask = Task { @MainActor [weak self] in
-            guard let self else { return }
+            guard let self, !Task.isCancelled, revision == self.translationRevision else { return }
             do {
                 for try await event in provider.streamTranslation(
                     input: input,
@@ -2158,24 +2161,33 @@ final class TranslationViewModel {
                     model: model,
                     reasoningEffort: reasoningEffort
                 ) {
-                    guard !Task.isCancelled else { return }
+                    guard !Task.isCancelled, revision == self.translationRevision else { return }
                     if case let .textDelta(delta) = event {
                         self.outputText.append(delta)
                     }
                 }
+                guard !Task.isCancelled, revision == self.translationRevision else { return }
                 self.isTranslating = false
+                self.translationTask = nil
             } catch is CancellationError {
+                guard revision == self.translationRevision else { return }
                 self.isTranslating = false
+                self.translationTask = nil
             } catch {
+                guard !Task.isCancelled, revision == self.translationRevision else { return }
                 self.isTranslating = false
+                self.translationTask = nil
                 self.errorMessage = Self.userMessage(for: error)
             }
         }
     }
 
     func stop() {
+        translationRevision += 1
         translationTask?.cancel()
         translationTask = nil
+        prepareTask?.cancel()
+        prepareTask = nil
         isTranslating = false
     }
 
@@ -2372,8 +2384,7 @@ final class TranslationViewModel {
     }
 
     func shutdown() {
-        translationTask?.cancel()
-        prepareTask?.cancel()
+        stop()
         modelLoadTask?.cancel()
         modelLoadTask = nil
         modelLoadRevision += 1

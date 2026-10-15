@@ -29,6 +29,9 @@ actor FileSystemApplicationDiscoverer: ApplicationDiscovering {
             (homeApplications, 0),
             (URL(fileURLWithPath: "/Applications", isDirectory: true), 1),
             (URL(fileURLWithPath: "/System/Applications", isDirectory: true), 2),
+            // Safari's /Applications link is hidden on current macOS. Scan its
+            // visible system target without admitting unrelated hidden apps.
+            (URL(fileURLWithPath: "/System/Cryptexes/App/System/Applications", isDirectory: true), 3),
         ]
     }
 
@@ -99,7 +102,7 @@ actor FileSystemApplicationDiscoverer: ApplicationDiscovering {
     private func scan(root: URL, priority: Int) throws -> [Candidate] {
         let resourceKeys: [URLResourceKey] = [.isDirectoryKey, .isPackageKey, .isHiddenKey]
         guard let enumerator = FileManager.default.enumerator(
-            at: root,
+            at: root.resolvingSymlinksInPath().standardizedFileURL,
             includingPropertiesForKeys: resourceKeys,
             options: [.skipsHiddenFiles, .skipsPackageDescendants]
         ) else {
@@ -216,8 +219,9 @@ final class ApplicationDirectoryMonitor: @unchecked Sendable {
         latency: TimeInterval = 0.75,
         onChange: @escaping @Sendable () -> Void
     ) {
-        self.roots = roots
-            ?? FileSystemApplicationDiscoverer.standardRoots().map(\.url)
+        self.roots = (roots
+            ?? FileSystemApplicationDiscoverer.standardRoots().map(\.url))
+            .map { $0.resolvingSymlinksInPath().standardizedFileURL }
         self.latency = latency
         self.onChange = onChange
     }

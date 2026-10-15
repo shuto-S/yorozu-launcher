@@ -2,6 +2,43 @@ import XCTest
 @testable import Yorozu
 
 final class ApplicationDiscoveryTests: XCTestCase {
+    func testStandardRootsIncludeCryptexApplications() {
+        let expected = URL(fileURLWithPath: "/System/Cryptexes/App/System/Applications")
+            .resolvingSymlinksInPath().standardizedFileURL
+        XCTAssertTrue(FileSystemApplicationDiscoverer.standardRoots().contains {
+            $0.url.resolvingSymlinksInPath().standardizedFileURL == expected
+        })
+    }
+
+    func testDiscoveryResolvesSymbolicLinkRoot() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let actual = root.appendingPathComponent("Actual")
+        let linked = root.appendingPathComponent("Applications")
+        try FileManager.default.createDirectory(at: actual, withIntermediateDirectories: true)
+        addTeardownBlock { try FileManager.default.removeItem(at: root) }
+        try makeApplicationFixture(at: actual.appendingPathComponent("Example.app"), bundleIdentifier: "test.linked-root")
+        try FileManager.default.createSymbolicLink(at: linked, withDestinationURL: actual)
+        let discoverer = FileSystemApplicationDiscoverer(roots: [(linked, 0)])
+        let applications = try await discoverer.discoverApplications()
+        XCTAssertEqual(applications.map(\.bundleIdentifier), ["test.linked-root"])
+    }
+
+    func testHiddenApplicationLinkCanBeFoundThroughVisibleTargetRoot() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let applications = root.appendingPathComponent("Applications")
+        let system = root.appendingPathComponent("Cryptex/Applications")
+        try FileManager.default.createDirectory(at: applications, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: system, withIntermediateDirectories: true)
+        addTeardownBlock { try FileManager.default.removeItem(at: root) }
+        let target = system.appendingPathComponent("Browser.app")
+        try makeApplicationFixture(at: target, bundleIdentifier: "test.cryptex.browser")
+        try makeApplicationFixture(at: system.appendingPathComponent(".Hidden.app"), bundleIdentifier: "test.hidden")
+        try FileManager.default.createSymbolicLink(at: applications.appendingPathComponent(".Browser.app"), withDestinationURL: target)
+        let discoverer = FileSystemApplicationDiscoverer(roots: [(applications, 1), (system, 3)])
+        let found = try await discoverer.discoverApplications()
+        XCTAssertEqual(found.map(\.bundleIdentifier), ["test.cryptex.browser"])
+    }
+
     func testPreferredLaunchServicesURLWinsDuplicateResolution() {
         let system = discovered(path: "/System/Applications/Example.app", priority: 2)
         let user = discovered(path: "/Users/test/Applications/Example.app", priority: 0)

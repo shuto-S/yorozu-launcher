@@ -121,7 +121,11 @@ actor ApplicationCatalog {
         } catch {
             throw LauncherError.aliasCouldNotBeSaved
         }
-        applications[index] = updatedApplication
+        // Saving suspends this actor; reindexing may have reordered or removed
+        // the application, or updated its metadata and usage in the meantime.
+        if let currentIndex = applications.firstIndex(where: { $0.id == identity }) {
+            applications[currentIndex].preference.alias = alias
+        }
         return snapshot(message: nil)
     }
 

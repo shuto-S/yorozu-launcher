@@ -3,6 +3,87 @@ import XCTest
 
 final class AIChatStorageTests: XCTestCase {
     @MainActor
+    func testStoppedTranslationCannotFinishNewTranslation() async throws {
+        let fixture = TranslationStreamFixture()
+        let viewModel = makeControlledTranslationViewModel(fixture)
+        defer { viewModel.shutdown(); fixture.finish() }
+        viewModel.inputText = "First"
+        viewModel.translate()
+        for _ in 0..<100 where fixture.requestCount < 1 {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        XCTAssertEqual(fixture.requestCount, 1)
+        viewModel.stop()
+        viewModel.inputText = "Second"
+        viewModel.translate()
+        for _ in 0..<100 where fixture.requestCount < 2 {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        XCTAssertEqual(fixture.requestCount, 2)
+        for _ in 0..<10 { await Task.yield() }
+        XCTAssertTrue(viewModel.isTranslating)
+        fixture.continuations[1].yield(.textDelta("New translation"))
+        fixture.continuations[1].finish()
+        for _ in 0..<100 where viewModel.isTranslating {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        XCTAssertEqual(viewModel.outputText, "New translation")
+        XCTAssertFalse(viewModel.isTranslating)
+        XCTAssertNil(viewModel.errorMessage)
+    }
+
+    @MainActor
+    func testChangingTranslationLanguageStopsPreviousOutput() async throws {
+        let fixture = TranslationStreamFixture()
+        let viewModel = makeControlledTranslationViewModel(fixture)
+        defer { viewModel.shutdown(); fixture.finish() }
+        viewModel.inputText = "Translate this"
+        viewModel.translate()
+        for _ in 0..<100 where fixture.requestCount < 1 {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        XCTAssertEqual(fixture.requestCount, 1)
+        viewModel.selectTargetLanguage("English")
+        XCTAssertFalse(viewModel.isTranslating)
+        fixture.continuations[0].yield(.textDelta("Obsolete result"))
+        fixture.continuations[0].finish()
+        for _ in 0..<10 { await Task.yield() }
+        XCTAssertEqual(viewModel.outputText, "")
+        XCTAssertNil(viewModel.errorMessage)
+    }
+
+    @MainActor
+    private func makeControlledTranslationViewModel(_ fixture: TranslationStreamFixture) -> TranslationViewModel {
+        let suite = "com.yorozu.translation-review-tests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        addTeardownBlock { defaults.removePersistentDomain(forName: suite) }
+        let provider = RegistryTestProvider(providerID: .codex, makeTranslationStream: { fixture.nextStream() })
+        let providerViewModel = AIChatViewModel(
+            catalog: AIConversationCatalog(providerID: .codex, store: nil),
+            provider: provider,
+            preferences: AIChatPreferences(defaults: defaults, providerID: .codex)
+        )
+        return TranslationViewModel(
+            providerStore: AIChatViewModelStore(
+                viewModels: [providerViewModel],
+                providerPreferences: AIProviderPreferences(defaults: defaults)
+            ),
+            preferences: TranslationPreferences(defaults: defaults)
+        )
+    }
+
+    func testFailedChatHistoryLoadRemainsRetryableAndUnavailable() async throws {
+        let fixture = try makeStore()
+        let catalog = AIConversationCatalog(providerID: .openAIAPI, store: fixture.store)
+        try await fixture.store.close()
+        let first = await catalog.load()
+        let retry = await catalog.load()
+        XCTAssertFalse(first.storageAvailable)
+        XCTAssertFalse(retry.storageAvailable)
+        XCTAssertNotNil(retry.message)
+    }
+
+    @MainActor
     func testProviderPreferencesDefaultToCodexAndFallbackWhenDisabled() {
         let defaults = UserDefaults(
             suiteName: "com.yorozu.provider-tests.\(UUID().uuidString)"
@@ -2323,8 +2404,10 @@ private actor FakeCodexAppServer: CodexAppServerServing {
 
 private actor RegistryTestProvider: AIChatProvider {
     nonisolated let descriptor: AIProviderDescriptor
+    nonisolated private let makeTranslationStream: (@Sendable () -> AsyncThrowingStream<AIChatStreamEvent, Error>)?
 
-    init(providerID: AIProviderID) {
+    init(providerID: AIProviderID, makeTranslationStream: (@Sendable () -> AsyncThrowingStream<AIChatStreamEvent, Error>)? = nil) {
+        self.makeTranslationStream = makeTranslationStream
         descriptor = AIProviderDescriptor(
             id: providerID,
             displayName: providerID.rawValue,
@@ -2382,7 +2465,8 @@ private actor RegistryTestProvider: AIChatProvider {
     nonisolated func streamTranslation(
         request: AITranslationRequest
     ) -> AsyncThrowingStream<AIChatStreamEvent, Error> {
-        AsyncThrowingStream { continuation in
+        if let makeTranslationStream { return makeTranslationStream() }
+        return AsyncThrowingStream { continuation in
             continuation.yield(.textDelta("Translated"))
             continuation.yield(.completed)
             continuation.finish()
@@ -2391,6 +2475,36 @@ private actor RegistryTestProvider: AIChatProvider {
     func stopGeneration(conversationID: String) {}
     func deleteConversationCompletely(conversationID: String) {}
     func shutdown() {}
+}
+
+private final class TranslationStreamFixture: @unchecked Sendable {
+    typealias Stream = AsyncThrowingStream<AIChatStreamEvent, Error>
+    let continuations: [Stream.Continuation]
+    private let streams: [Stream]
+    private let lock = NSLock()
+    private var count = 0
+
+    init() {
+        let pairs = (0..<2).map { _ in Stream.makeStream() }
+        streams = pairs.map(\.stream)
+        continuations = pairs.map(\.continuation)
+    }
+
+    var requestCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return count
+    }
+
+    func nextStream() -> Stream {
+        lock.lock()
+        defer { lock.unlock() }
+        let index = count
+        count += 1
+        return streams[min(index, streams.count - 1)]
+    }
+
+    func finish() { continuations.forEach { $0.finish() } }
 }
 
 private actor ClaudeTestService: ClaudeChatServing {

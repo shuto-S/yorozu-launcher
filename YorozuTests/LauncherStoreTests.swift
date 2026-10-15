@@ -3,6 +3,78 @@ import XCTest
 @testable import Yorozu
 
 final class LauncherStoreTests: XCTestCase {
+    func testDuplicatingMaximumLengthSnippetNamePreservesContent() async throws {
+        let original = try Snippet.validated(
+            name: String(repeating: "名", count: 80), keyword: ";original", content: "  Keep\nformatting  "
+        )
+        let catalog = SnippetCatalog(store: nil, initialSnippets: [original])
+        let snapshot = try await catalog.duplicate(original)
+        let copy = try XCTUnwrap(snapshot.values.first { $0.id != original.id })
+        XCTAssertEqual(copy.name.count, 80)
+        XCTAssertTrue(copy.name.hasSuffix(" Copy"))
+        XCTAssertNil(copy.keyword)
+        XCTAssertEqual(copy.content, original.content)
+        XCTAssertEqual(copy.useCount, 0)
+    }
+
+    func testSnippetUsageStillUpdatesForSessionWhenStorageFails() async throws {
+        let fixture = try makeStore()
+        let first = try Snippet.validated(name: "A", keyword: "", content: "First")
+        let used = try Snippet.validated(name: "Z", keyword: "", content: "Second")
+        let catalog = SnippetCatalog(store: fixture.store, initialSnippets: [first, used])
+        try await fixture.store.close()
+        let date = Date(timeIntervalSince1970: 2_000)
+        let snapshot = await catalog.recordUse(id: used.id, usedAt: date)
+        XCTAssertEqual(snapshot.values.first?.id, used.id)
+        XCTAssertEqual(snapshot.values.first?.useCount, 1)
+        XCTAssertEqual(snapshot.values.first?.lastUsedAt, date)
+        XCTAssertEqual(snapshot.values.first?.updatedAt, used.updatedAt)
+        XCTAssertNotNil(snapshot.message)
+    }
+
+    func testAliasSaveDoesNotOverwriteAnotherApplicationAfterReindex() async throws {
+        let first = application(identity: "bundle:test.first", name: "First", path: "/Applications/First.app")
+        let second = application(identity: "bundle:test.second", name: "Second", path: "/Applications/Second.app")
+        let gate = AliasSaveGate()
+        let discoverer = MutableStoreTestDiscoverer(applications: [first, second])
+        let catalog = ApplicationCatalog(store: nil, discoverer: discoverer, aliasPreferenceSaver: { _, _ in
+            await gate.wait()
+        })
+        _ = await catalog.reindex()
+        let saveTask = Task { try await catalog.updateAlias(identity: first.id, alias: "first-alias") }
+        await gate.waitUntilStarted()
+        await discoverer.setApplications([second])
+        _ = await catalog.reindex()
+        await gate.resume()
+        let snapshot = try await saveTask.value
+        XCTAssertEqual(snapshot.applications.map(\.id), [second.id])
+        XCTAssertNil(snapshot.applications.first?.preference.alias)
+    }
+
+    func testAliasSaveKeepsRefreshedMetadataAndUsage() async throws {
+        let identity = "bundle:test.refreshed"
+        let original = application(identity: identity, name: "Original", path: "/Applications/Original.app")
+        let refreshed = application(identity: identity, name: "Renamed", path: "/Applications/Renamed.app")
+        let gate = AliasSaveGate()
+        let discoverer = MutableStoreTestDiscoverer(applications: [original])
+        let catalog = ApplicationCatalog(store: nil, discoverer: discoverer, aliasPreferenceSaver: { _, _ in
+            await gate.wait()
+        })
+        _ = await catalog.reindex()
+        let saveTask = Task { try await catalog.updateAlias(identity: original.id, alias: "kept") }
+        await gate.waitUntilStarted()
+        await discoverer.setApplications([refreshed])
+        _ = await catalog.reindex()
+        _ = await catalog.recordSuccessfulLaunch(identity: refreshed.id)
+        await gate.resume()
+        let snapshot = try await saveTask.value
+        let saved = try XCTUnwrap(snapshot.applications.first)
+        XCTAssertEqual(saved.displayName, "Renamed")
+        XCTAssertEqual(saved.canonicalURL, refreshed.canonicalURL)
+        XCTAssertEqual(saved.preference.alias, "kept")
+        XCTAssertEqual(saved.preference.launchCount, 1)
+    }
+
     func testPreferencesSurviveApplicationCacheReplacement() async throws {
         let temporaryDirectory = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
@@ -1020,6 +1092,33 @@ private struct StoreTestDiscoverer: ApplicationDiscovering {
 
     func discoverApplications() async throws -> [DiscoveredApplication] {
         applications
+    }
+}
+
+private actor MutableStoreTestDiscoverer: ApplicationDiscovering {
+    var applications: [DiscoveredApplication]
+    init(applications: [DiscoveredApplication]) { self.applications = applications }
+    func setApplications(_ applications: [DiscoveredApplication]) { self.applications = applications }
+    func discoverApplications() -> [DiscoveredApplication] { applications }
+}
+
+private actor AliasSaveGate {
+    private var continuation: CheckedContinuation<Void, Never>?
+    private var started: CheckedContinuation<Void, Never>?
+    func wait() async {
+        await withCheckedContinuation {
+            continuation = $0
+            started?.resume()
+            started = nil
+        }
+    }
+    func waitUntilStarted() async {
+        guard continuation == nil else { return }
+        await withCheckedContinuation { started = $0 }
+    }
+    func resume() {
+        continuation?.resume()
+        continuation = nil
     }
 }
 

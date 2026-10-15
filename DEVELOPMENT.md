@@ -265,6 +265,26 @@ Important boundaries:
 
 ## Persistence and privacy
 
+### Discovery and asynchronous state consistency
+
+Application discovery includes the standard user, local, and system application folders,
+plus `/System/Cryptexes/App/System/Applications`. Safari's link in `/Applications`
+can be hidden; enumerate the visible Cryptex target rather than removing hidden-app
+filtering. Resolve symbolic-link roots for both scanning and filesystem monitoring.
+Do not traverse arbitrary linked subdirectories or application-package contents.
+
+After an asynchronous preference save, look up the application by stable identity
+again and change only the intended field; reindexing may have changed array positions,
+metadata, or usage. Snippet duplication must leave space for its suffix within the name
+limit. A successful use still updates session ordering if persistence fails, while
+reporting the storage failure. AI conversation loading is cached only after success so
+failed loads remain retryable. Translation tasks use a revision to prevent canceled
+streams from completing or overwriting a newer translation; clearing the result or
+changing its target language stops the old stream.
+
+UI-test startup must not write the production language preference. Disposable defaults
+domains are removed only after their test environment has stopped and closed storage.
+
 The runtime database is stored at:
 
 ```text

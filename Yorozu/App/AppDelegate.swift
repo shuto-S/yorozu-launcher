@@ -10,6 +10,7 @@ struct AppEnvironment {
     let launcher: any ApplicationLaunching
     let startsClipboardMonitor: Bool
     let temporaryDirectory: URL?
+    var temporaryDefaultsDomain: String? = nil
     let usesLivePasteIntegration: Bool
     let allowsURLPreviewNetwork: Bool
     let usesLiveAIIntegration: Bool
@@ -82,6 +83,7 @@ struct AppEnvironment {
             launcher: UITestApplicationLauncher(),
             startsClipboardMonitor: false,
             temporaryDirectory: directory,
+            temporaryDefaultsDomain: suiteName,
             usesLivePasteIntegration: false,
             allowsURLPreviewNetwork: false,
             usesLiveAIIntegration: false,
@@ -971,6 +973,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
+                if let domain = self.environment.temporaryDefaultsDomain {
+                    self.environment.defaults.removePersistentDomain(forName: domain)
+                }
                 self.terminationCleanupCompleted = true
                 NSApplication.shared.terminate(nil)
             }
