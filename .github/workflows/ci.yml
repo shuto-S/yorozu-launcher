@@ -8,11 +8,30 @@ on:
 
 jobs:
   build-and-test:
-    runs-on: macos-26
+    name: Build and test (${{ matrix.toolchain }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - toolchain: Xcode 26.6 / macOS 26
+            runner: macos-26
+            developer_dir: /Applications/Xcode_26.6.app/Contents/Developer
+          - toolchain: Xcode 27.1 / macOS 27
+            runner: xcode-27
+            developer_dir: /Applications/Xcode_27.1.app/Contents/Developer
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 20
+    env:
+      DEVELOPER_DIR: ${{ matrix.developer_dir }}
 
     steps:
       - uses: actions/checkout@v4
+
+      - name: Show toolchain
+        run: |
+          xcodebuild -version
+          xcrun swiftc -version
+          sw_vers
 
       - name: Build
         run: |
@@ -34,3 +53,65 @@ jobs:
             -only-testing:YorozuTests \
             CODE_SIGNING_ALLOWED=NO \
             test
+
+      - name: Build optimized Release
+        if: matrix.runner == 'xcode-27'
+        run: |
+          xcodebuild \
+            -project Yorozu.xcodeproj \
+            -scheme Yorozu \
+            -configuration Release \
+            -destination 'platform=macOS,arch=arm64' \
+            -derivedDataPath "$RUNNER_TEMP/YorozuXcode27" \
+            CODE_SIGNING_ALLOWED=NO \
+            build
+
+      - name: Package isolated compatibility fixture
+        if: matrix.runner == 'xcode-27'
+        run: |
+          set -euo pipefail
+          app="$RUNNER_TEMP/YorozuXcode27/Build/Products/Release/Yorozu.app"
+          codesign --force --deep --sign - "$app"
+          codesign --verify --deep --strict "$app"
+          ditto -c -k --keepParent "$app" "$RUNNER_TEMP/YorozuXcode27.zip"
+
+      - name: Upload macOS 26 compatibility fixture
+        if: matrix.runner == 'xcode-27'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: yorozu-xcode27-compatibility
+          path: ${{ runner.temp }}/YorozuXcode27.zip
+          if-no-files-found: error
+          retention-days: 1
+
+  xcode27-on-macos26:
+    name: Xcode 27 Release startup on macOS 26
+    needs: build-and-test
+    runs-on: macos-26
+    timeout-minutes: 5
+    steps:
+      - name: Download compatibility fixture
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: yorozu-xcode27-compatibility
+          path: ${{ runner.temp }}/yorozu-compatibility
+
+      - name: Verify and launch on macOS 26
+        run: |
+          set -euo pipefail
+          fixture="$RUNNER_TEMP/yorozu-compatibility"
+          ditto -x -k "$fixture/YorozuXcode27.zip" "$fixture"
+          app="$fixture/Yorozu.app"
+          codesign --verify --deep --strict "$app"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' "$app/Contents/Info.plist")" = "26.0"
+          sw_vers
+          "$app/Contents/MacOS/Yorozu" --ui-testing --ui-testing-run-id ci-xcode27-on-macos26 &
+          app_pid=$!
+          trap 'kill "$app_pid" 2>/dev/null || true; wait "$app_pid" 2>/dev/null || true' EXIT
+          sleep 5
+          if ! kill -0 "$app_pid" 2>/dev/null; then
+            wait "$app_pid" || true
+            echo "The Xcode 27-built application exited during startup." >&2
+            exit 1
+          fi
+          echo "The isolated Xcode 27-built application remained running on macOS 26."

@@ -4,7 +4,10 @@ Yorozu releases are built from stable `vX.Y.Z` tags by
 `.github/workflows/release.yml`. The workflow creates an Apple Silicon Release build,
 signs it with Developer ID, notarizes and staples it, publishes `Yorozu.app.zip` to a
 GitHub Release, signs the archive with Sparkle EdDSA, and deploys `appcast.xml` to
-GitHub Pages.
+GitHub Pages. The workflow uses the Apple Silicon `xcode-27` runner with Xcode 27.1.
+Keep that pinned path in sync with the runner image. CI runs an ad-hoc signed Xcode 27
+Release fixture on macOS 26 as a startup smoke test; it does not validate a notarized
+update or existing permissions on a real macOS 26 account.
 
 Do not run the release workflow until all required credentials are configured. Never
 commit certificates, private keys, passwords, exported Keychain items, or local signing

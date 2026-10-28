@@ -13,6 +13,13 @@ machine path, signing identity, account, credential, or captured user data.
 - Xcode 26 or later
 - Swift 6 with strict concurrency
 
+CI builds and tests with Xcode 26.6 on macOS 26 and Xcode 27.1 on macOS 27.
+The Xcode 27 job also builds an optimized Release fixture, ad-hoc signs it, and checks
+startup on the macOS 26 runner using isolated test-mode dependencies. The signed release
+workflow uses Xcode 27.1. The pinned runner paths must be updated when GitHub retires
+those toolchain versions. This startup smoke test does not replace testing a notarized
+update and its permissions on a real macOS 26 account.
+
 The app bundle identifier is `com.yorozu.app`. Yorozu is an `LSUIElement` menu-bar utility and does not create a normal Dock window.
 
 ## Dependencies
