@@ -135,7 +135,7 @@ private final class UITestSleepActivityManager: SleepActivityManaging {
 
 private actor UITestApplicationDiscoverer: ApplicationDiscovering {
     func discoverApplications() async throws -> [DiscoveredApplication] {
-        [
+        let applications = [
             DiscoveredApplication(
                 id: ApplicationIdentity(rawValue: "bundle:com.microsoft.vscode"),
                 bundleIdentifier: "com.microsoft.vscode",
@@ -157,6 +157,20 @@ private actor UITestApplicationDiscoverer: ApplicationDiscovering {
                 rootPriority: 0
             ),
         ]
+        guard ProcessInfo.processInfo.arguments.contains("--ui-testing-scroll") else {
+            return applications
+        }
+        return applications + (0..<32).map { index in
+            let name = String(format: "Scroll Fixture %02d", index)
+            let identifier = "test.yorozu.scroll.\(index)"
+            return DiscoveredApplication(
+                id: ApplicationIdentity(rawValue: "bundle:\(identifier)"),
+                bundleIdentifier: identifier,
+                canonicalURL: URL(fileURLWithPath: "/Applications/\(name).app"),
+                displayName: name, localizedName: nil, version: "1.0",
+                normalizedSearchText: name.launcherNormalized, rootPriority: 0
+            )
+        }
     }
 }
 
@@ -962,6 +976,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard let store = environment.storeOpenResult.store else {
             throw LauncherStoreError.storeClosed
         }
+        // Only the disposable UI-testing store is populated; no real clipboard,
+        // application launcher, network, or standard defaults are involved.
         clipboardPreferences.isEnabled = true
         for index in 0..<32 {
             let id = UUID(uuidString: String(format: "00000000-0000-0000-0000-%012d", index + 1))!

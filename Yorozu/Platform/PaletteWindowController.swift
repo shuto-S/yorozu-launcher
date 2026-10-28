@@ -50,6 +50,35 @@ enum PaletteKeyEventAction: Equatable {
     case escape
 }
 
+enum PaletteCommandShortcut: Equatable {
+    case actions, pin, edit, reveal, newItem, duplicate, delete, copy, search, close
+
+    static func match(
+        keyCode: UInt16, characters: String?, modifiers: NSEvent.ModifierFlags,
+        isEditingText: Bool
+    ) -> Self? {
+        let modifiers = modifiers.intersection([.command, .option, .control, .shift])
+        if modifiers == [.command, .shift], characters?.lowercased() == "f" {
+            return .reveal
+        }
+        guard modifiers == .command else { return nil }
+        if keyCode == 51 || keyCode == 117 {
+            return isEditingText ? nil : .delete
+        }
+        if keyCode == 36 || keyCode == 76 { return .copy }
+        switch characters?.lowercased() {
+        case "k": return .actions
+        case "p": return .pin
+        case "e": return isEditingText ? nil : .edit
+        case "n": return .newItem
+        case "d": return .duplicate
+        case "f": return .search
+        case "w": return .close
+        default: return nil
+        }
+    }
+}
+
 enum PaletteKeyEventPolicy {
     private static let textCompositionKeyCodes: Set<UInt16> = [
         36,  // Return
@@ -68,7 +97,10 @@ enum PaletteKeyEventPolicy {
         isActionPanelPresented: Bool,
         isModalPresented: Bool = false,
         isAIConversationPage: Bool = false,
-        isRecordingModifierShortcut: Bool = false
+        isRecordingModifierShortcut: Bool = false,
+        isEditingText: Bool = false,
+        isAliasApplicationPicker: Bool = false,
+        isTextInputFocused: Bool = false
     ) -> PaletteKeyEventAction {
         // The recorder's local monitor owns Escape/Delete while recording.
         // The palette monitor is installed first, so it must defer explicitly.
@@ -81,23 +113,26 @@ enum PaletteKeyEventPolicy {
             if hasMarkedText, textCompositionKeyCodes.contains(keyCode) {
                 return .passThrough
             }
-            if independentModifiers.contains(.command),
+            if independentModifiers.intersection([.command, .option, .control, .shift]) == .command,
                keyCode == 36 || keyCode == 76 {
                 return .submitModal
+            }
+            if isAliasApplicationPicker,
+               independentModifiers.intersection([.command, .option, .control, .shift]).isEmpty {
+                if keyCode == 125 { return .moveSelection(1) }
+                if keyCode == 126 { return .moveSelection(-1) }
+                if keyCode == 36 || keyCode == 76 { return .submitModal }
             }
             return keyCode == 53 ? .escape : .passThrough
         }
 
-        // Command shortcuts remain app commands even while an input method has
-        // marked text. Unmodified composition keys must reach the field editor.
-        if independentModifiers.contains(.command), route != .settings {
-            return .handleCommandShortcut
-        }
-
-        if hasMarkedText,
-           !independentModifiers.contains(.command),
-           textCompositionKeyCodes.contains(keyCode) {
+        // Composition commands reach the field editor before app commands.
+        // Other Command shortcuts remain available while composing.
+        if hasMarkedText, textCompositionKeyCodes.contains(keyCode) {
             return .passThrough
+        }
+        if independentModifiers.contains(.command) {
+            return .handleCommandShortcut
         }
 
         if route.isAI, isAIConversationPage, !isActionPanelPresented {
@@ -115,7 +150,20 @@ enum PaletteKeyEventPolicy {
             return keyCode == 53 ? .escape : .passThrough
         }
 
+        guard independentModifiers.intersection([.command, .option, .control, .shift]).isEmpty,
+              !isEditingText else {
+            return keyCode == 53 && independentModifiers.isEmpty ? .escape : .passThrough
+        }
+
         switch keyCode {
+        case 116 where !isTextInputFocused:
+            return .moveSelection(-8)
+        case 121 where !isTextInputFocused:
+            return .moveSelection(8)
+        case 115 where !isTextInputFocused:
+            return .moveSelection(-Int(Int32.max))
+        case 119 where !isTextInputFocused:
+            return .moveSelection(Int(Int32.max))
         case 125:
             return .moveSelection(1)
         case 126:
@@ -732,61 +780,96 @@ final class PaletteWindowController: NSWindowController, NSWindowDelegate {
 
     private func installKeyMonitor() {
         keyEventMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
-            guard let self,
-                  self.window?.isKeyWindow == true else {
-                return event
-            }
+            guard let self else { return event }
+            return self.handleMonitoredKeyEvent(event)
+        }
+    }
 
-            let action = PaletteKeyEventPolicy.action(
-                keyCode: event.keyCode,
-                modifiers: event.modifierFlags,
-                hasMarkedText: self.fieldEditorHasMarkedText,
-                route: self.viewModel.route,
-                isActionPanelPresented: self.viewModel.isActionPanelPresented,
-                isModalPresented: self.viewModel.isModalPresented,
-                isAIConversationPage: self.viewModel.route.isAI
-                    && !self.viewModel.aiChatViewModel.isListVisible,
-                isRecordingModifierShortcut: WindowControlModifierCapture.isAnyRecording
-                    || self.window?.firstResponder is KeyboardShortcuts.RecorderCocoa
-                    || (self.window?.firstResponder as? NSTextView)?.delegate is KeyboardShortcuts.RecorderCocoa
+    private func handleMonitoredKeyEvent(_ event: NSEvent) -> NSEvent? {
+        guard self.window?.isKeyWindow == true else {
+            return event
+        }
+
+        return handleKeyAction(keyAction(for: event), event: event)
+    }
+
+    // Keep responder inspection separate from dispatch: Swift 6.3/6.4's
+    // Release optimizer crashes when these borrowed AppKit values are combined.
+    @inline(never)
+    private func keyAction(for event: NSEvent) -> PaletteKeyEventAction {
+        let hasTextEditor = activeTextEditor != nil
+        var isRecording = WindowControlModifierCapture.isAnyRecording
+        if window?.firstResponder is KeyboardShortcuts.RecorderCocoa { isRecording = true }
+        if isRecordingShortcutInFieldEditor { isRecording = true }
+        var isConversation = false
+        if viewModel.route.isAI { isConversation = !viewModel.aiChatViewModel.isListVisible }
+        var isEditing = false
+        var isPickingApplication = false
+        if hasTextEditor {
+            if !isSearchEditor { isEditing = !viewModel.isActionPanelPresented }
+            isPickingApplication = viewModel.paletteModal == .aliasApplicationPicker
+        }
+
+        return PaletteKeyEventPolicy.action(
+            keyCode: event.keyCode,
+            modifiers: event.modifierFlags,
+            hasMarkedText: self.fieldEditorHasMarkedText,
+            route: self.viewModel.route,
+            isActionPanelPresented: self.viewModel.isActionPanelPresented,
+            isModalPresented: self.viewModel.isModalPresented,
+            isAIConversationPage: isConversation,
+            isRecordingModifierShortcut: isRecording,
+            isEditingText: isEditing,
+            isAliasApplicationPicker: isPickingApplication,
+            isTextInputFocused: hasTextEditor
+        )
+    }
+
+    @inline(never)
+    private var isRecordingShortcutInFieldEditor: Bool {
+        guard let editor = activeTextEditor else { return false }
+        return editor.delegate is KeyboardShortcuts.RecorderCocoa
+    }
+
+    @inline(never)
+    private func handleKeyAction(_ action: PaletteKeyEventAction, event: NSEvent) -> NSEvent? {
+        switch action {
+        case .passThrough:
+            return event
+        case .handleCommandShortcut:
+            let modifiers = event.modifierFlags.intersection(
+                .deviceIndependentFlagsMask
             )
-
-            switch action {
-            case .passThrough:
-                return event
-            case .handleCommandShortcut:
-                let modifiers = event.modifierFlags.intersection(
-                    .deviceIndependentFlagsMask
-                )
-                if self.handleCommandShortcut(event, modifiers: modifiers) {
-                    return nil
-                }
-                return event
-            case let .moveSelection(offset):
-                if self.viewModel.isActionPanelPresented {
-                    self.viewModel.moveActionSelection(by: offset)
-                } else {
-                    self.viewModel.moveSelection(by: offset)
-                }
-                return nil
-            case .performPrimaryAction:
-                if self.viewModel.isActionPanelPresented {
-                    self.viewModel.performSelectedAction()
-                } else {
-                    self.viewModel.performPrimaryAction()
-                }
-                return nil
-            case .submitModal:
-                self.viewModel.performModalSubmit()
-                return nil
-            case .escape:
-                if self.viewModel.isActionPanelPresented {
-                    self.viewModel.dismissActionPanel()
-                } else {
-                    self.viewModel.escape()
-                }
+            if self.handleCommandShortcut(event, modifiers: modifiers) {
                 return nil
             }
+            return event
+        case let .moveSelection(offset):
+            if self.viewModel.paletteModal == .aliasApplicationPicker {
+                self.viewModel.moveAliasApplicationSelection(by: offset)
+            } else if self.viewModel.isActionPanelPresented {
+                self.viewModel.moveActionSelection(by: offset)
+            } else {
+                self.viewModel.moveSelection(by: offset)
+            }
+            return nil
+        case .performPrimaryAction:
+            if self.viewModel.isActionPanelPresented {
+                self.viewModel.performSelectedAction()
+            } else {
+                self.viewModel.performPrimaryAction()
+            }
+            return nil
+        case .submitModal:
+            self.viewModel.performModalSubmit()
+            return nil
+        case .escape:
+            if self.viewModel.isActionPanelPresented {
+                self.viewModel.escapeActionPanel()
+            } else {
+                self.viewModel.escape()
+            }
+            return nil
         }
     }
 
@@ -803,55 +886,76 @@ final class PaletteWindowController: NSWindowController, NSWindowDelegate {
         return false
     }
 
+    private var activeTextEditor: NSTextView? {
+        (window?.firstResponder as? NSTextView)
+            ?? (window?.firstResponder as? NSTextField)?.currentEditor() as? NSTextView
+    }
+
+    private var isSearchEditor: Bool {
+        activeTextEditor?.delegate is NSSearchField
+            || window?.firstResponder is NSSearchField
+    }
+
     private func handleCommandShortcut(
         _ event: NSEvent,
         modifiers: NSEvent.ModifierFlags
     ) -> Bool {
-        if viewModel.route == .translation,
-           (event.keyCode == 36 || event.keyCode == 76) {
+        guard let shortcut = PaletteCommandShortcut.match(
+            keyCode: event.keyCode, characters: event.charactersIgnoringModifiers,
+            modifiers: modifiers, isEditingText: activeTextEditor != nil
+        ) else { return false }
+        if shortcut == .search {
+            viewModel.requestSearchFocus()
+            return viewModel.route != .settings
+        }
+        if shortcut == .close {
+            viewModel.dismissAndRestorePreviousApplication?()
+            return true
+        }
+        if viewModel.route == .settings { return false }
+        if viewModel.route == .translation, shortcut == .copy {
             viewModel.translationViewModel.translate()
             return true
         }
-        switch event.keyCode {
-        case 40:
+        let action: LauncherActionID
+        switch shortcut {
+        case .actions:
             viewModel.showActionMenu()
-        case 35:
-            viewModel.performAction(.togglePin)
-        case 14:
-            if viewModel.selectedSnippet != nil {
-                viewModel.performAction(.editSnippet)
-            } else {
-                viewModel.performAction(.editAlias)
-            }
-        case 3 where modifiers.contains(.shift):
-            viewModel.performAction(.reveal)
-        case 45:
+            return true
+        case .pin: action = .togglePin
+        case .edit:
+            action = viewModel.selectedSnippet != nil ? .editSnippet : .editAlias
+        case .reveal: action = .reveal
+        case .newItem:
             if viewModel.route.isAI {
                 viewModel.aiChatViewModel.beginNewChat()
             } else if viewModel.route == .aliases {
                 viewModel.beginAddAlias()
-            } else {
+            } else if viewModel.route == .snippets {
                 viewModel.newSnippet()
+            } else {
+                return false
             }
-        case 2:
-            viewModel.performAction(.duplicateSnippet)
-        case 51, 117:
+            return true
+        case .duplicate: action = .duplicateSnippet
+        case .delete:
             if viewModel.route.isAI {
+                guard viewModel.actionItems.contains(where: { $0.id == .aiDelete }) else { return false }
                 viewModel.requestAIConversationDeletion()
             } else if viewModel.route == .aliases {
                 viewModel.requestAliasDeletion()
-            } else {
+            } else if viewModel.actionItems.contains(where: { $0.id == .delete }) {
                 viewModel.performAction(.delete)
-            }
-        case 36, 76:
-            guard viewModel.selectedClipboardItem != nil
-                    || viewModel.selectedSnippet != nil else {
+            } else {
                 return false
             }
-            viewModel.performAction(.copy)
-        default:
+            return true
+        case .copy: action = .copy
+        case .search, .close:
             return false
         }
+        guard viewModel.actionItems.contains(where: { $0.id == action }) else { return false }
+        viewModel.performAction(action)
         return true
     }
 

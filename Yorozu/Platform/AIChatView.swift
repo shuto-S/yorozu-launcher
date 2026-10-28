@@ -238,7 +238,7 @@ private struct AIConversationList: View {
             .scrollIndicators(.automatic)
             .onChange(of: viewModel.selectedListID) { _, selectedID in
                 guard let selectedID else { return }
-                proxy.scrollTo(selectedID, anchor: .center)
+                proxy.scrollTo(selectedID)
             }
         }
     }
@@ -1007,6 +1007,13 @@ private struct AIComposerView: View {
     }
 }
 
+enum AIComposerKeyPolicy {
+    static func shouldSend(modifiers: NSEvent.ModifierFlags) -> Bool {
+        let modifiers = modifiers.intersection([.command, .option, .control, .shift])
+        return modifiers.isEmpty || modifiers == .command
+    }
+}
+
 private struct AIComposerTextView: NSViewRepresentable {
     @Binding var text: String
     @Binding var measuredHeight: CGFloat
@@ -1119,7 +1126,7 @@ private struct AIComposerTextView: NSViewRepresentable {
             }
             let modifiers = NSApp.currentEvent?.modifierFlags
                 .intersection(.deviceIndependentFlagsMask) ?? []
-            guard !modifiers.contains(.shift) else { return false }
+            guard AIComposerKeyPolicy.shouldSend(modifiers: modifiers) else { return false }
             onSend()
             return true
         }
