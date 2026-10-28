@@ -181,8 +181,10 @@ message bodies are sent only to the provider after an explicit user action and a
 written to the repository. Credentials, clipboard content, and snippet content are not
 committed or attached automatically. Yorozu does not synchronize with ChatGPT history.
 Ollama conversations are sent to the local Ollama installation and are not sent to a cloud
-AI provider by Yorozu. Translation can read selected text only when the user invokes it
-and macOS Accessibility permits that operation.
+AI provider by Yorozu. When Accessibility is allowed, opening the launcher or Translation
+captures the frontmost application's selected text in memory so Translation can use it.
+The snapshot is discarded when the palette closes; it is not saved to the clipboard,
+database, or logs. Some applications do not expose their selections to Accessibility.
 
 Clipboard history is local, disabled by default, and configurable by source application,
 retention, and item limit. URL previews are opt-in and use bounded HTTP(S)-only fetching

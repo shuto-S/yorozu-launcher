@@ -78,6 +78,35 @@ final class AIChatStorageTests: XCTestCase {
     }
 
     @MainActor
+    func testDelayedSelectionStartsTranslationOnlyForUntouchedInput() async throws {
+        let fixture = TranslationStreamFixture()
+        let viewModel = makeControlledTranslationViewModel(fixture)
+        defer { viewModel.shutdown(); fixture.finish() }
+
+        viewModel.prepareForPresentation()
+        viewModel.applyPendingSelection("Selected text")
+        for _ in 0..<100 where fixture.requestCount < 1 {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        XCTAssertEqual(fixture.requestCount, 1)
+        XCTAssertEqual(viewModel.inputText, "Selected text")
+        fixture.continuations[0].yield(.textDelta("Translated"))
+        fixture.continuations[0].finish()
+        for _ in 0..<100 where viewModel.isTranslating {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        XCTAssertEqual(viewModel.outputText, "Translated")
+
+        viewModel.prepareForPresentation()
+        viewModel.inputText = "Edited"
+        viewModel.inputText = ""
+        viewModel.applyPendingSelection("Stale text")
+        for _ in 0..<10 { await Task.yield() }
+        XCTAssertTrue(viewModel.inputText.isEmpty)
+        XCTAssertEqual(fixture.requestCount, 1)
+    }
+
+    @MainActor
     func testStoppedTranslationCannotFinishNewTranslation() async throws {
         let fixture = TranslationStreamFixture()
         let viewModel = makeControlledTranslationViewModel(fixture)

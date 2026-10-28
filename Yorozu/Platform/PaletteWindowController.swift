@@ -262,6 +262,37 @@ struct ClipboardInteractionPerformanceReport: Codable, Equatable {
 }
 #endif
 
+struct TranslationSelectionSnapshot {
+    private(set) var text: String?
+    private(set) var permissionUnavailable = false
+    private(set) var wasCaptured = false
+    private var pendingID: UUID?
+
+    mutating func beginCapture(
+        hasSourceApplication: Bool,
+        isAccessibilityTrusted: Bool
+    ) -> UUID? {
+        clear()
+        wasCaptured = true
+        permissionUnavailable = hasSourceApplication && !isAccessibilityTrusted
+        guard hasSourceApplication, isAccessibilityTrusted else { return nil }
+        let id = UUID()
+        pendingID = id
+        return id
+    }
+
+    mutating func finishCapture(_ text: String?, id: UUID) -> Bool {
+        guard pendingID == id else { return false }
+        pendingID = nil
+        self.text = text
+        return true
+    }
+
+    mutating func clear() {
+        self = TranslationSelectionSnapshot()
+    }
+}
+
 @MainActor
 final class PalettePanel: NSPanel {
     override var canBecomeKey: Bool { true }
@@ -277,6 +308,9 @@ final class PaletteWindowController: NSWindowController, NSWindowDelegate {
     private var previousApplication: NSRunningApplication?
     private var lastExternalApplication: NSRunningApplication?
     private var keyEventMonitor: Any?
+    private var translationSelection = TranslationSelectionSnapshot()
+    private var translationSelectionTask: Task<Void, Never>?
+    private let selectionCaptureEnabled: Bool
 
     private var shouldHideWhenInactive: Bool {
         PaletteDeactivationPolicy.shouldHide(
@@ -293,6 +327,7 @@ final class PaletteWindowController: NSWindowController, NSWindowDelegate {
         self.viewModel = viewModel
         self.pasteCoordinator = pasteCoordinator
         let arguments = ProcessInfo.processInfo.arguments
+        selectionCaptureEnabled = !AppEnvironment.requiresIsolation(arguments: arguments)
         automaticallyHides = !arguments.contains(
             "--ui-testing-sticky"
         )
@@ -362,6 +397,9 @@ final class PaletteWindowController: NSWindowController, NSWindowDelegate {
 
     func invalidate() {
         WindowControlModifierCapture.cancelActiveRecording()
+        translationSelectionTask?.cancel()
+        translationSelectionTask = nil
+        translationSelection.clear()
         NotificationCenter.default.removeObserver(
             self,
             name: NSApplication.didResignActiveNotification,
@@ -417,15 +455,20 @@ final class PaletteWindowController: NSWindowController, NSWindowDelegate {
             rememberExternalApplication(frontmost)
             previousApplication = externalApplication(frontmost)
                 ?? validLastExternalApplication
+            translationSelectionTask?.cancel()
+            translationSelectionTask = nil
+            translationSelection.clear()
+            if selectionCaptureEnabled, (route == .root || route == .translation) {
+                startTranslationSelectionCapture()
+            }
         }
 
         position(window: panel)
         let selectedText: String?
         let selectedTextPermissionUnavailable: Bool
-        if route == .translation {
-            selectedText = accessibilitySelectedText(from: previousApplication)
-            selectedTextPermissionUnavailable = previousApplication != nil
-                && !AXIsProcessTrusted()
+        if route == .translation, translationSelection.wasCaptured {
+            selectedText = translationSelection.text
+            selectedTextPermissionUnavailable = translationSelection.permissionUnavailable
         } else {
             selectedText = nil
             selectedTextPermissionUnavailable = false
@@ -457,6 +500,9 @@ final class PaletteWindowController: NSWindowController, NSWindowDelegate {
             previousApplication?.activate(options: [])
         }
         previousApplication = nil
+        translationSelectionTask?.cancel()
+        translationSelectionTask = nil
+        translationSelection.clear()
     }
 
     #if DEBUG
@@ -672,10 +718,19 @@ final class PaletteWindowController: NSWindowController, NSWindowDelegate {
     private func bindViewModel() {
         viewModel.selectedTextForTranslation = { [weak self] in
             guard let self else { return nil }
-            return self.accessibilitySelectedText(from: self.previousApplication)
+            if self.translationSelection.wasCaptured {
+                return self.translationSelection.text
+            }
+            guard self.selectionCaptureEnabled else { return nil }
+            self.startTranslationSelectionCapture()
+            return self.translationSelection.text
         }
         viewModel.selectedTextPermissionUnavailableForTranslation = { [weak self] in
             guard let self else { return false }
+            if self.translationSelection.wasCaptured {
+                return self.translationSelection.permissionUnavailable
+            }
+            guard self.selectionCaptureEnabled else { return false }
             return self.previousApplication != nil && !AXIsProcessTrusted()
         }
         viewModel.dismissForLaunch = { [weak self] in
@@ -737,15 +792,38 @@ final class PaletteWindowController: NSWindowController, NSWindowDelegate {
         }
     }
 
-    private func accessibilitySelectedText(
-        from application: NSRunningApplication?
-    ) -> String? {
-        guard let application,
-              application.processIdentifier != ProcessInfo.processInfo.processIdentifier,
-              AXIsProcessTrusted() else {
-            return nil
+    private func startTranslationSelectionCapture() {
+        translationSelectionTask?.cancel()
+        let processID = previousApplication?.processIdentifier
+        guard let id = translationSelection.beginCapture(
+            hasSourceApplication: processID != nil,
+            isAccessibilityTrusted: AXIsProcessTrusted()
+        ), let processID else { return }
+
+        let readTask = Task.detached(priority: .userInitiated) {
+            Self.accessibilitySelectedText(processID: processID)
         }
-        let appElement = AXUIElementCreateApplication(application.processIdentifier)
+        translationSelectionTask = Task { [weak self] in
+            let text = await withTaskCancellationHandler {
+                await readTask.value
+            } onCancel: {
+                readTask.cancel()
+            }
+            guard !Task.isCancelled, let self,
+                  self.translationSelection.finishCapture(text, id: id) else { return }
+            self.translationSelectionTask = nil
+            guard self.window?.isVisible == true,
+                  self.viewModel.route == .translation,
+                  let text else { return }
+            self.viewModel.translationViewModel.applyPendingSelection(text)
+        }
+    }
+
+    nonisolated private static func accessibilitySelectedText(processID: pid_t) -> String? {
+        guard !Task.isCancelled else { return nil }
+        let appElement = AXUIElementCreateApplication(processID)
+        // AX requests are bounded and run off the palette's main thread.
+        AXUIElementSetMessagingTimeout(appElement, 0.2)
         var focusedValue: CFTypeRef?
         guard AXUIElementCopyAttributeValue(
             appElement,
@@ -757,6 +835,8 @@ final class PaletteWindowController: NSWindowController, NSWindowDelegate {
             return nil
         }
         let focusedElement = focusedValue as! AXUIElement
+        guard !Task.isCancelled else { return nil }
+        AXUIElementSetMessagingTimeout(focusedElement, 0.2)
         var selectedValue: CFTypeRef?
         guard AXUIElementCopyAttributeValue(
             focusedElement,

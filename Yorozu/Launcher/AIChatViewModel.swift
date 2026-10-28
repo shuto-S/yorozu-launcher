@@ -1897,7 +1897,9 @@ final class TranslationViewModel {
     let providerStore: AIChatViewModelStore
     let preferences: TranslationPreferences
     var copyText: ((String) async -> PasteboardReplacementResult)?
-    var inputText = ""
+    var inputText = "" {
+        didSet { inputRevision &+= 1 }
+    }
     private(set) var outputText = ""
     var targetLanguage: String {
         didSet {
@@ -1924,6 +1926,8 @@ final class TranslationViewModel {
     private var prepareTask: Task<Void, Never>?
     private var modelLoadTask: Task<Void, Never>?
     private var modelLoadRevision = 0
+    private var inputRevision: UInt64 = 0
+    private var pendingSelectionRevision: UInt64?
 
     init(
         providerStore: AIChatViewModelStore,
@@ -2150,6 +2154,7 @@ final class TranslationViewModel {
     ) {
         stop()
         inputText = initialText ?? ""
+        pendingSelectionRevision = initialText == nil ? inputRevision : nil
         outputText = ""
         errorMessage = nil
         selectionPermissionMessage = selectionPermissionUnavailable
@@ -2159,12 +2164,25 @@ final class TranslationViewModel {
         focusRequest += 1
         selectedProvider?.loadCredentialStatus()
         loadModelsIfNeeded()
-        if !inputText.isEmpty {
-            prepareTask = Task { @MainActor [weak self] in
-                await Task.yield()
-                guard let self, !Task.isCancelled else { return }
-                self.translate()
-            }
+        if !inputText.isEmpty { scheduleInitialTranslation() }
+    }
+
+    func applyPendingSelection(_ text: String) {
+        guard !text.isEmpty,
+              pendingSelectionRevision == inputRevision,
+              inputText.isEmpty,
+              !isTranslating else { return }
+        pendingSelectionRevision = nil
+        inputText = text
+        scheduleInitialTranslation()
+    }
+
+    private func scheduleInitialTranslation() {
+        prepareTask?.cancel()
+        prepareTask = Task { @MainActor [weak self] in
+            await Task.yield()
+            guard let self, !Task.isCancelled else { return }
+            self.translate()
         }
     }
 

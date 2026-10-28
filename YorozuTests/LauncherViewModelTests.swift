@@ -1533,6 +1533,71 @@ final class LauncherViewModelTests: XCTestCase {
         )
     }
 
+    func testSelectionSnapshotIsCapturedOnceAndClearedBetweenPresentations() {
+        var snapshot = TranslationSelectionSnapshot()
+        let id = snapshot.beginCapture(hasSourceApplication: true, isAccessibilityTrusted: true)!
+        XCTAssertTrue(snapshot.finishCapture("  Selected text\nsecond line  ", id: id))
+
+        XCTAssertEqual(snapshot.text, "  Selected text\nsecond line  ")
+        XCTAssertFalse(snapshot.permissionUnavailable)
+        snapshot.clear()
+        XCTAssertFalse(snapshot.wasCaptured)
+        XCTAssertNil(snapshot.text)
+        let nextID = snapshot.beginCapture(hasSourceApplication: true, isAccessibilityTrusted: true)!
+        XCTAssertFalse(snapshot.finishCapture("Late result", id: id))
+        XCTAssertNil(snapshot.text)
+        XCTAssertTrue(snapshot.finishCapture("Current result", id: nextID))
+        XCTAssertEqual(snapshot.text, "Current result")
+
+        XCTAssertNil(snapshot.beginCapture(hasSourceApplication: true, isAccessibilityTrusted: false))
+        XCTAssertTrue(snapshot.permissionUnavailable)
+        XCTAssertNil(snapshot.text)
+        XCTAssertNil(snapshot.beginCapture(hasSourceApplication: false, isAccessibilityTrusted: false))
+        XCTAssertFalse(snapshot.permissionUnavailable)
+        XCTAssertNil(snapshot.text)
+    }
+
+    func testTranslationFromRootUsesCapturedSelection() async throws {
+        let fixture = try makeFixture(launcherShouldFail: false)
+        var snapshot = TranslationSelectionSnapshot()
+        let id = try XCTUnwrap(snapshot.beginCapture(hasSourceApplication: true, isAccessibilityTrusted: true))
+        XCTAssertTrue(snapshot.finishCapture("Hello\nworld", id: id))
+        fixture.viewModel.selectedTextForTranslation = { snapshot.text }
+        fixture.viewModel.selectedTextPermissionUnavailableForTranslation = {
+            snapshot.permissionUnavailable
+        }
+        fixture.viewModel.openFeature(.translation)
+
+        XCTAssertEqual(fixture.viewModel.route, .translation)
+        XCTAssertEqual(fixture.viewModel.translationViewModel.inputText, "Hello\nworld")
+        XCTAssertNil(fixture.viewModel.translationViewModel.selectionPermissionMessage)
+
+        snapshot.clear()
+        fixture.viewModel.openFeature(.translation)
+        XCTAssertTrue(fixture.viewModel.translationViewModel.inputText.isEmpty)
+        fixture.viewModel.shutdown()
+    }
+
+    func testLateSelectedTextOnlyFillsAnUntouchedTranslationInput() throws {
+        let fixture = try makeFixture(launcherShouldFail: false)
+        let translation = fixture.viewModel.translationViewModel
+
+        translation.prepareForPresentation()
+        translation.applyPendingSelection("Selected text")
+        XCTAssertEqual(translation.inputText, "Selected text")
+
+        translation.prepareForPresentation()
+        translation.inputText = "Typed text"
+        translation.inputText = ""
+        translation.applyPendingSelection("Stale selection")
+        XCTAssertEqual(translation.inputText, "")
+
+        translation.prepareForPresentation(initialText: "Existing text")
+        translation.applyPendingSelection("Stale selection")
+        XCTAssertEqual(translation.inputText, "Existing text")
+        fixture.viewModel.shutdown()
+    }
+
     func testRootActionPanelOpensAliasesEditorForSelectedApplication() async throws {
         let fixture = try makeFixture(launcherShouldFail: false)
         fixture.viewModel.start()
