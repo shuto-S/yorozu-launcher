@@ -55,8 +55,9 @@ actor SnippetCatalog {
     }
 
     func duplicate(_ snippet: Snippet, now: Date = Date()) async throws -> FeatureSnapshot<Snippet> {
+        let suffix = " Copy"
         let copy = try Snippet.validated(
-            name: "\(snippet.name) Copy",
+            name: "\(snippet.name.prefix(80 - suffix.count))\(suffix)",
             keyword: "",
             content: snippet.content,
             now: now
@@ -95,6 +96,9 @@ actor SnippetCatalog {
             updateUse(at: refreshedIndex, usedAt: usedAt)
             return snapshot(message: nil)
         } catch {
+            if let currentIndex = snippets.firstIndex(where: { $0.id == id }) {
+                updateUse(at: currentIndex, usedAt: usedAt)
+            }
             return snapshot(message: "Snippet usage could not be saved.")
         }
     }

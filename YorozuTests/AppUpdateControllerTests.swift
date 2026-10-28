@@ -8,27 +8,28 @@ final class AppUpdateControllerTests: XCTestCase {
         publicEDKey: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
     )
 
-    func testReleaseBuildWithValidConfigurationAllowsUpdater() {
-        XCTAssertTrue(SoftwareUpdatePolicy.allowsUpdater(
+    func testUpdaterIsAvailableOnlyInConfiguredNonTestReleaseBuilds() {
+        let cases: [(name: String, isDebug: Bool, isUITesting: Bool, expected: Bool)] = [
+            ("release", false, false, true),
+            ("debug", true, false, false),
+            ("UI test", false, true, false),
+        ]
+        for testCase in cases {
+            XCTAssertEqual(
+                SoftwareUpdatePolicy.allowsUpdater(
+                    isDebugBuild: testCase.isDebug,
+                    isUITesting: testCase.isUITesting,
+                    configuration: validConfiguration
+                ),
+                testCase.expected,
+                testCase.name
+            )
+        }
+
+        XCTAssertFalse(SoftwareUpdatePolicy.allowsUpdater(
             isDebugBuild: false,
             isUITesting: false,
-            configuration: validConfiguration
-        ))
-    }
-
-    func testDebugBuildNeverAllowsUpdater() {
-        XCTAssertFalse(SoftwareUpdatePolicy.allowsUpdater(
-            isDebugBuild: true,
-            isUITesting: false,
-            configuration: validConfiguration
-        ))
-    }
-
-    func testUITestingNeverAllowsUpdater() {
-        XCTAssertFalse(SoftwareUpdatePolicy.allowsUpdater(
-            isDebugBuild: false,
-            isUITesting: true,
-            configuration: validConfiguration
+            configuration: SoftwareUpdateConfiguration(feedURLString: nil, publicEDKey: nil)
         ))
     }
 
@@ -39,40 +40,24 @@ final class AppUpdateControllerTests: XCTestCase {
         #endif
     }
 
-    func testMissingPublicKeyRejectsConfiguration() {
-        let configuration = SoftwareUpdateConfiguration(
-            feedURLString: "https://shuto-s.github.io/yorozu-launcher/appcast.xml",
-            publicEDKey: nil
-        )
-
-        XCTAssertFalse(configuration.isValid)
-    }
-
-    func testNonHTTPSFeedRejectsConfiguration() {
-        let configuration = SoftwareUpdateConfiguration(
-            feedURLString: "http://example.com/appcast.xml",
-            publicEDKey: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
-        )
-
-        XCTAssertFalse(configuration.isValid)
-    }
-
-    func testUnexpandedBuildSettingRejectsConfiguration() {
-        let configuration = SoftwareUpdateConfiguration(
-            feedURLString: "https://shuto-s.github.io/yorozu-launcher/appcast.xml",
-            publicEDKey: "$(YOROZU_SPARKLE_PUBLIC_KEY)"
-        )
-
-        XCTAssertFalse(configuration.isValid)
-    }
-
-    func testPublicKeyMustDecodeToThirtyTwoBytes() {
-        let configuration = SoftwareUpdateConfiguration(
-            feedURLString: "https://shuto-s.github.io/yorozu-launcher/appcast.xml",
-            publicEDKey: "dG9vLXNob3J0"
-        )
-
-        XCTAssertFalse(configuration.isValid)
+    func testInvalidUpdateConfigurationsAreRejected() {
+        let validFeed = "https://shuto-s.github.io/yorozu-launcher/appcast.xml"
+        let validKey = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+        let cases: [(name: String, feed: String?, key: String?)] = [
+            ("missing key", validFeed, nil),
+            ("non-HTTPS feed", "http://example.com/appcast.xml", validKey),
+            ("unexpanded build setting", validFeed, "$(YOROZU_SPARKLE_PUBLIC_KEY)"),
+            ("short public key", validFeed, "dG9vLXNob3J0"),
+        ]
+        for testCase in cases {
+            XCTAssertFalse(
+                SoftwareUpdateConfiguration(
+                    feedURLString: testCase.feed,
+                    publicEDKey: testCase.key
+                ).isValid,
+                testCase.name
+            )
+        }
     }
 
     @MainActor

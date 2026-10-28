@@ -38,6 +38,7 @@ enum LauncherActionID: Hashable, Identifiable {
     case translationProvider2
     case translationProvider3
     case translationProvider4
+    case translationProvider5
     case aiChangeModel
     case aiChangeReasoning
     case aiModelTerra
@@ -1617,7 +1618,7 @@ final class LauncherViewModel {
              .translationLanguage11, .translationLanguage12,
              .translationChangeProvider, .translationProvider1,
              .translationProvider2, .translationProvider3,
-             .translationProvider4, .aiChangeModel,
+             .translationProvider4, .translationProvider5, .aiChangeModel,
              .aiChangeReasoning, .aiModelTerra,
              .aiModelSol, .aiModelLuna, .aiModel4, .aiModel5, .aiModel6,
              .aiModel7, .aiModel8, .aiModel9, .aiModel10,

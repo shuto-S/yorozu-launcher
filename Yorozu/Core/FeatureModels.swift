@@ -71,6 +71,7 @@ enum FeatureCommand: Hashable, Sendable {
     case aiOpenAI
     case aiClaude
     case aiOllama
+    case aiAppleIntelligence
     case settings
 
     static let all: [FeatureCommand] = [
@@ -83,6 +84,7 @@ enum FeatureCommand: Hashable, Sendable {
         .aiOpenAI,
         .aiClaude,
         .aiOllama,
+        .aiAppleIntelligence,
         .settings,
     ]
 
@@ -106,6 +108,8 @@ enum FeatureCommand: Hashable, Sendable {
             "AI Chat: Claude"
         case .aiOllama:
             "AI Chat: Ollama"
+        case .aiAppleIntelligence:
+            "AI Chat: Apple Intelligence"
         case .settings:
             "Settings"
         }
@@ -131,6 +135,8 @@ enum FeatureCommand: Hashable, Sendable {
             "Uses Anthropic API credits and usage-based billing"
         case .aiOllama:
             "Runs local models with Ollama"
+        case .aiAppleIntelligence:
+            "Uses the on-device Apple Intelligence model"
         case .settings:
             "Configure Yorozu"
         }
@@ -156,6 +162,8 @@ enum FeatureCommand: Hashable, Sendable {
             "bubble.left.and.bubble.right"
         case .aiOllama:
             "server.rack"
+        case .aiAppleIntelligence:
+            "sparkles"
         case .settings:
             "gearshape"
         }
@@ -181,6 +189,8 @@ enum FeatureCommand: Hashable, Sendable {
             .ai(providerID: .claude)
         case .aiOllama:
             .ai(providerID: .ollama)
+        case .aiAppleIntelligence:
+            .ai(providerID: .appleIntelligence)
         case .settings:
             .settings
         }
@@ -212,6 +222,8 @@ enum FeatureCommand: Hashable, Sendable {
                 self = .aiClaude
             case .ollama:
                 self = .aiOllama
+            case .appleIntelligence:
+                self = .aiAppleIntelligence
             default:
                 return nil
             }
@@ -226,6 +238,7 @@ enum FeatureCommand: Hashable, Sendable {
         case .aiOpenAI: .openAIAPI
         case .aiClaude: .claude
         case .aiOllama: .ollama
+        case .aiAppleIntelligence: .appleIntelligence
         default: nil
         }
     }
@@ -241,6 +254,7 @@ enum FeatureCommand: Hashable, Sendable {
         case .aiOpenAI: "aiChat.openai_api"
         case .aiClaude: "aiChat.claude"
         case .aiOllama: "aiChat.ollama"
+        case .aiAppleIntelligence: "aiChat.apple_intelligence"
         case .settings: "settings"
         }
     }

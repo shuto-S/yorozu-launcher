@@ -3,16 +3,19 @@ import Foundation
 actor AIConversationCatalog {
     let providerID: AIProviderID
     private let store: LauncherStore?
+    private let sessionOnly: Bool
     private var conversations: [AIConversationSummary] = []
     private var hasLoaded = false
 
     init(
         providerID: AIProviderID,
         store: LauncherStore?,
+        sessionOnly: Bool = false,
         initialConversations: [AIConversationSummary] = []
     ) {
         self.providerID = providerID
-        self.store = store
+        self.store = sessionOnly ? nil : store
+        self.sessionOnly = sessionOnly
         conversations = initialConversations.filter { $0.providerID == providerID }.sorted {
             if $0.lastMessageAt != $1.lastMessageAt {
                 return $0.lastMessageAt > $1.lastMessageAt
@@ -25,8 +28,8 @@ actor AIConversationCatalog {
         if hasLoaded {
             return snapshot()
         }
-        hasLoaded = true
         guard let store else {
+            if sessionOnly { hasLoaded = true; return snapshot() }
             return snapshot(
                 storageAvailable: false,
                 message: "Chat history index is unavailable."
@@ -38,6 +41,7 @@ actor AIConversationCatalog {
                 conversations = persisted
             }
             sort()
+            hasLoaded = true
             return snapshot()
         } catch {
             return snapshot(
@@ -77,6 +81,7 @@ actor AIConversationCatalog {
         }
         sort()
         guard let store else {
+            if sessionOnly { return snapshot() }
             return snapshot(
                 storageAvailable: false,
                 message: "Chat history changes are available until Yorozu quits."
@@ -96,6 +101,7 @@ actor AIConversationCatalog {
     func remove(id: String) async -> FeatureSnapshot<AIConversationSummary> {
         conversations.removeAll(where: { $0.id == id })
         guard let store else {
+            if sessionOnly { return snapshot() }
             return snapshot(
                 storageAvailable: false,
                 message: "The local chat index is unavailable."
@@ -130,6 +136,7 @@ actor AIConversationCatalog {
         conversations = retained + scopedValues
         sort()
         guard let store else {
+            if sessionOnly { return snapshot() }
             return snapshot(
                 storageAvailable: false,
                 message: "Chat history changes are available until Yorozu quits."

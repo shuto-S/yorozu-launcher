@@ -82,6 +82,7 @@ The current target is:
 - optional OpenAI API provider that can be enabled alongside Codex
 - optional Claude Messages API provider that can be enabled alongside Codex and OpenAI API
 - optional Ollama provider that can be enabled for models installed in the local Ollama service
+- optional Apple Intelligence on-device provider for chat and translation; its chats are session-only
 - local title-only search and last-message ordering without network requests
 - OpenAI Responses API streaming backed by Conversations API state
 - API-key storage in macOS Keychain
@@ -216,6 +217,9 @@ Privacy and reliability requirements:
 - Claude Chat requires a user-provided Anthropic API key and Anthropic API billing.
 - Ollama Chat requires Ollama to be running locally and at least one locally installed model;
   it does not require an API key or cloud account.
+- Apple Intelligence requires a compatible Mac, enabled Apple Intelligence, and a ready
+  on-device model. Its chat history is lost when Yorozu quits, and long input or history
+  can exceed the system model's context window. Siri history is not accessible.
 - Translation requires an enabled provider with translation capability and the provider's
   configured credentials or local authentication.
 - Local provider conversation indexes cannot be reconstructed by enumerating all remote conversations.

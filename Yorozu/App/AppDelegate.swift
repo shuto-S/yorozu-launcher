@@ -4,12 +4,24 @@ import os
 
 @MainActor
 struct AppEnvironment {
+    nonisolated static func requiresIsolation(arguments: [String]) -> Bool {
+        if arguments.contains("--ui-testing") || arguments.contains("--ui-testing-settings") {
+            return true
+        }
+        #if DEBUG
+        return arguments.contains { $0 == "--performance-testing" || $0.hasPrefix("--performance-testing-") }
+        #else
+        return false
+        #endif
+    }
+
     let storeOpenResult: LauncherStoreOpenResult
     let defaults: UserDefaults
     let discoverer: any ApplicationDiscovering
     let launcher: any ApplicationLaunching
     let startsClipboardMonitor: Bool
     let temporaryDirectory: URL?
+    var temporaryDefaultsDomain: String? = nil
     let usesLivePasteIntegration: Bool
     let allowsURLPreviewNetwork: Bool
     let usesLiveAIIntegration: Bool
@@ -82,6 +94,7 @@ struct AppEnvironment {
             launcher: UITestApplicationLauncher(),
             startsClipboardMonitor: false,
             temporaryDirectory: directory,
+            temporaryDefaultsDomain: suiteName,
             usesLivePasteIntegration: false,
             allowsURLPreviewNetwork: false,
             usesLiveAIIntegration: false,
@@ -316,23 +329,26 @@ private actor UITestAIChatProvider: AIChatProvider, OpenAIAPIKeyManaging {
         let isCodex = providerID == .codex
         let isClaude = providerID == .claude
         let isOllama = providerID == .ollama
+        let isApple = providerID == .appleIntelligence
         descriptor = AIProviderDescriptor(
             id: providerID,
             displayName: isCodex
                 ? "Codex"
-                : (isClaude ? "Claude" : (isOllama ? "Ollama" : "OpenAI API")),
+                : (isApple ? "Apple Intelligence" : (isClaude ? "Claude" : (isOllama ? "Ollama" : "OpenAI API"))),
             rootCommandTitle: isCodex
                 ? "AI Chat: Codex"
-                : (isClaude
+                : (isApple ? "AI Chat: Apple Intelligence" : (isClaude
                     ? "AI Chat: Claude"
-                    : (isOllama ? "AI Chat: Ollama" : "AI Chat: OpenAI")),
+                    : (isOllama ? "AI Chat: Ollama" : "AI Chat: OpenAI"))),
             description: isOllama ? "Local UI test provider" : "UI test provider",
             symbolName: isCodex
                 ? "terminal"
                 : (isClaude
                     ? "bubble.left.and.bubble.right"
                     : (isOllama ? "server.rack" : "sparkles")),
-            capabilities: isOllama
+            capabilities: isApple
+                ? [.modelSelection, .streaming, .archive, .deletion, .translation]
+                : isOllama
                 ? [
                     .modelSelection, .streaming, .archive,
                     .deletion, .translation,
@@ -361,6 +377,7 @@ private actor UITestAIChatProvider: AIChatProvider, OpenAIAPIKeyManaging {
             : .authenticated(detail: "Test account")
     }
     func availableModels() -> [AIModel] {
+        if descriptor.id == .appleIntelligence { return [.appleOnDevice] }
         if descriptor.id == .claude { return AIModel.claudeModels }
         if descriptor.id == .ollama { return AIModel.ollamaModels }
         guard descriptor.id == .codex else { return AIModel.openAIModels }
@@ -456,8 +473,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private lazy var environment: AppEnvironment = {
         let arguments = ProcessInfo.processInfo.arguments
-        if arguments.contains("--ui-testing")
-            || arguments.contains("--ui-testing-settings") {
+        if AppEnvironment.requiresIsolation(arguments: arguments) {
             let runID = value(after: "--ui-testing-run-id", in: arguments)
                 ?? UUID().uuidString
             do {
@@ -519,6 +535,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         providerID: .ollama,
         fallbackModel: AIModel.ollamaDefault
     )
+    private lazy var appleAIChatPreferences = AIChatPreferences(defaults: environment.defaults, providerID: .appleIntelligence, fallbackModel: .appleOnDevice)
     private lazy var translationPreferences = TranslationPreferences(
         defaults: environment.defaults
     )
@@ -578,6 +595,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         return UITestAIChatProvider(providerID: .codex)
     }()
+    private lazy var aiMessageCache = AIMessageCache()
     private lazy var openAIChatViewModel = AIChatViewModel(
         catalog: AIConversationCatalog(
             providerID: .openAIAPI,
@@ -587,7 +605,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         provider: environment.usesLiveAIIntegration
             ? openAIProvider
             : UITestAIChatProvider(providerID: .openAIAPI),
-        preferences: openAIAIChatPreferences
+        preferences: openAIAIChatPreferences,
+        messageCache: aiMessageCache
     )
     private lazy var codexChatViewModel = AIChatViewModel(
         catalog: AIConversationCatalog(
@@ -596,7 +615,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             initialConversations: environment.aiConversationFixtures
         ),
         provider: codexProvider,
-        preferences: codexAIChatPreferences
+        preferences: codexAIChatPreferences,
+        messageCache: aiMessageCache
     )
     private lazy var claudeChatViewModel = AIChatViewModel(
         catalog: AIConversationCatalog(
@@ -607,7 +627,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         provider: environment.usesLiveAIIntegration
             ? claudeProvider
             : UITestAIChatProvider(providerID: .claude),
-        preferences: claudeAIChatPreferences
+        preferences: claudeAIChatPreferences,
+        messageCache: aiMessageCache
     )
     private lazy var ollamaChatViewModel = AIChatViewModel(
         catalog: AIConversationCatalog(
@@ -618,7 +639,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         provider: environment.usesLiveAIIntegration
             ? ollamaProvider
             : UITestAIChatProvider(providerID: .ollama),
-        preferences: ollamaAIChatPreferences
+        preferences: ollamaAIChatPreferences,
+        messageCache: aiMessageCache
+    )
+    private lazy var appleChatViewModel = AIChatViewModel(
+        catalog: AIConversationCatalog(providerID: .appleIntelligence, store: nil, sessionOnly: true),
+        provider: environment.usesLiveAIIntegration ? AppleIntelligenceProvider() : UITestAIChatProvider(providerID: .appleIntelligence),
+        preferences: appleAIChatPreferences,
+        messageCache: aiMessageCache
     )
     private lazy var aiChatViewModelStore = AIChatViewModelStore(
         viewModels: [
@@ -626,6 +654,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             openAIChatViewModel,
             claudeChatViewModel,
             ollamaChatViewModel,
+            appleChatViewModel,
         ],
         providerPreferences: aiProviderPreferences
     )
@@ -642,8 +671,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     )
     private lazy var appUpdateController: AppUpdateController = AppUpdateController(
         isDebugBuild: Self.isDebugBuild,
-        isUITesting: ProcessInfo.processInfo.arguments.contains("--ui-testing")
-            || ProcessInfo.processInfo.arguments.contains("--ui-testing-settings"),
+        isUITesting: AppEnvironment.requiresIsolation(arguments: ProcessInfo.processInfo.arguments),
         onWillCheckForUpdates: { [weak self] in
             // Sparkle uses normal windows; the floating Settings panel would cover them.
             self?.paletteController.hide(restorePreviousApplication: false)
@@ -707,6 +735,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var automaticReindexTask: Task<Void, Never>?
     private var terminationCleanupStarted = false
     private var terminationCleanupCompleted = false
+    #if DEBUG
+    private var diagnosticsTask: Task<Void, Never>?
+    #endif
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         let arguments = ProcessInfo.processInfo.arguments
@@ -752,7 +783,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
 
+        #if DEBUG
+        if arguments.contains("--performance-testing-soak") {
+            // The probe seeds its disposable database before starting catalogs.
+        } else if isUITesting, arguments.contains("--ui-testing-scroll") {
+            Task {
+                do {
+                    try await seedScrollFixtures()
+                    viewModel.start()
+                } catch {
+                    preconditionFailure("Isolated scroll fixtures could not be prepared")
+                }
+            }
+        } else {
+            viewModel.start()
+        }
+        #else
         viewModel.start()
+        #endif
         startApplicationDirectoryMonitorIfNeeded()
         if let store, !aiProviderPreferences.isEnabled(.openAIAPI) {
             Task { @MainActor [weak self] in
@@ -785,6 +833,47 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         #if DEBUG
+        if arguments.contains("--performance-testing-soak") {
+            diagnosticsTask = Task {
+                do {
+                    let configuration = try SoakPerformanceConfiguration(arguments: arguments)
+                    precondition(environment.temporaryDirectory != nil && !environment.usesLiveAIIntegration)
+                    try await seedScrollFixtures()
+                    viewModel.start()
+                    for _ in 0..<200 {
+                        if viewModel.clipboardItemCount == 32, viewModel.snippetCount == 32,
+                           viewModel.indexCount >= 2 { break }
+                        try await Task.sleep(for: .milliseconds(10))
+                    }
+                    guard viewModel.clipboardItemCount == 32, viewModel.snippetCount == 32,
+                          viewModel.indexCount >= 2 else { throw SoakPerformanceError.fixturesUnavailable }
+                    let report = try await SoakPerformanceProbe.run(
+                        configuration: configuration, cache: aiMessageCache
+                    ) {
+                        let root = await paletteController.runPresentationStressTest(iterations: 5)
+                        let clipboard = await paletteController.runPresentationStressTest(iterations: 5, route: .clipboard)
+                        let snippets = await paletteController.runPresentationStressTest(iterations: 5, route: .snippets)
+                        return SoakLatencySample(
+                            root: root, clipboard: clipboard, snippets: snippets,
+                            clipboardItemCount: viewModel.clipboardItemCount,
+                            snippetCount: viewModel.snippetCount
+                        )
+                    }
+                    let encoder = JSONEncoder()
+                    encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+                    try encoder.encode(report).write(
+                        to: URL(fileURLWithPath: "/private/tmp/yorozu-soak-performance.json"), options: .atomic
+                    )
+                    logger.notice("Isolated soak performance measurement completed")
+                } catch is CancellationError {
+                    return
+                } catch {
+                    logger.error("Isolated soak performance measurement failed")
+                }
+                NSApp.terminate(nil)
+            }
+            return
+        }
         if arguments.contains("--performance-testing-clipboard-interaction") {
             Task {
                 try? await Task.sleep(for: .milliseconds(750))
@@ -868,6 +957,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         paletteController.show(route: .settings, origin: .direct)
     }
 
+    #if DEBUG
+    private func seedScrollFixtures() async throws {
+        guard let store = environment.storeOpenResult.store else {
+            throw LauncherStoreError.storeClosed
+        }
+        clipboardPreferences.isEnabled = true
+        for index in 0..<32 {
+            let id = UUID(uuidString: String(format: "00000000-0000-0000-0000-%012d", index + 1))!
+            let name = String(format: "Scroll Fixture %02d", index)
+            let date = Date().addingTimeInterval(-Double(index))
+            _ = try await store.recordClipboardCapture(
+                ClipboardCapture(
+                    id: id, kind: .text, contentHash: name, textContent: name,
+                    filePaths: [], imageData: nil, imageWidth: nil, imageHeight: nil,
+                    normalizedSearchText: name.launcherNormalized,
+                    sourceBundleIdentifier: nil, sourceApplicationName: nil, copiedAt: date
+                ),
+                retentionDays: 30, maximumItems: 2_000
+            )
+            try await store.saveSnippet(Snippet(
+                id: id, name: name, keyword: nil, content: name, useCount: 0,
+                lastUsedAt: nil, createdAt: date, updatedAt: date
+            ))
+        }
+    }
+    #endif
+
     func applicationDidBecomeActive(_ notification: Notification) {
         commandInputModeController.refreshAuthorization()
         windowControlController.refreshAuthorization()
@@ -895,6 +1011,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return .terminateCancel
         }
         terminationCleanupStarted = true
+        #if DEBUG
+        diagnosticsTask?.cancel()
+        diagnosticsTask = nil
+        #endif
         automaticReindexTask?.cancel()
         automaticReindexTask = nil
         applicationDirectoryMonitor?.stop()
@@ -913,6 +1033,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
+                if let domain = self.environment.temporaryDefaultsDomain {
+                    self.environment.defaults.removePersistentDomain(forName: domain)
+                }
                 self.terminationCleanupCompleted = true
                 NSApplication.shared.terminate(nil)
             }

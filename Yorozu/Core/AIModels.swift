@@ -9,6 +9,7 @@ struct AIProviderID: RawRepresentable, Hashable, Codable, Sendable, Identifiable
     static let openAIAPI = AIProviderID(rawValue: "openai_api")
     static let claude = AIProviderID(rawValue: "claude")
     static let ollama = AIProviderID(rawValue: "ollama")
+    static let appleIntelligence = AIProviderID(rawValue: "apple_intelligence")
 }
 
 struct AIProviderCapabilities: OptionSet, Hashable, Sendable {
@@ -120,7 +121,7 @@ struct AIModel: Hashable, Codable, Identifiable, Sendable {
         self.title = title ?? Self.knownTitle(for: rawValue) ?? rawValue
         self.detail = detail ?? Self.knownDetail(for: rawValue) ?? ""
         self.isDefault = isDefault
-            ?? (Self.openAIModels + Self.claudeModels + Self.ollamaModels)
+            ?? (Self.openAIModels + Self.claudeModels + Self.ollamaModels + [Self.appleOnDevice])
                 .first(where: { $0.rawValue == rawValue })?.isDefault
             ?? false
         self.supportedReasoningEfforts = supportedReasoningEfforts
@@ -200,14 +201,15 @@ struct AIModel: Hashable, Codable, Identifiable, Sendable {
         isDefault: true
     )
     static let ollamaModels = [ollamaDefault]
+    static let appleOnDevice = AIModel(rawValue: "apple-on-device", title: "Apple On-device", detail: "Apple Intelligence", isDefault: true)
 
     private static func knownTitle(for rawValue: String) -> String? {
-        (openAIModels + claudeModels + ollamaModels)
+        (openAIModels + claudeModels + ollamaModels + [appleOnDevice])
             .first(where: { $0.rawValue == rawValue })?.title
     }
 
     private static func knownDetail(for rawValue: String) -> String? {
-        (openAIModels + claudeModels + ollamaModels)
+        (openAIModels + claudeModels + ollamaModels + [appleOnDevice])
             .first(where: { $0.rawValue == rawValue })?.detail
     }
 }

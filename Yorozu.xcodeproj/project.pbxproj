@@ -7,6 +7,9 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		B10000000000000000000029 /* AppleIntelligenceProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000027 /* AppleIntelligenceProvider.swift */; };
+		B10000000000000000000028 /* SoakPerformanceProbe.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000026 /* SoakPerformanceProbe.swift */; };
+		B10000000000000000000027 /* AIMessageCache.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000025 /* AIMessageCache.swift */; };
 		B10000000000000000000001 /* YorozuApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000001 /* YorozuApp.swift */; };
 		B10000000000000000000002 /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000002 /* AppDelegate.swift */; };
 		B10000000000000000000003 /* LauncherModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000003 /* LauncherModels.swift */; };
@@ -79,6 +82,9 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
+		A10000000000000000000027 /* AppleIntelligenceProvider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppleIntelligenceProvider.swift; sourceTree = "<group>"; };
+		A10000000000000000000026 /* SoakPerformanceProbe.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SoakPerformanceProbe.swift; sourceTree = "<group>"; };
+		A10000000000000000000025 /* AIMessageCache.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AIMessageCache.swift; sourceTree = "<group>"; };
 		A10000000000000000000001 /* YorozuApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = YorozuApp.swift; sourceTree = "<group>"; };
 		A10000000000000000000002 /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
 		A10000000000000000000003 /* LauncherModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LauncherModels.swift; sourceTree = "<group>"; };
@@ -194,6 +200,7 @@
 			children = (
 				A10000000000000000000001 /* YorozuApp.swift */,
 				A10000000000000000000002 /* AppDelegate.swift */,
+				A10000000000000000000026 /* SoakPerformanceProbe.swift */,
 				A10000000000000000000014 /* AppShortcuts.swift */,
 			);
 			name = App;
@@ -206,6 +213,7 @@
 				A10000000000000000000003 /* LauncherModels.swift */,
 				A10000000000000000000015 /* FeatureModels.swift */,
 				A10000000000000000000019 /* AIModels.swift */,
+				A10000000000000000000025 /* AIMessageCache.swift */,
 			);
 			name = Core;
 			path = Yorozu/Core;
@@ -241,6 +249,7 @@
 				A10000000000000000000010 /* MenuBarController.swift */,
 				A10000000000000000000018 /* ClipboardServices.swift */,
 				A1000000000000000000001C /* OpenAIChatServices.swift */,
+				A10000000000000000000027 /* AppleIntelligenceProvider.swift */,
 				A1000000000000000000001D /* AIChatView.swift */,
 				A1000000000000000000001E /* CodexAppServerServices.swift */,
 				A1000000000000000000001F /* CommandInputModeSwitching.swift */,
@@ -445,10 +454,12 @@
 			files = (
 				B10000000000000000000001 /* YorozuApp.swift in Sources */,
 				B10000000000000000000002 /* AppDelegate.swift in Sources */,
+				B10000000000000000000028 /* SoakPerformanceProbe.swift in Sources */,
 				B10000000000000000000016 /* AppShortcuts.swift in Sources */,
 				B10000000000000000000003 /* LauncherModels.swift in Sources */,
 				B10000000000000000000017 /* FeatureModels.swift in Sources */,
 				B1000000000000000000001B /* AIModels.swift in Sources */,
+				B10000000000000000000027 /* AIMessageCache.swift in Sources */,
 				B10000000000000000000004 /* SearchScorer.swift in Sources */,
 				B10000000000000000000005 /* LauncherStore.swift in Sources */,
 				B10000000000000000000006 /* ApplicationDiscovery.swift in Sources */,
@@ -468,6 +479,7 @@
 				B10000000000000000000010 /* MenuBarController.swift in Sources */,
 				B1000000000000000000001A /* ClipboardServices.swift in Sources */,
 				B1000000000000000000001E /* OpenAIChatServices.swift in Sources */,
+				B10000000000000000000029 /* AppleIntelligenceProvider.swift in Sources */,
 				B1000000000000000000001F /* AIChatView.swift in Sources */,
 				B10000000000000000000020 /* CodexAppServerServices.swift in Sources */,
 				B10000000000000000000021 /* CommandInputModeSwitching.swift in Sources */,

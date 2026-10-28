@@ -18,6 +18,7 @@ Yorozu is a lightweight, keyboard-first launcher for macOS. It brings applicatio
 - OpenAI Responses API chat with streaming, Web Search, file inputs, and local title indexing
 - Claude Messages API chat with streaming and local title indexing (enable it and add an Anthropic API key in Settings)
 - Ollama chat with locally installed models discovered from the local Ollama service (enable it in Settings; no API key is required)
+- Apple Intelligence on-device chat and translation (enable it in Settings; chats last until Yorozu quits)
 - Configurable global shortcuts
 - Optional launch at login using the macOS Login Items service
 - Optional Left/Right Command-alone input-mode switching for English and Japanese
@@ -156,10 +157,14 @@ authentication and conversation content to the installed `codex app-server`; Yor
 reads or stores Codex tokens. The optional OpenAI API and Claude providers keep the user's
 API keys in macOS Keychain and use their respective API billing. The optional Ollama
 provider connects only to the default local Ollama service, discovers installed models on
-the Mac, and does not require or store a credential. Network requests are created only
+the Mac, and does not require or store a credential. Apple Intelligence uses the system's
+on-device model without an API key; its chat history and drafts are kept in memory only
+and disappear when Yorozu quits. It does not access Siri conversation history.
+Network requests are created only
 after the relevant feature is opened and used.
 
-Yorozu stores only provider IDs, chat titles, model IDs, and list metadata in SQLite. AI
+For supported persistent indexes, Yorozu stores only provider IDs, chat titles, model IDs,
+and list metadata in SQLite; Apple Intelligence chats do not create an index on disk. AI
 message bodies are sent only to the provider after an explicit user action and are not
 written to the repository. Credentials, clipboard content, and snippet content are not
 committed or attached automatically. Yorozu does not synchronize with ChatGPT history.

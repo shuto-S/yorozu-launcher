@@ -5,6 +5,55 @@ import XCTest
 
 @MainActor
 final class LauncherViewModelTests: XCTestCase {
+    func testEveryPerformanceModeUsesIsolatedDependencies() {
+        for flag in ["--performance-testing", "--performance-testing-clipboard", "--performance-testing-snippets", "--performance-testing-clipboard-interaction", "--performance-testing-soak"] {
+            XCTAssertTrue(AppEnvironment.requiresIsolation(arguments: ["Yorozu", flag]))
+        }
+        XCTAssertFalse(AppEnvironment.requiresIsolation(arguments: ["Yorozu"]))
+        XCTAssertFalse(AppEnvironment.requiresIsolation(arguments: ["Yorozu", "--unrelated"]))
+    }
+
+    func testSoakConfigurationIsBoundedAndDefaultsToThirtyMinutes() throws {
+        let configuration = try SoakPerformanceConfiguration(arguments: [])
+        XCTAssertEqual(configuration.durationSeconds, 1_800)
+        XCTAssertEqual(configuration.warmupSeconds, 300)
+        XCTAssertEqual(configuration.sampleIntervalSeconds, 30)
+        let smoke = try SoakPerformanceConfiguration(arguments: [
+            "--soak-duration-seconds", "20", "--soak-warmup-seconds", "5", "--soak-sample-seconds", "2"
+        ])
+        XCTAssertEqual(smoke.durationSeconds, 20)
+        for arguments in [
+            ["--soak-duration-seconds", "nan"], ["--soak-duration-seconds", "inf"],
+            ["--soak-duration-seconds", "1"], ["--soak-duration-seconds", "20000"],
+            ["--soak-warmup-seconds", "1800"], ["--soak-warmup-seconds", "-1"],
+            ["--soak-sample-seconds", "0"], ["--soak-sample-seconds", "61"],
+            ["--soak-duration-seconds"]
+        ] {
+            XCTAssertThrowsError(try SoakPerformanceConfiguration(arguments: arguments))
+        }
+    }
+
+    func testSoakGrowthUsesPeakAfterWarmupAndDoesNotMistakeSmokeForSoak() throws {
+        func sample(_ elapsed: Double, _ resident: UInt64) -> SoakPerformanceSample {
+            let latency = PalettePresentationPerformanceReport(samples: [1])
+            return SoakPerformanceSample(
+                elapsedSeconds: elapsed, residentBytes: resident, idleCPUPercent: 0,
+                wakeEventCount: 0, cacheEstimatedBytes: 0, cacheConversationCount: 0,
+                cacheEvictionCount: 0,
+                latency: SoakLatencySample(root: latency, clipboard: latency, snippets: latency, clipboardItemCount: 32, snippetCount: 32)
+            )
+        }
+        let report = SoakPerformanceReport(requestedDurationSeconds: 1_800, warmupSeconds: 300, samples: [
+            sample(1, 1_000), sample(300, 100), sample(600, 130), sample(1_800, 110)
+        ])
+        XCTAssertEqual(report.afterWarmupRSSGrowthBytes, 30)
+        let smoke = SoakPerformanceReport(requestedDurationSeconds: 10, warmupSeconds: 5, samples: [sample(6, 100)])
+        XCTAssertNil(smoke.afterWarmupRSSGrowthBytes)
+        let encoded = try JSONEncoder().encode(report)
+        XCTAssertEqual(try JSONDecoder().decode(SoakPerformanceReport.self, from: encoded).afterWarmupRSSGrowthBytes, 30)
+        XCTAssertGreaterThan(try SoakProcessResources.current().residentBytes, 0)
+    }
+
     func testUITestEnvironmentUsesOnlyIsolatedDependencies() async throws {
         let runID = "unit-\(UUID().uuidString)"
         let suiteName = "com.yorozu.app.ui-tests.\(runID)"
@@ -65,7 +114,7 @@ final class LauncherViewModelTests: XCTestCase {
         )
     }
 
-    func testMarkedTextCompositionKeysPassThroughToTheInputMethod() {
+    func testCompositionKeysPassThroughAcrossSearchRoutesAndActionPanel() {
         let keyCodes: [UInt16] = [
             36,  // Return
             76,  // Keypad Enter
@@ -75,34 +124,25 @@ final class LauncherViewModelTests: XCTestCase {
             48,  // Tab
         ]
 
-        for keyCode in keyCodes {
-            XCTAssertEqual(
-                PaletteKeyEventPolicy.action(
-                    keyCode: keyCode,
-                    modifiers: [],
-                    hasMarkedText: true,
-                    route: .root,
-                    isActionPanelPresented: false
-                ),
-                .passThrough,
-                "Expected keyCode \(keyCode) to reach the input method"
-            )
+        for route: PaletteRoute in [.root, .translation] {
+            for isActionPanelPresented in [false, true] {
+                for keyCode in keyCodes {
+                    XCTAssertEqual(
+                        keyAction(
+                            keyCode: keyCode,
+                            hasMarkedText: true,
+                            route: route,
+                            isActionPanelPresented: isActionPanelPresented
+                        ),
+                        .passThrough,
+                        "Expected \(route), action panel \(isActionPanelPresented), keyCode \(keyCode) to reach the input method"
+                    )
+                }
+            }
         }
     }
 
-    func testTranslationCompositionKeysPassThroughToTheInputMethod() {
-        for keyCode: UInt16 in [36, 76, 126, 125, 53, 48] {
-            XCTAssertEqual(
-                keyAction(
-                    keyCode: keyCode,
-                    hasMarkedText: true,
-                    route: .translation
-                ),
-                .passThrough,
-                "Expected translation keyCode \(keyCode) to reach the input method"
-            )
-        }
-
+    func testTranslationKeysWithoutCompositionKeepTheirExistingActions() {
         XCTAssertEqual(
             keyAction(keyCode: 36, route: .translation),
             .passThrough
@@ -143,18 +183,7 @@ final class LauncherViewModelTests: XCTestCase {
         )
     }
 
-    func testActionPanelUsesTheSameCompositionPolicy() {
-        for keyCode: UInt16 in [36, 76, 126, 125, 53, 48] {
-            XCTAssertEqual(
-                keyAction(
-                    keyCode: keyCode,
-                    hasMarkedText: true,
-                    isActionPanelPresented: true
-                ),
-                .passThrough
-            )
-        }
-
+    func testActionPanelKeyboardActionsWithoutComposition() {
         XCTAssertEqual(
             keyAction(keyCode: 36, isActionPanelPresented: true),
             .performPrimaryAction

@@ -1,5 +1,6 @@
 import AppKit
 import ApplicationServices
+import KeyboardShortcuts
 import SwiftUI
 
 struct AccessibilityDisplayOverrides: Equatable {
@@ -746,6 +747,8 @@ final class PaletteWindowController: NSWindowController, NSWindowDelegate {
                 isAIConversationPage: self.viewModel.route.isAI
                     && !self.viewModel.aiChatViewModel.isListVisible,
                 isRecordingModifierShortcut: WindowControlModifierCapture.isAnyRecording
+                    || self.window?.firstResponder is KeyboardShortcuts.RecorderCocoa
+                    || (self.window?.firstResponder as? NSTextView)?.delegate is KeyboardShortcuts.RecorderCocoa
             )
 
             switch action {

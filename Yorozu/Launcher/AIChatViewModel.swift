@@ -24,7 +24,14 @@ final class AIChatViewModel {
             refreshList(preserveSelection: false)
         }
     }
-    private(set) var destination: AIChatDestination = .list(.active)
+    private(set) var destination: AIChatDestination = .list(.active) {
+        didSet {
+            updateCacheProtection()
+            if case .list = destination {
+                messages = []
+            }
+        }
+    }
     private(set) var conversations: [AIConversationSummary] = []
     private(set) var visibleConversations: [AIConversationSummary] = []
     var selectedListID: String?
@@ -56,6 +63,13 @@ final class AIChatViewModel {
     var statusMessage: String?
 
     var credentialStatusTitle: String {
+        if providerID == .appleIntelligence {
+            switch credentialStatus {
+            case .checking: return "Checking Apple Intelligence…"
+            case .saved: return "Apple Intelligence is available"
+            case .notSaved, .unavailable: return "Apple Intelligence is unavailable"
+            }
+        }
         if providerID == .codex {
             switch credentialStatus {
             case .checking:
@@ -93,6 +107,9 @@ final class AIChatViewModel {
     }
 
     var credentialStatusDetail: String {
+        if providerID == .appleIntelligence {
+            return "The model runs on this Mac. No API key is required."
+        }
         if providerID == .codex {
             switch credentialStatus {
             case .checking:
@@ -160,10 +177,11 @@ final class AIChatViewModel {
     private var listSearchRevision = 0
     private var conversationLoadRevision = 0
     private var draftByConversation: [String: String] = [:]
-    private var messageCache: [String: [AIChatMessage]] = [:]
-    private var messageCacheOrder: [String] = []
-    private var activeStreamConversationID: String?
-    private let maximumCachedConversationCount = 8
+    @ObservationIgnored
+    private let messageCache: AIMessageCache
+    private var activeStreamConversationID: String? {
+        didSet { updateCacheProtection() }
+    }
     @ObservationIgnored
     var copyText: ((String) async -> PasteboardReplacementResult)?
 
@@ -200,6 +218,7 @@ final class AIChatViewModel {
         catalog: AIConversationCatalog,
         provider: any AIChatProvider,
         preferences: AIChatPreferences,
+        messageCache: AIMessageCache = AIMessageCache(),
         openExternalURL: @escaping (URL) -> Bool = { NSWorkspace.shared.open($0) }
     ) {
         self.provider = provider
@@ -208,6 +227,7 @@ final class AIChatViewModel {
         providerID = provider.descriptor.id
         providerDescriptor = provider.descriptor
         self.preferences = preferences
+        self.messageCache = messageCache
         currentModel = preferences.defaultModel
         currentReasoningEffort = preferences.defaultReasoningEffort
         availableModels = [preferences.defaultModel]
@@ -503,6 +523,10 @@ final class AIChatViewModel {
         credentialStatusTask = nil
         listSearchTask?.cancel()
         listSearchTask = nil
+        messages = []
+        prompt = ""
+        draftByConversation.removeAll()
+        messageCache.removeAll(for: providerID)
         Task { await coordinator.shutdown() }
     }
 
@@ -628,7 +652,7 @@ final class AIChatViewModel {
             )
         }
         isLoadingConversation = true
-        messages = messageCache[id] ?? []
+        messages = messageCache.messages(for: cacheReference(id)) ?? []
         scrollToLatestRequest &+= 1
         nextCursor = nil
         hasMoreMessages = false
@@ -686,13 +710,11 @@ final class AIChatViewModel {
                     limit: 100,
                     after: nextCursor
                 )
-                var cached = messageCache[id] ?? messages
+                guard revision == conversationLoadRevision,
+                      destination == .conversation(id) else { return }
+                var cached = messageCache.messages(for: cacheReference(id)) ?? messages
                 cached.insert(contentsOf: page.messages, at: 0)
                 storeCachedMessages(cached, for: id)
-                guard revision == conversationLoadRevision,
-                      destination == .conversation(id) else {
-                    return
-                }
                 messages = cached
                 self.nextCursor = page.nextCursor
                 hasMoreMessages = page.hasMore
@@ -764,7 +786,7 @@ final class AIChatViewModel {
                     model: requestModel
                 )
                 activeStreamConversationID = conversationID
-                if messageCache[conversationID] == nil {
+                if messageCache.messages(for: cacheReference(conversationID)) == nil {
                     storeCachedMessages(messages, for: conversationID)
                 }
                 let uploaded = try await upload(
@@ -1104,6 +1126,8 @@ final class AIChatViewModel {
                     conversationID: conversation.id
                 )
                 apply(snapshot: await coordinator.remove(id: conversation.id))
+                messageCache.remove(cacheReference(conversation.id))
+                draftByConversation.removeValue(forKey: conversation.id)
                 destination = .list(.active)
                 refreshList(preserveSelection: false)
                 statusMessage = "Chat deleted."
@@ -1548,9 +1572,8 @@ final class AIChatViewModel {
         to messageID: String,
         conversationID: String
     ) {
-        updateMessages(for: conversationID) { values in
-            guard let index = values.firstIndex(where: { $0.id == messageID }) else { return }
-            values[index].text += delta
+        updateMessage(id: messageID, conversationID: conversationID) {
+            $0.text += delta
         }
     }
 
@@ -1559,12 +1582,9 @@ final class AIChatViewModel {
         to messageID: String,
         conversationID: String
     ) {
-        updateMessages(for: conversationID) { values in
-            guard let index = values.firstIndex(where: { $0.id == messageID }),
-                  !values[index].citations.contains(where: { $0.id == citation.id }) else {
-                return
-            }
-            values[index].citations.append(citation)
+        updateMessage(id: messageID, conversationID: conversationID) {
+            guard !$0.citations.contains(where: { $0.id == citation.id }) else { return }
+            $0.citations.append(citation)
         }
     }
 
@@ -1572,26 +1592,26 @@ final class AIChatViewModel {
         id: String,
         conversationID: String
     ) {
-        updateMessages(for: conversationID) { values in
-            guard let index = values.firstIndex(where: { $0.id == id }) else { return }
-            values[index].isStreaming = false
+        updateMessage(id: id, conversationID: conversationID) {
+            $0.isStreaming = false
         }
     }
 
     private func markLastAssistantStopped(conversationID: String?) {
         guard let conversationID else { return }
-        updateMessages(for: conversationID) { values in
-            guard let index = values.lastIndex(where: { $0.role == .assistant }) else { return }
-            values[index].isStreaming = false
-        }
+        let reference = cacheReference(conversationID)
+        guard let id = messageCache.messages(for: reference)?.last(where: {
+            $0.role == .assistant
+        })?.id else { return }
+        updateMessage(id: id, conversationID: conversationID) { $0.isStreaming = false }
     }
 
     private func saveCurrentDraft() {
         switch destination {
         case .newChat:
-            draftByConversation["new"] = prompt
+            draftByConversation["new"] = prompt.isEmpty ? nil : prompt
         case let .conversation(id):
-            draftByConversation[id] = prompt
+            draftByConversation[id] = prompt.isEmpty ? nil : prompt
         case .list:
             break
         }
@@ -1607,7 +1627,7 @@ final class AIChatViewModel {
         _ update: (inout [AIChatMessage]) -> Void
     ) {
         var values: [AIChatMessage]
-        if let cached = messageCache[conversationID] {
+        if let cached = messageCache.messages(for: cacheReference(conversationID)) {
             values = cached
         } else if destination == .conversation(conversationID) {
             values = messages
@@ -1626,20 +1646,32 @@ final class AIChatViewModel {
         _ values: [AIChatMessage],
         for conversationID: String
     ) {
-        messageCache[conversationID] = values
-        messageCacheOrder.removeAll { $0 == conversationID }
-        messageCacheOrder.append(conversationID)
+        messageCache.store(values, for: cacheReference(conversationID))
+    }
 
-        while messageCacheOrder.count > maximumCachedConversationCount {
-            guard let evictionIndex = messageCacheOrder.firstIndex(where: { candidate in
-                candidate != activeStreamConversationID
-                    && destination != .conversation(candidate)
-            }) else {
-                break
-            }
-            let evictedID = messageCacheOrder.remove(at: evictionIndex)
-            messageCache.removeValue(forKey: evictedID)
+    private func updateMessage(
+        id: String,
+        conversationID: String,
+        _ update: (inout AIChatMessage) -> Void
+    ) {
+        guard let values = messageCache.updateMessage(
+            id: id, in: cacheReference(conversationID), update
+        ) else { return }
+        if destination == .conversation(conversationID) {
+            messageContentRevision &+= 1
+            messages = values
         }
+    }
+
+    private func cacheReference(_ id: String) -> AIConversationReference {
+        AIConversationReference(providerID: providerID, providerConversationID: id)
+    }
+
+    private func updateCacheProtection() {
+        var references: Set<AIConversationReference> = []
+        if case let .conversation(id) = destination { references.insert(cacheReference(id)) }
+        if let id = activeStreamConversationID { references.insert(cacheReference(id)) }
+        messageCache.protect(references, for: providerID)
     }
 
     private nonisolated static func validatedAttachments(
@@ -1839,6 +1871,7 @@ final class TranslationViewModel {
         .translationProvider2,
         .translationProvider3,
         .translationProvider4,
+        .translationProvider5,
     ]
     private static let modelActionIDs: [LauncherActionID] = [
         .aiModelTerra, .aiModelSol, .aiModelLuna, .aiModel4, .aiModel5,
@@ -1882,6 +1915,7 @@ final class TranslationViewModel {
     private(set) var focusRequest = 0
 
     private var translationTask: Task<Void, Never>?
+    private var translationRevision = 0
     private var prepareTask: Task<Void, Never>?
     private var modelLoadTask: Task<Void, Never>?
     private var modelLoadRevision = 0
@@ -2067,6 +2101,7 @@ final class TranslationViewModel {
     }
 
     func clearOutput() {
+        stop()
         outputText = ""
         errorMessage = nil
     }
@@ -2108,8 +2143,7 @@ final class TranslationViewModel {
         initialText: String? = nil,
         selectionPermissionUnavailable: Bool = false
     ) {
-        translationTask?.cancel()
-        prepareTask?.cancel()
+        stop()
         inputText = initialText ?? ""
         outputText = ""
         errorMessage = nil
@@ -2137,6 +2171,8 @@ final class TranslationViewModel {
         guard canTranslate,
               let provider = selectedProvider else { return }
         translationTask?.cancel()
+        translationRevision += 1
+        let revision = translationRevision
         errorMessage = nil
         outputText = ""
         isTranslating = true
@@ -2145,7 +2181,7 @@ final class TranslationViewModel {
         let model = selectedModel
         let reasoningEffort = selectedReasoningEffort
         translationTask = Task { @MainActor [weak self] in
-            guard let self else { return }
+            guard let self, !Task.isCancelled, revision == self.translationRevision else { return }
             do {
                 for try await event in provider.streamTranslation(
                     input: input,
@@ -2153,24 +2189,33 @@ final class TranslationViewModel {
                     model: model,
                     reasoningEffort: reasoningEffort
                 ) {
-                    guard !Task.isCancelled else { return }
+                    guard !Task.isCancelled, revision == self.translationRevision else { return }
                     if case let .textDelta(delta) = event {
                         self.outputText.append(delta)
                     }
                 }
+                guard !Task.isCancelled, revision == self.translationRevision else { return }
                 self.isTranslating = false
+                self.translationTask = nil
             } catch is CancellationError {
+                guard revision == self.translationRevision else { return }
                 self.isTranslating = false
+                self.translationTask = nil
             } catch {
+                guard !Task.isCancelled, revision == self.translationRevision else { return }
                 self.isTranslating = false
+                self.translationTask = nil
                 self.errorMessage = Self.userMessage(for: error)
             }
         }
     }
 
     func stop() {
+        translationRevision += 1
         translationTask?.cancel()
         translationTask = nil
+        prepareTask?.cancel()
+        prepareTask = nil
         isTranslating = false
     }
 
@@ -2363,8 +2408,7 @@ final class TranslationViewModel {
     }
 
     func shutdown() {
-        translationTask?.cancel()
-        prepareTask?.cancel()
+        stop()
         modelLoadTask?.cancel()
         modelLoadTask = nil
         modelLoadRevision += 1

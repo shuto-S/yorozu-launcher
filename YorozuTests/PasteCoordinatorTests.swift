@@ -17,6 +17,7 @@ final class PasteCoordinatorTests: XCTestCase {
         XCTAssertEqual(fixture.events.postPasteCount, 1)
         XCTAssertEqual(fixture.events.postedProcessIdentifiers, [fixture.target.processIdentifier])
         XCTAssertEqual(fixture.pasteboard.restoreCount, 1)
+        XCTAssertEqual(fixture.pasteboard.restoredSnapshots, fixture.pasteboard.originalSnapshot)
         XCTAssertEqual(fixture.suppression.count, 2)
     }
 
@@ -187,18 +188,6 @@ final class PasteCoordinatorTests: XCTestCase {
         XCTAssertEqual(result, .failed)
         XCTAssertEqual(fixture.pasteboard.replaceCount, 1)
         XCTAssertEqual(fixture.events.postPasteCount, 0)
-    }
-
-    func testUnchangedInjectedClipboardIsRestoredAfterPaste() async {
-        let fixture = makeFixture()
-        fixture.target.becomesActiveWhenActivated = true
-
-        _ = await fixture.coordinator.performPaste(
-            .text("private clipboard content"),
-            into: fixture.target
-        )
-
-        XCTAssertEqual(fixture.pasteboard.restoredSnapshots, fixture.pasteboard.originalSnapshot)
     }
 
     func testUserClipboardChangePreventsRestoration() async {

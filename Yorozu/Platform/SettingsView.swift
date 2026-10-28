@@ -599,10 +599,11 @@ private struct AISettingsView: View {
             Picker("Provider", selection: $selectedProviderID) {
                 ForEach(providerViewModels, id: \.providerID) { viewModel in
                     Label(
-                        viewModel.providerDescriptor.displayName,
+                        viewModel.providerID == .appleIntelligence ? "Apple" : viewModel.providerDescriptor.displayName,
                         systemImage: viewModel.providerDescriptor.symbolName
                     )
                     .tag(Optional(viewModel.providerID))
+                    .accessibilityLabel(viewModel.providerDescriptor.displayName)
                     .accessibilityIdentifier(
                         "settings.ai.provider.\(viewModel.providerID.rawValue)"
                     )
@@ -811,6 +812,8 @@ private struct AIProviderSettingsDetailView: View {
             "Your Anthropic API key is stored in macOS Keychain. Yorozu never writes it to its database or logs."
         case .ollama:
             "Yorozu connects to the local Ollama service. No API key or cloud account is required."
+        case .appleIntelligence:
+            "Apple Intelligence must be enabled and its on-device model ready. No API key is required."
         default:
             "Authentication is managed by \(viewModel.providerDescriptor.displayName)."
         }
@@ -826,6 +829,8 @@ private struct AIProviderSettingsDetailView: View {
             "Anthropic API usage is billed to your Anthropic account. Conversation messages are sent to Anthropic for processing."
         case .ollama:
             "Models run on this Mac through Ollama. Yorozu does not send Ollama messages to a cloud provider."
+        case .appleIntelligence:
+            "Messages are processed on this Mac. Chats and drafts are kept only until Yorozu quits. Siri conversations are not shared."
         default:
             "Usage, data retention, and billing are managed by \(viewModel.providerDescriptor.displayName)."
         }

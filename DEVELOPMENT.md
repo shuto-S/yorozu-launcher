@@ -264,6 +264,23 @@ Important boundaries:
 
 ## Persistence and privacy
 
+### Discovery and asynchronous state consistency
+
+Application discovery includes the standard user, local, and system application folders,
+plus `/System/Cryptexes/App/System/Applications`. Safari's link in `/Applications`
+can be hidden; enumerate the visible Cryptex target rather than removing hidden-app
+filtering. Resolve symbolic-link roots for both scanning and filesystem monitoring.
+Do not traverse arbitrary linked subdirectories or application-package contents.
+
+After an asynchronous preference save, look up the application by stable identity
+again and change only the intended field; reindexing may have changed array positions,
+metadata, or usage. Snippet duplication must leave space for its suffix within the name
+limit. A successful use still updates session ordering if persistence fails, while
+reporting the storage failure. AI conversation loading is cached only after success so
+failed loads remain retryable. Translation tasks use a revision to prevent canceled
+streams from completing or overwriting a newer translation; clearing the result or
+changing its target language stops the old stream.
+
 The runtime database is stored at:
 
 ```text
@@ -343,6 +360,14 @@ At startup, Yorozu validates the current migrations against a temporary database
 An incomplete backup move is rolled back where possible, and the source database is never deleted as a recovery shortcut. Busy, disk-full, permission, and general I/O errors do not trigger recovery; they remain retryable.
 
 ## Validation
+
+Tests should protect observable behavior and meaningful failure boundaries, not repeat
+implementation details. Prefer one table-driven test for equivalent input variations,
+with a descriptive failure for each case; keep separate scenarios when their setup,
+timing, safety impact, or user-visible outcome differs. When removing a duplicate,
+retain its unique assertions in the remaining test. In particular, keep coverage for
+clipboard preservation, permissions, IME composition, asynchronous cancellation, and
+real-system integration distinct from isolated unit tests.
 
 ### Unit and integration
 
@@ -427,6 +452,12 @@ Search never performs this work.
 
 ## Performance measurement
 
+Apple Intelligence can be enabled under Settings > AI. Its on-device model does
+not require an API key or network access after the model is ready. Yorozu keeps
+Apple Intelligence conversations and drafts in memory only; they are removed when
+the app quits. Siri conversations are not imported. Long requests can exceed the
+system model's context window; start a new chat or shorten the input in that case.
+
 Debug builds expose bounded performance modes:
 
 | Argument | Report |
@@ -437,6 +468,60 @@ Debug builds expose bounded performance modes:
 | `--performance-testing-clipboard-interaction` | `/private/tmp/yorozu-clipboard-interaction-performance.json` |
 
 Run the built executable directly with one argument. Each mode warms the persistent panel, writes a timing-only JSON report, and exits.
+
+All Debug performance flags now force the disposable UI-testing environment (temporary
+SQLite/defaults, fake applications/providers/pasteboard, no clipboard recording, AI
+network, Accessibility events, global shortcuts, or updates). For nonempty Clipboard
+and Snippets comparisons, also pass `--ui-testing --ui-testing-scroll`; this seeds 32
+synthetic entries in each feature. Do not compare an empty list with a populated list.
+
+### AI message cache
+
+All four provider view models share one LRU view cache: at most eight conversations
+and an estimated 8 MiB total (stored UTF-8 plus container/metadata allowances).
+Streaming updates recount only the changed message. This is an accounting budget,
+not an exact process-RSS limit. The selected conversation in each provider and any
+active generation are protected, even if oversized; releasing that protection trims
+the cache immediately. Returning to the chat list releases its displayed transcript.
+Evicted chats are fetched from the provider when reopened. Nonempty drafts stay in
+process memory until quit and are never evicted with cached responses.
+
+Provider-owned history is not disposable: Claude and Ollama currently keep their
+authoritative history in process memory. This cache change does not truncate that
+history or drafts, so those and a single very large open conversation can still
+grow memory. Do not describe the cache budget as a hard 100 MB application limit.
+
+### Long-running and sleep/wake measurements
+
+`--performance-testing-soak` runs an isolated 30-minute probe with a five-minute
+warm-up and 30-second sampling intervals. It cycles Root/Clipboard/Snippets, checks
+populated fixture counts, and churns synthetic large AI transcripts through the real
+shared cache. It writes numeric metrics only to
+`/private/tmp/yorozu-soak-performance.json`, then exits and closes/removes its
+temporary database and defaults. It never exercises real provider history.
+Run it when desktop focus can be interrupted: the probe temporarily activates its
+isolated panel while measuring each route. It does not replace the installed app.
+
+Each sample includes per-process RSS, CPU time over the **idle interval only**,
+presentation latency distributions, cache size/evictions, and the cumulative count
+of actual `NSWorkspace.didWakeNotification` events. Sampling and that wake observer
+exist only during this explicitly requested Debug probe, not in production.
+The run duration uses `ContinuousClock`; the CPU interval uses
+[`SuspendingClock`](https://developer.apple.com/documentation/swift/suspendingclock/clock-implementations)
+so time spent asleep does not lower the measured awake CPU percentage.
+
+For a short harness smoke test, use `--soak-duration-seconds 20
+--soak-warmup-seconds 5 --soak-sample-seconds 2`. Short runs do not satisfy the
+30-minute gate. The bounded options allow 2 seconds to 4 hours of measurement,
+warm-up shorter than the run, and 1–60 second sampling intervals.
+
+Inspect `afterWarmupRSSGrowthBytes` (target <= 10 MiB), the existing RSS/CPU/latency
+targets below, and each feature's fixture count. The CPU interval excludes the probe's
+explicit cache churn and panel cycling, not unrelated system activity or wake work.
+For wake coverage, run the default probe across a **real, user-initiated** sleep/wake
+and inspect the first sample after its wake counter increases. A zero wake count
+means wake behavior was not tested. The probe does not force sleep, modify power
+settings, or use synthetic notifications as evidence of real wake recovery.
 
 When evaluating a performance change:
 

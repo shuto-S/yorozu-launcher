@@ -143,6 +143,19 @@ final class YorozuUITests: XCTestCase {
         XCTAssertFalse(application.staticTexts["Switch Test"].exists)
         inputModeToggle.click()
         XCTAssertFalse(application.staticTexts["Permission Required"].exists)
+
+        // Return focus to the sidebar before navigating through its current order.
+        general.click()
+        application.typeKey(.downArrow, modifierFlags: [])
+        XCTAssertTrue(
+            application.buttons["settings.window-control.move-recorder"]
+                .waitForExistence(timeout: 2)
+        )
+        application.typeKey(.downArrow, modifierFlags: [])
+        XCTAssertTrue(
+            application.switches["settings.keep-awake.enabled"]
+                .waitForExistence(timeout: 2)
+        )
         application.typeKey(.downArrow, modifierFlags: [])
         XCTAssertTrue(
             application.staticTexts["Recording"].waitForExistence(timeout: 2)
@@ -198,14 +211,9 @@ final class YorozuUITests: XCTestCase {
         XCTAssertTrue(destination.waitForExistence(timeout: 2))
         destination.click()
 
-        XCTAssertTrue(
-            application.descendants(matching: .any)[
-                "settings.detail.window-control"
-            ].waitForExistence(timeout: 2)
-        )
         let moveRecorder = application.buttons["settings.window-control.move-recorder"]
         let resizeRecorder = application.buttons["settings.window-control.resize-recorder"]
-        XCTAssertTrue(moveRecorder.exists)
+        XCTAssertTrue(moveRecorder.waitForExistence(timeout: 2))
         XCTAssertTrue(resizeRecorder.exists)
         XCTAssertTrue(moveRecorder.isEnabled)
         XCTAssertTrue(resizeRecorder.isEnabled)
@@ -342,7 +350,45 @@ final class YorozuUITests: XCTestCase {
                 .waitForExistence(timeout: 2)
         )
         XCTAssertTrue(application.buttons["Test Connection"].exists)
+        let appleTab = application.radioButtons["settings.ai.provider.apple_intelligence"]
+        XCTAssertTrue(appleTab.waitForExistence(timeout: 2))
+        appleTab.click()
+        XCTAssertTrue(application.switches["Enable Apple Intelligence"].waitForExistence(timeout: 2))
+        XCTAssertTrue(application.staticTexts["Apple Intelligence is available"].waitForExistence(timeout: 2))
         XCTAssertEqual(application.dialogs.count, 1)
+    }
+
+    @MainActor
+    func testAppleIntelligenceCanBeEnabledAndOpenedFromRoot() {
+        continueAfterFailure = false
+        let application = XCUIApplication()
+        application.launchArguments = ["--ui-testing", "--ui-testing-sticky"]
+        application.launch()
+        let search = application.searchFields["launcher.search"]
+        XCTAssertTrue(search.waitForExistence(timeout: 5))
+        search.typeText("Settings")
+        application.typeKey(.return, modifierFlags: [])
+        let ai = application.descendants(matching: .any)["settings.destination.ai"]
+        XCTAssertTrue(ai.waitForExistence(timeout: 3))
+        ai.click()
+        let tab = application.radioButtons["settings.ai.provider.apple_intelligence"]
+        XCTAssertTrue(tab.waitForExistence(timeout: 3))
+        tab.click()
+        let enabled = application.switches["Enable Apple Intelligence"]
+        XCTAssertTrue(enabled.waitForExistence(timeout: 3))
+        enabled.click()
+        application.typeKey(.escape, modifierFlags: [])
+        XCTAssertTrue(search.waitForExistence(timeout: 3))
+        search.click()
+        application.typeKey("a", modifierFlags: .command)
+        search.typeText("AI Chat: Apple Intelligence")
+        let row = application.descendants(matching: .any)["launcher.row.feature:aiChat.apple_intelligence"]
+        XCTAssertTrue(row.waitForExistence(timeout: 3))
+        application.typeKey(.return, modifierFlags: [])
+        XCTAssertTrue(application.buttons["ai.chat-row.__yorozu_new_chat__"].waitForExistence(timeout: 3))
+        XCTAssertEqual(application.staticTexts["ai.empty-description"].value as? String, "Chats are kept only until Yorozu quits.")
+        application.typeKey(.return, modifierFlags: [])
+        XCTAssertTrue(application.textViews["ai.composer"].waitForExistence(timeout: 3))
     }
 
     @MainActor

@@ -147,6 +147,9 @@ struct AIChatView: View {
         let countText = viewModel.listScope == .active
             ? "\(count) chats"
             : "\(count) archived chats"
+        if viewModel.providerID == .appleIntelligence {
+            return "Session only"
+        }
         return "\(countText) · \(viewModel.providerDescriptor.displayName)"
     }
 
@@ -221,7 +224,10 @@ private struct AIConversationList: View {
                             ContentUnavailableView {
                                 Label("No Chats Yet", systemImage: "bubble.left.and.bubble.right")
                             } description: {
-                                Text("Start a new chat with Yorozu AI.")
+                                Text(viewModel.providerID == .appleIntelligence
+                                    ? "Chats are kept only until Yorozu quits."
+                                    : "Start a new chat with Yorozu AI.")
+                                    .accessibilityIdentifier("ai.empty-description")
                             }
                             .frame(minHeight: 260)
                         }
