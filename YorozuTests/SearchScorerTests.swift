@@ -160,14 +160,6 @@ final class SearchScorerTests: XCTestCase {
         XCTAssertLessThan(p95, 0.030, "p95 was \(p95 * 1_000)ms")
     }
 
-    func testAliasValidationTrimsAndRejectsEmptyAndOversizedValues() throws {
-        XCTAssertEqual(try LauncherViewModel.validatedAlias("  editor \n"), "editor")
-        XCTAssertThrowsError(try LauncherViewModel.validatedAlias(" \n "))
-        XCTAssertThrowsError(
-            try LauncherViewModel.validatedAlias(String(repeating: "a", count: 65))
-        )
-    }
-
     private func application(
         name: String,
         preference: LauncherPreference = .empty

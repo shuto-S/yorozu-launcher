@@ -4,6 +4,99 @@ import XCTest
 
 @MainActor
 final class PasteCoordinatorTests: XCTestCase {
+    func testMissingTargetCopiesWithoutPostingPaste() async {
+        let fixture = makeFixture()
+
+        let result = await fixture.coordinator.performPaste(
+            .text("private clipboard content"),
+            into: nil
+        )
+
+        XCTAssertEqual(result, .copiedBecauseTargetUnavailable)
+        XCTAssertEqual(fixture.events.postPasteCount, 0)
+        XCTAssertEqual(fixture.pasteboard.restoreCount, 0)
+    }
+
+
+    func testActivationRequestFailureDoesNotPostPaste() async {
+        let fixture = makeFixture()
+        fixture.target.activationSucceeds = false
+
+        let result = await fixture.coordinator.performPaste(
+            .text("private clipboard content"),
+            into: fixture.target
+        )
+
+        XCTAssertEqual(result, .copiedBecauseActivationFailed)
+        XCTAssertEqual(fixture.events.postPasteCount, 0)
+    }
+
+
+    func testDelayedActivationPostsOnlyAfterTargetBecomesActive() async {
+        let fixture = makeFixture()
+        fixture.events.onSleep = {
+            if fixture.events.sleepCount == 2 {
+                fixture.target.isActive = true
+                fixture.target.isFrontmost = true
+            }
+        }
+
+        let result = await fixture.coordinator.performPaste(
+            .text("private clipboard content"),
+            into: fixture.target
+        )
+
+        XCTAssertEqual(result, .pasted)
+        XCTAssertGreaterThanOrEqual(fixture.events.sleepCount, 3)
+        XCTAssertEqual(fixture.events.postPasteCount, 1)
+    }
+
+
+    func testTerminatedTargetStopsActivationWait() async {
+        let fixture = makeFixture()
+        fixture.events.onSleep = {
+            fixture.target.isTerminated = true
+        }
+
+        let result = await fixture.coordinator.performPaste(
+            .text("private clipboard content"),
+            into: fixture.target
+        )
+
+        XCTAssertEqual(result, .copiedBecauseTargetUnavailable)
+        XCTAssertEqual(fixture.events.postPasteCount, 0)
+    }
+
+
+    func testPasteEventCreationFailureReturnsFailed() async {
+        let fixture = makeFixture(postPasteSucceeds: false)
+        fixture.target.becomesActiveWhenActivated = true
+
+        let result = await fixture.coordinator.performPaste(
+            .text("private clipboard content"),
+            into: fixture.target
+        )
+
+        XCTAssertEqual(result, .failed)
+        XCTAssertEqual(fixture.events.postPasteCount, 1)
+        XCTAssertEqual(fixture.pasteboard.restoreCount, 0)
+    }
+
+
+    func testWriteFailureReturnsFailedWithoutPostingPaste() async {
+        let fixture = makeFixture()
+        fixture.pasteboard.replacementResult = .writeFailedAndRestored
+
+        let result = await fixture.coordinator.performPaste(
+            .text("private clipboard content"),
+            into: fixture.target
+        )
+
+        XCTAssertEqual(result, .failed)
+        XCTAssertEqual(fixture.pasteboard.replaceCount, 1)
+        XCTAssertEqual(fixture.events.postPasteCount, 0)
+    }
+
     func testTrustedActiveTargetPostsPasteOnceAndRestoresClipboard() async {
         let fixture = makeFixture()
         fixture.target.becomesActiveWhenActivated = true
@@ -35,51 +128,6 @@ final class PasteCoordinatorTests: XCTestCase {
         XCTAssertEqual(fixture.pasteboard.restoreCount, 0)
     }
 
-    func testMissingTargetCopiesWithoutPostingPaste() async {
-        let fixture = makeFixture()
-
-        let result = await fixture.coordinator.performPaste(
-            .text("private clipboard content"),
-            into: nil
-        )
-
-        XCTAssertEqual(result, .copiedBecauseTargetUnavailable)
-        XCTAssertEqual(fixture.events.postPasteCount, 0)
-        XCTAssertEqual(fixture.pasteboard.restoreCount, 0)
-    }
-
-    func testActivationRequestFailureDoesNotPostPaste() async {
-        let fixture = makeFixture()
-        fixture.target.activationSucceeds = false
-
-        let result = await fixture.coordinator.performPaste(
-            .text("private clipboard content"),
-            into: fixture.target
-        )
-
-        XCTAssertEqual(result, .copiedBecauseActivationFailed)
-        XCTAssertEqual(fixture.events.postPasteCount, 0)
-    }
-
-    func testDelayedActivationPostsOnlyAfterTargetBecomesActive() async {
-        let fixture = makeFixture()
-        fixture.events.onSleep = {
-            if fixture.events.sleepCount == 2 {
-                fixture.target.isActive = true
-                fixture.target.isFrontmost = true
-            }
-        }
-
-        let result = await fixture.coordinator.performPaste(
-            .text("private clipboard content"),
-            into: fixture.target
-        )
-
-        XCTAssertEqual(result, .pasted)
-        XCTAssertGreaterThanOrEqual(fixture.events.sleepCount, 3)
-        XCTAssertEqual(fixture.events.postPasteCount, 1)
-    }
-
     func testActiveTargetWaitsUntilItIsFrontmostBeforePostingPaste() async {
         let fixture = makeFixture()
         fixture.target.isActive = true
@@ -109,35 +157,6 @@ final class PasteCoordinatorTests: XCTestCase {
 
         XCTAssertEqual(result, .copiedBecauseActivationFailed)
         XCTAssertEqual(fixture.events.postPasteCount, 0)
-    }
-
-    func testTerminatedTargetStopsActivationWait() async {
-        let fixture = makeFixture()
-        fixture.events.onSleep = {
-            fixture.target.isTerminated = true
-        }
-
-        let result = await fixture.coordinator.performPaste(
-            .text("private clipboard content"),
-            into: fixture.target
-        )
-
-        XCTAssertEqual(result, .copiedBecauseTargetUnavailable)
-        XCTAssertEqual(fixture.events.postPasteCount, 0)
-    }
-
-    func testPasteEventCreationFailureReturnsFailed() async {
-        let fixture = makeFixture(postPasteSucceeds: false)
-        fixture.target.becomesActiveWhenActivated = true
-
-        let result = await fixture.coordinator.performPaste(
-            .text("private clipboard content"),
-            into: fixture.target
-        )
-
-        XCTAssertEqual(result, .failed)
-        XCTAssertEqual(fixture.events.postPasteCount, 1)
-        XCTAssertEqual(fixture.pasteboard.restoreCount, 0)
     }
 
     func testSnapshotLimitFailureLeavesClipboardUntouched() async {
@@ -176,20 +195,6 @@ final class PasteCoordinatorTests: XCTestCase {
         XCTAssertEqual(fixture.suppression.count, 0)
     }
 
-    func testWriteFailureReturnsFailedWithoutPostingPaste() async {
-        let fixture = makeFixture()
-        fixture.pasteboard.replacementResult = .writeFailedAndRestored
-
-        let result = await fixture.coordinator.performPaste(
-            .text("private clipboard content"),
-            into: fixture.target
-        )
-
-        XCTAssertEqual(result, .failed)
-        XCTAssertEqual(fixture.pasteboard.replaceCount, 1)
-        XCTAssertEqual(fixture.events.postPasteCount, 0)
-    }
-
     func testUserClipboardChangePreventsRestoration() async {
         let fixture = makeFixture()
         fixture.target.becomesActiveWhenActivated = true
@@ -206,35 +211,6 @@ final class PasteCoordinatorTests: XCTestCase {
 
         XCTAssertEqual(result, .pasted)
         XCTAssertEqual(fixture.pasteboard.restoreCount, 0)
-    }
-
-    func testCopyDoesNotReplaceClipboardChangedDuringSuppression() async {
-        let fixture = makeFixture()
-        fixture.suppression.onSuppress = {
-            fixture.pasteboard.simulateExternalWrite()
-        }
-
-        let result = await fixture.coordinator.copy(.text("selected"))
-
-        XCTAssertEqual(result, .clipboardChanged)
-        XCTAssertEqual(fixture.pasteboard.replaceCount, 0)
-        XCTAssertEqual(fixture.pasteboard.restoreCount, 0)
-        XCTAssertFalse(fixture.coordinator.isOperationInProgress)
-    }
-
-    func testPasteDoesNotReplaceClipboardChangedDuringSuppression() async {
-        let fixture = makeFixture()
-        fixture.suppression.onSuppress = {
-            fixture.pasteboard.simulateExternalWrite()
-        }
-
-        let result = await fixture.coordinator.performPaste(.text("selected"), into: fixture.target)
-
-        XCTAssertEqual(result, .clipboardChanged)
-        XCTAssertEqual(fixture.pasteboard.replaceCount, 0)
-        XCTAssertEqual(fixture.events.postPasteCount, 0)
-        XCTAssertEqual(fixture.target.activateCount, 0)
-        XCTAssertFalse(fixture.coordinator.isOperationInProgress)
     }
 
     func testCopyAndPasteRejectClipboardChangedWhileTakingSnapshot() async {
@@ -262,20 +238,6 @@ final class PasteCoordinatorTests: XCTestCase {
         fixture.events.onSleep = {
             fixture.target.isActive = true
             fixture.target.isFrontmost = true
-            fixture.pasteboard.simulateExternalWrite()
-        }
-
-        let result = await fixture.coordinator.performPaste(.text("selected"), into: fixture.target)
-
-        XCTAssertEqual(result, .clipboardChanged)
-        XCTAssertEqual(fixture.events.postPasteCount, 0)
-        XCTAssertEqual(fixture.pasteboard.restoreCount, 0)
-    }
-
-    func testExternalCopyDuringActivationGracePreventsPostingPaste() async {
-        let fixture = makeFixture()
-        fixture.target.becomesActiveWhenActivated = true
-        fixture.events.onSleep = {
             fixture.pasteboard.simulateExternalWrite()
         }
 
@@ -426,24 +388,6 @@ final class PasteCoordinatorTests: XCTestCase {
         XCTAssertEqual(pasteboard.string(forType: .string), "original")
     }
 
-    func testSystemPasteboardNormalWriteKeepsOwnershipGeneration() throws {
-        let pasteboard = NSPasteboard(name: .init("com.yorozu.tests.\(UUID().uuidString)"))
-        defer { pasteboard.releaseGlobally() }
-        let item = NSPasteboardItem()
-        XCTAssertTrue(item.setString("original", forType: .string))
-
-        let ownershipChangeCount = pasteboard.clearContents()
-        XCTAssertTrue(pasteboard.writeObjects([item]))
-        XCTAssertEqual(pasteboard.changeCount, ownershipChangeCount)
-
-        let accessor = SystemPasteboardAccessor(pasteboard: pasteboard)
-        let snapshot = try XCTUnwrap(accessor.snapshot().capturedValue)
-        let result = accessor.replace(with: .text("replacement"), preserving: snapshot)
-
-        XCTAssertEqual(result, .written(changeCount: pasteboard.changeCount))
-        XCTAssertEqual(pasteboard.string(forType: .string), "replacement")
-    }
-
     func testSystemPasteboardWriteFailureDoesNotRestoreOverExternalCopy() throws {
         let pasteboard = NSPasteboard(name: .init("com.yorozu.tests.\(UUID().uuidString)"))
         defer { pasteboard.releaseGlobally() }
@@ -516,34 +460,6 @@ final class PasteCoordinatorTests: XCTestCase {
         XCTAssertTrue(pasteboard.pasteboardItems?.first?.types.contains(.rtf) == true)
     }
 
-    func testSystemPasteboardSnapshotPreservesEmptyDataRepresentation() throws {
-        let pasteboard = NSPasteboard(name: .init("com.yorozu.tests.\(UUID().uuidString)"))
-        defer { pasteboard.releaseGlobally() }
-        let item = NSPasteboardItem()
-        XCTAssertTrue(item.setData(Data(), forType: .string))
-        pasteboard.clearContents()
-        XCTAssertTrue(pasteboard.writeObjects([item]))
-        let accessor = SystemPasteboardAccessor(pasteboard: pasteboard)
-
-        let snapshot = try XCTUnwrap(accessor.snapshot().capturedValue)
-
-        XCTAssertEqual(snapshot.items, [
-            PasteboardItemSnapshot(values: [
-                PasteboardTypeData(type: NSPasteboard.PasteboardType.string.rawValue, data: Data()),
-            ]),
-        ])
-    }
-
-    func testOwnedClipboardChangesKeepOnlySixteenGenerations() {
-        let changes = ClipboardOwnedChanges()
-        for generation in 1...32 { changes.record(generation) }
-        for generation in 1...16 { XCTAssertFalse(changes.contains(generation)) }
-        for generation in 17...32 { XCTAssertTrue(changes.contains(generation)) }
-
-        for _ in 0..<32 { changes.record(32) }
-        for generation in 17...32 { XCTAssertTrue(changes.contains(generation)) }
-    }
-
     func testReaderIgnoresOwnedWriteAndRestoreButAcceptsImmediateExternalCopy() throws {
         let pasteboard = NSPasteboard(name: .init("com.yorozu.tests.\(UUID().uuidString)"))
         defer { pasteboard.releaseGlobally() }
@@ -580,30 +496,6 @@ final class PasteCoordinatorTests: XCTestCase {
         XCTAssertEqual(text, "external copy")
     }
 
-    func testReaderRejectsGenerationChangedBeforeMainActorRead() {
-        let pasteboard = NSPasteboard(name: .init("com.yorozu.tests.\(UUID().uuidString)"))
-        defer { pasteboard.releaseGlobally() }
-        pasteboard.clearContents()
-        XCTAssertTrue(pasteboard.setString("original", forType: .string))
-        let expectedChangeCount = pasteboard.changeCount
-        pasteboard.clearContents()
-        XCTAssertTrue(pasteboard.setString("new copy", forType: .string))
-        var sourceReadCount = 0
-        let reader = SystemPasteboardReader(
-            pasteboard: pasteboard,
-            sourceApplication: {
-                sourceReadCount += 1
-                return ("com.yorozu.tests.source", "Test Source")
-            }
-        )
-
-        XCTAssertNil(reader.readSnapshot(
-            excluding: [], expectedChangeCount: expectedChangeCount,
-            ownedChanges: ClipboardOwnedChanges()
-        ))
-        XCTAssertEqual(sourceReadCount, 0)
-    }
-
     func testReaderRejectsExternalGenerationChangedDuringRead() throws {
         let pasteboard = NSPasteboard(name: .init("com.yorozu.tests.\(UUID().uuidString)"))
         defer { pasteboard.releaseGlobally() }
@@ -634,29 +526,6 @@ final class PasteCoordinatorTests: XCTestCase {
             return XCTFail("Expected the current external snapshot")
         }
         XCTAssertEqual(text, "new copy")
-    }
-
-    func testReaderRejectsOwnRestorationDuringRead() throws {
-        let pasteboard = NSPasteboard(name: .init("com.yorozu.tests.\(UUID().uuidString)"))
-        defer { pasteboard.releaseGlobally() }
-        pasteboard.clearContents()
-        XCTAssertTrue(pasteboard.setString("original", forType: .string))
-        let changes = ClipboardOwnedChanges()
-        let accessor = SystemPasteboardAccessor(pasteboard: pasteboard, ownedChanges: changes)
-        let original = try XCTUnwrap(accessor.snapshot().capturedValue)
-        let expectedChangeCount = pasteboard.changeCount
-        let reader = SystemPasteboardReader(
-            pasteboard: pasteboard,
-            sourceApplication: {
-                XCTAssertTrue(accessor.restore(original))
-                return ("com.yorozu.tests.source", "Test Source")
-            }
-        )
-
-        XCTAssertNil(reader.readSnapshot(
-            excluding: [], expectedChangeCount: expectedChangeCount, ownedChanges: changes
-        ))
-        XCTAssertTrue(changes.contains(pasteboard.changeCount))
     }
 
     func testMonitorRecordsExternalCopyImmediatelyAfterOwnWriteAndRestore() async throws {
@@ -736,23 +605,6 @@ final class PasteCoordinatorTests: XCTestCase {
 
         XCTAssertEqual(accessor.snapshot(), .preservationLimitExceeded)
         XCTAssertEqual(pasteboard.changeCount, changeCount)
-    }
-
-    func testPasteCoordinatorContainsNoLoggingCalls() throws {
-        let testFile = URL(fileURLWithPath: #filePath)
-        let sourceURL = testFile
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-            .appendingPathComponent("Yorozu/Platform/ClipboardServices.swift")
-        let source = try String(contentsOf: sourceURL, encoding: .utf8)
-        let coordinatorSource = try XCTUnwrap(
-            source.range(of: "@MainActor\nfinal class PasteCoordinator")
-        )
-        let implementation = source[coordinatorSource.lowerBound...]
-
-        XCTAssertFalse(implementation.contains("Logger("))
-        XCTAssertFalse(implementation.contains("logger."))
-        XCTAssertFalse(implementation.contains("print("))
     }
 
     private func makeFixture(

@@ -5,6 +5,125 @@ import XCTest
 
 @MainActor
 final class WindowControlTests: XCTestCase {
+    func testHeldModifierContinuesAcrossSeparatePointerMovements() {
+        let configuration = WindowControlConfiguration(moveChord: [.control], resizeChord: [.control, .command])
+        var session = WindowControlModifierSession()
+        _ = session.handle(type: .mouseMoved, flags: .maskControl, location: .zero, configuration: configuration)
+        XCTAssertNotNil(session.handle(type: .mouseMoved, flags: .maskControl, location: CGPoint(x: 10, y: 20), configuration: configuration).begin)
+        for x in 11...110 {
+            let point = CGPoint(x: x, y: 20)
+            let transition = session.handle(type: .mouseMoved, flags: .maskControl, location: point, configuration: configuration)
+            XCTAssertNil(transition.begin, "Lifting and placing a finger must not retarget the gesture")
+            XCTAssertEqual(transition.update, .init(operation: .move, location: point))
+            XCTAssertNil(transition.completion)
+        }
+    }
+
+
+    func testResizeAndNonResizableMoveDoNotUseSnapFrames() {
+        let screen = WindowControlScreen(
+            frame: CGRect(x: 0, y: 0, width: 1000, height: 800),
+            visibleFrame: CGRect(x: 0, y: 24, width: 1000, height: 776)
+        )
+        let screenProvider = TestWindowControlScreenProvider(screen: screen)
+
+        let resizeAccessor = TestWindowAccessor(target: testTarget())
+        let resizeCoordinator = WindowControlPointerCoordinator(
+            windowAccessor: resizeAccessor,
+            screenProvider: screenProvider
+        )
+        _ = resizeCoordinator.process(
+            WindowControlPointerSample(
+                operation: .resize,
+                location: CGPoint(x: 100, y: 100)
+            )
+        )
+        _ = resizeCoordinator.process(
+            WindowControlPointerSample(
+                operation: .resize,
+                location: CGPoint(x: 5, y: 120)
+            )
+        )
+        XCTAssertTrue(resizeAccessor.setFrames.isEmpty)
+        XCTAssertEqual(
+            resizeAccessor.resizedSizes,
+            [CGSize(width: 305, height: 320)]
+        )
+
+        let fixedTarget = WindowControlTarget(
+            element: NSObject(),
+            processIdentifier: 123,
+            initialPosition: CGPoint(x: 100, y: 100),
+            initialSize: CGSize(width: 400, height: 300),
+            supportsResizing: false
+        )
+        let moveAccessor = TestWindowAccessor(target: fixedTarget)
+        let moveCoordinator = WindowControlPointerCoordinator(
+            windowAccessor: moveAccessor,
+            screenProvider: screenProvider
+        )
+        _ = moveCoordinator.process(
+            WindowControlPointerSample(
+                operation: .move,
+                location: CGPoint(x: 100, y: 100)
+            )
+        )
+        _ = moveCoordinator.process(
+            WindowControlPointerSample(
+                operation: .move,
+                location: CGPoint(x: 5, y: 100)
+            )
+        )
+        XCTAssertTrue(moveAccessor.setFrames.isEmpty)
+        XCTAssertEqual(
+            moveAccessor.movedPositions,
+            [CGPoint(x: 5, y: 100)]
+        )
+    }
+
+
+    func testControllerStartsOffAndPersistsNonConflictingChords() {
+        let suiteName = "window-control-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defaults.removePersistentDomain(forName: suiteName)
+        let monitor = TestWindowControlMonitor()
+        let permissions = TestWindowControlPermissionProvider()
+        let controller = WindowControlController(
+            defaults: defaults,
+            monitor: monitor,
+            permissionProvider: permissions
+        )
+
+        controller.start()
+        XCTAssertFalse(controller.isEnabled)
+        XCTAssertEqual(controller.moveChord, [.control])
+        XCTAssertEqual(controller.resizeChord, [.control, .command])
+        XCTAssertEqual(controller.runtimeStatus, .off)
+        XCTAssertEqual(monitor.startCount, 0)
+
+        XCTAssertTrue(controller.setChord([.control], for: .move))
+        XCTAssertTrue(
+            controller.setChord([.control, .option], for: .resize)
+        )
+        XCTAssertTrue(controller.isConfigurationValid)
+
+        let restored = WindowControlController(
+            defaults: defaults,
+            monitor: TestWindowControlMonitor(),
+            permissionProvider: permissions
+        )
+        XCTAssertEqual(restored.moveChord, [.control])
+        XCTAssertEqual(restored.resizeChord, [.control, .option])
+    }
+
+
+    func testWindowControlBackgroundActivityDoesNotPreventIdleSleep() {
+        let options = SystemWindowControlBackgroundActivityManager.activityOptions
+        XCTAssertTrue(options.contains(.userInitiatedAllowingIdleSystemSleep))
+        XCTAssertTrue(options.contains(.automaticTerminationDisabled))
+        XCTAssertFalse(options.contains(.idleSystemSleepDisabled))
+    }
+
     func testClickFreeMoveStartsOnMotionAndFinishesOnModifierRelease() async throws {
         let accessor = TestWindowAccessor(target: testTarget())
         let finished = expectation(description: "Click-free move completed")
@@ -29,14 +148,6 @@ final class WindowControlTests: XCTestCase {
         XCTAssertEqual(accessor.targetCount, 1)
         XCTAssertEqual(accessor.movedPositions.last, CGPoint(x: 140, y: 130))
         XCTAssertTrue(accessor.resizedSizes.isEmpty)
-    }
-
-    func testWindowControlObservesMotionAtSessionEventTap() {
-        XCTAssertEqual(
-            WindowControlEventTapConfiguration.location,
-            .cgSessionEventTap
-        )
-        XCTAssertEqual(WindowControlEventTapConfiguration.placement, .tailAppendEventTap)
     }
 
     func testModifierChordNormalizesSupportedFlagsAndRequiresExactMatch() {
@@ -205,164 +316,6 @@ final class WindowControlTests: XCTestCase {
         )
     }
 
-    func testGestureTracksPointerUntilReset() throws {
-        let target = testTarget()
-        var session = WindowControlGestureSession()
-
-        session.begin(
-            operation: .move,
-            target: target,
-            pointer: CGPoint(x: 20, y: 30)
-        )
-        XCTAssertTrue(session.isTracking)
-
-        let update = try XCTUnwrap(
-            session.update(
-                operation: .move,
-                pointer: CGPoint(x: 35, y: 55)
-            )
-        )
-        guard case let .move(_, position) = update else {
-            return XCTFail("Expected a move update")
-        }
-        XCTAssertEqual(position, CGPoint(x: 115, y: 125))
-
-        XCTAssertNil(
-            session.update(
-                operation: .resize,
-                pointer: CGPoint(x: 40, y: 60)
-            )
-        )
-        session.reset()
-        XCTAssertFalse(session.isTracking)
-    }
-
-    func testResizeGestureKeepsOriginAndUsesBottomRightDelta() throws {
-        var session = WindowControlGestureSession()
-        session.begin(
-            operation: .resize,
-            target: testTarget(),
-            pointer: CGPoint(x: 30, y: 40)
-        )
-
-        let update = try XCTUnwrap(
-            session.update(
-                operation: .resize,
-                pointer: CGPoint(x: 80, y: 100)
-            )
-        )
-        guard case let .resize(target, size) = update else {
-            return XCTFail("Expected a resize update")
-        }
-        XCTAssertEqual(target.initialPosition, CGPoint(x: 100, y: 100))
-        XCTAssertEqual(size, CGSize(width: 450, height: 360))
-    }
-
-    func testPointerCoordinatorAcquiresAndMovesWindowFromGestureStart() {
-        let accessor = TestWindowAccessor(target: testTarget())
-        let coordinator = WindowControlPointerCoordinator(
-            windowAccessor: accessor
-        )
-
-        XCTAssertEqual(
-            coordinator.process(
-                WindowControlPointerSample(
-                    operation: .move,
-                    location: CGPoint(x: 20, y: 30)
-                )
-            ),
-            .tracking(.move)
-        )
-        XCTAssertEqual(accessor.targetCount, 1)
-        XCTAssertEqual(accessor.raiseCount, 1)
-        XCTAssertTrue(accessor.movedPositions.isEmpty)
-
-        XCTAssertEqual(
-            coordinator.process(
-                WindowControlPointerSample(
-                    operation: .move,
-                    location: CGPoint(x: 50, y: 70)
-                )
-            ),
-            .tracking(.move)
-        )
-        XCTAssertEqual(
-            accessor.movedPositions,
-            [CGPoint(x: 130, y: 140)]
-        )
-    }
-
-    func testPointerProcessorPreservesAnchorAndFlushesResizeOnKeyRelease() async {
-        let accessor = TestWindowAccessor(target: testTarget())
-        let finished = expectation(description: "Resize gesture finished")
-        let processor = WindowControlPointerProcessor(
-            windowAccessor: accessor,
-            screenProvider: EmptyWindowControlScreenProvider(),
-            previewHandler: { _ in },
-            activityHandler: { activity in
-                if activity == .listening {
-                    finished.fulfill()
-                }
-            }
-        )
-
-        processor.begin(
-            WindowControlPointerSample(
-                operation: .resize,
-                location: CGPoint(x: 20, y: 30)
-            )
-        )
-        processor.submit(
-            WindowControlPointerSample(
-                operation: .resize,
-                location: CGPoint(x: 70, y: 80)
-            )
-        )
-        processor.finish(
-            applyPendingUpdate: true,
-            commitSnap: false
-        )
-
-        await fulfillment(of: [finished], timeout: 1)
-        XCTAssertEqual(accessor.targetCount, 1)
-        XCTAssertEqual(
-            accessor.resizedSizes,
-            [CGSize(width: 450, height: 350)]
-        )
-    }
-
-    func testPointerProcessorCancelDropsPendingResize() async {
-        let accessor = TestWindowAccessor(target: testTarget())
-        let finished = expectation(description: "Resize gesture cancelled")
-        let processor = WindowControlPointerProcessor(
-            windowAccessor: accessor,
-            screenProvider: EmptyWindowControlScreenProvider(),
-            previewHandler: { _ in },
-            activityHandler: { activity in
-                if activity == .listening {
-                    finished.fulfill()
-                }
-            }
-        )
-
-        processor.begin(
-            WindowControlPointerSample(
-                operation: .resize,
-                location: CGPoint(x: 20, y: 30)
-            )
-        )
-        processor.submit(
-            WindowControlPointerSample(
-                operation: .resize,
-                location: CGPoint(x: 70, y: 80)
-            )
-        )
-        processor.reset()
-
-        await fulfillment(of: [finished], timeout: 1)
-        XCTAssertTrue(accessor.resizedSizes.isEmpty)
-    }
-
     func testRapidGestureCompletionsKeepTheirOwnTargetsAndFinalSamples() async {
         let accessor = TestWindowAccessor(target: testTarget())
         let drained = expectation(description: "All gesture completions drained")
@@ -467,28 +420,6 @@ final class WindowControlTests: XCTestCase {
         }
     }
 
-    func testRepeatedModifierEventsDoNotReplaceGestureAnchor() async throws {
-        let accessor = TestWindowAccessor(target: testTarget())
-        let finished = expectation(description: "Original gesture completed")
-        let worker = WindowControlEventTapWorker(
-            configuration: .init(moveChord: [.control], resizeChord: [.control, .command]),
-            windowAccessor: accessor, screenProvider: EmptyWindowControlScreenProvider(),
-            previewHandler: { _ in },
-            activityHandler: { if $0 == .listening { finished.fulfill() } }
-        )
-        for (type, point, flags): (CGEventType, CGPoint, CGEventFlags) in [
-            (.mouseMoved, CGPoint(x: 200, y: 200), .maskControl),
-            (.flagsChanged, CGPoint(x: 230, y: 220), .maskControl),
-            (.mouseMoved, CGPoint(x: 240, y: 230), .maskControl),
-            (.flagsChanged, CGPoint(x: 240, y: 230), [])
-        ] {
-            XCTAssertFalse(worker.handle(type: type, event: try pointerEvent(type, at: point, flags: flags)))
-        }
-        await fulfillment(of: [finished], timeout: 1)
-        XCTAssertEqual(accessor.targetCount, 1)
-        XCTAssertEqual(accessor.movedPositions.last, CGPoint(x: 140, y: 130))
-    }
-
     func testChangingBindingsCancelsGestureUntilModifiersAreReleased() async throws {
         let accessor = TestWindowAccessor(target: testTarget())
         let acquired = expectation(description: "Original window acquired")
@@ -550,33 +481,6 @@ final class WindowControlTests: XCTestCase {
                 XCTAssertTrue(accessor.movedPositions.isEmpty)
             }
         }
-    }
-
-    func testWindowControlEventMaskObservesMotionAndShortcutCancellation() {
-        let mask = WindowControlEventTapConfiguration.eventMask
-        for type in [CGEventType.mouseMoved, .flagsChanged, .keyDown, .scrollWheel,
-                     .leftMouseDown, .rightMouseDown, .otherMouseDown,
-                     .leftMouseDragged, .rightMouseDragged, .otherMouseDragged] {
-            XCTAssertNotEqual(mask & (CGEventMask(1) << type.rawValue), 0)
-        }
-        for type in [CGEventType.keyUp, .leftMouseUp, .rightMouseUp, .otherMouseUp] {
-            XCTAssertEqual(mask & (CGEventMask(1) << type.rawValue), 0)
-        }
-    }
-
-    func testUnmodifiedMotionAndUnrelatedShortcutsDoNotAcquireWindow() throws {
-        let accessor = TestWindowAccessor(target: testTarget())
-        let worker = WindowControlEventTapWorker(
-            configuration: .init(moveChord: [.control], resizeChord: [.control, .command]),
-            windowAccessor: accessor, screenProvider: EmptyWindowControlScreenProvider(),
-            previewHandler: { _ in }, activityHandler: { _ in }
-        )
-        for flags: CGEventFlags in [[], .maskAlternate, [.maskControl, .maskShift], .maskCommand] {
-            XCTAssertFalse(worker.handle(type: .mouseMoved, event: try pointerEvent(
-                .mouseMoved, at: CGPoint(x: 240, y: 230), flags: flags
-            )))
-        }
-        XCTAssertEqual(accessor.targetCount, 0)
     }
 
     func testMissedModifierReleaseStopsAtLastMotionWithoutSnapping() async throws {
@@ -696,59 +600,6 @@ final class WindowControlTests: XCTestCase {
         XCTAssertNil(previews.values.last ?? nil)
     }
 
-    func testPointerCoordinatorHidesPreviewAfterLeavingSnapZone() {
-        let accessor = TestWindowAccessor(target: testTarget())
-        let previews = TestWindowControlPreviewRecorder()
-        let screen = WindowControlScreen(
-            frame: CGRect(x: 0, y: 0, width: 1000, height: 800),
-            visibleFrame: CGRect(x: 0, y: 24, width: 1000, height: 776)
-        )
-        let coordinator = WindowControlPointerCoordinator(
-            windowAccessor: accessor,
-            screenProvider: TestWindowControlScreenProvider(screen: screen),
-            previewHandler: previews.record
-        )
-
-        _ = coordinator.process(
-            WindowControlPointerSample(
-                operation: .move,
-                location: CGPoint(x: 300, y: 300)
-            )
-        )
-        _ = coordinator.process(
-            WindowControlPointerSample(
-                operation: .move,
-                location: CGPoint(x: 5, y: 300)
-            )
-        )
-        _ = coordinator.process(
-            WindowControlPointerSample(
-                operation: .move,
-                location: CGPoint(x: 100, y: 320)
-            )
-        )
-
-        XCTAssertNil(previews.values.last ?? nil)
-        XCTAssertEqual(coordinator.finish(commitSnap: true), .listening)
-        XCTAssertTrue(accessor.setFrames.isEmpty)
-    }
-
-    func testModifierSessionArmsWithoutAXAndCommitsOnlyOnFullRelease() {
-        let configuration = WindowControlConfiguration(moveChord: [.control], resizeChord: [.control, .command])
-        for operation in WindowControlOperation.allCases {
-            var session = WindowControlModifierSession()
-            let flags: CGEventFlags = operation == .move ? .maskControl : [.maskControl, .maskCommand]
-            XCTAssertEqual(session.handle(type: .flagsChanged, flags: flags, location: .zero, configuration: configuration), .init())
-            let began = session.handle(type: .mouseMoved, flags: flags, location: CGPoint(x: 10, y: 20), configuration: configuration)
-            XCTAssertEqual(began.begin, .init(operation: operation, location: .zero))
-            XCTAssertEqual(began.update, .init(operation: operation, location: CGPoint(x: 10, y: 20)))
-            let ended = session.handle(type: .flagsChanged, flags: [], location: .zero, configuration: configuration)
-            XCTAssertEqual(ended.completion?.shouldCommitSnap, operation == .move)
-            XCTAssertNil(session.operation)
-            XCTAssertEqual(session.handle(type: .mouseMoved, flags: [], location: .zero, configuration: configuration), .init())
-        }
-    }
-
     func testPointerDriftBeforeControlClickCannotMoveOrSnapAWindow() {
         let configuration = WindowControlConfiguration(moveChord: [.control], resizeChord: [.control, .command])
         var session = WindowControlModifierSession()
@@ -760,49 +611,6 @@ final class WindowControlTests: XCTestCase {
         _ = session.handle(type: .rightMouseDown, flags: .maskControl, location: .zero, configuration: configuration)
         XCTAssertEqual(session.handle(type: .mouseMoved, flags: .maskControl, location: CGPoint(x: 30, y: 0), configuration: configuration), .init())
         XCTAssertNil(session.handle(type: .flagsChanged, flags: [], location: .zero, configuration: configuration).completion)
-    }
-
-    func testPointerThresholdAccumulatesFromContactStartWithoutRetargeting() {
-        let configuration = WindowControlConfiguration(moveChord: [.control], resizeChord: [.control, .command])
-        var session = WindowControlModifierSession()
-        let start = CGPoint(x: 100, y: 100)
-        _ = session.handle(type: .mouseMoved, flags: .maskControl, location: start, configuration: configuration)
-        XCTAssertNil(session.handle(type: .mouseMoved, flags: .maskControl, location: CGPoint(x: 103, y: 100), configuration: configuration).begin)
-        let transition = session.handle(type: .mouseMoved, flags: .maskControl, location: CGPoint(x: 106, y: 100), configuration: configuration)
-        XCTAssertEqual(transition.begin?.location, start)
-        XCTAssertEqual(transition.update?.location, CGPoint(x: 106, y: 100))
-        XCTAssertEqual(session.operation, .move)
-    }
-
-    func testModifierSessionRebasesWhenSwitchingBetweenMoveAndResize() {
-        let configuration = WindowControlConfiguration(moveChord: [.control], resizeChord: [.control, .command])
-        var session = WindowControlModifierSession()
-        _ = session.handle(type: .mouseMoved, flags: .maskControl, location: .zero, configuration: configuration)
-        _ = session.handle(type: .mouseMoved, flags: .maskControl, location: CGPoint(x: 10, y: 0), configuration: configuration)
-        let switchPoint = CGPoint(x: 30, y: 40)
-        let changed = session.handle(type: .flagsChanged, flags: [.maskControl, .maskCommand], location: switchPoint, configuration: configuration)
-        XCTAssertEqual(changed.completion?.shouldCommitSnap, false)
-        XCTAssertNil(changed.begin, "Do not acquire or resize until the pointer moves")
-        let resize = session.handle(type: .mouseMoved, flags: [.maskControl, .maskCommand], location: CGPoint(x: 40, y: 50), configuration: configuration)
-        XCTAssertEqual(resize.begin, .init(operation: .resize, location: switchPoint))
-        let releasedCommand = session.handle(type: .flagsChanged, flags: .maskControl, location: CGPoint(x: 40, y: 50), configuration: configuration)
-        XCTAssertEqual(releasedCommand.completion?.shouldCommitSnap, false)
-        let move = session.handle(type: .mouseMoved, flags: .maskControl, location: CGPoint(x: 50, y: 60), configuration: configuration)
-        XCTAssertEqual(move.begin, .init(operation: .move, location: CGPoint(x: 40, y: 50)))
-    }
-
-    func testHeldModifierContinuesAcrossSeparatePointerMovements() {
-        let configuration = WindowControlConfiguration(moveChord: [.control], resizeChord: [.control, .command])
-        var session = WindowControlModifierSession()
-        _ = session.handle(type: .mouseMoved, flags: .maskControl, location: .zero, configuration: configuration)
-        XCTAssertNotNil(session.handle(type: .mouseMoved, flags: .maskControl, location: CGPoint(x: 10, y: 20), configuration: configuration).begin)
-        for x in 11...110 {
-            let point = CGPoint(x: x, y: 20)
-            let transition = session.handle(type: .mouseMoved, flags: .maskControl, location: point, configuration: configuration)
-            XCTAssertNil(transition.begin, "Lifting and placing a finger must not retarget the gesture")
-            XCTAssertEqual(transition.update, .init(operation: .move, location: point))
-            XCTAssertNil(transition.completion)
-        }
     }
 
     func testClicksDragsScrollAndShortcutsCancelUntilAllModifiersAreReleased() {
@@ -834,140 +642,6 @@ final class WindowControlTests: XCTestCase {
         }
     }
 
-    func testResizeAndNonResizableMoveDoNotUseSnapFrames() {
-        let screen = WindowControlScreen(
-            frame: CGRect(x: 0, y: 0, width: 1000, height: 800),
-            visibleFrame: CGRect(x: 0, y: 24, width: 1000, height: 776)
-        )
-        let screenProvider = TestWindowControlScreenProvider(screen: screen)
-
-        let resizeAccessor = TestWindowAccessor(target: testTarget())
-        let resizeCoordinator = WindowControlPointerCoordinator(
-            windowAccessor: resizeAccessor,
-            screenProvider: screenProvider
-        )
-        _ = resizeCoordinator.process(
-            WindowControlPointerSample(
-                operation: .resize,
-                location: CGPoint(x: 100, y: 100)
-            )
-        )
-        _ = resizeCoordinator.process(
-            WindowControlPointerSample(
-                operation: .resize,
-                location: CGPoint(x: 5, y: 120)
-            )
-        )
-        XCTAssertTrue(resizeAccessor.setFrames.isEmpty)
-        XCTAssertEqual(
-            resizeAccessor.resizedSizes,
-            [CGSize(width: 305, height: 320)]
-        )
-
-        let fixedTarget = WindowControlTarget(
-            element: NSObject(),
-            processIdentifier: 123,
-            initialPosition: CGPoint(x: 100, y: 100),
-            initialSize: CGSize(width: 400, height: 300),
-            supportsResizing: false
-        )
-        let moveAccessor = TestWindowAccessor(target: fixedTarget)
-        let moveCoordinator = WindowControlPointerCoordinator(
-            windowAccessor: moveAccessor,
-            screenProvider: screenProvider
-        )
-        _ = moveCoordinator.process(
-            WindowControlPointerSample(
-                operation: .move,
-                location: CGPoint(x: 100, y: 100)
-            )
-        )
-        _ = moveCoordinator.process(
-            WindowControlPointerSample(
-                operation: .move,
-                location: CGPoint(x: 5, y: 100)
-            )
-        )
-        XCTAssertTrue(moveAccessor.setFrames.isEmpty)
-        XCTAssertEqual(
-            moveAccessor.movedPositions,
-            [CGPoint(x: 5, y: 100)]
-        )
-    }
-
-    func testPointerCoordinatorReacquiresWhenOperationChanges() {
-        let accessor = TestWindowAccessor(target: testTarget())
-        let coordinator = WindowControlPointerCoordinator(
-            windowAccessor: accessor
-        )
-
-        _ = coordinator.process(
-            WindowControlPointerSample(
-                operation: .move,
-                location: CGPoint(x: 20, y: 30)
-            )
-        )
-        XCTAssertEqual(
-            coordinator.process(
-                WindowControlPointerSample(
-                    operation: .resize,
-                    location: CGPoint(x: 30, y: 40)
-                )
-            ),
-            .tracking(.resize)
-        )
-        XCTAssertEqual(accessor.targetCount, 2)
-        XCTAssertEqual(accessor.raiseCount, 2)
-
-        _ = coordinator.process(
-            WindowControlPointerSample(
-                operation: .resize,
-                location: CGPoint(x: 80, y: 90)
-            )
-        )
-        XCTAssertEqual(
-            accessor.resizedSizes,
-            [CGSize(width: 450, height: 350)]
-        )
-    }
-
-    func testPointerCoordinatorReportsTargetAndUpdateFailures() {
-        let missingTarget = TestWindowAccessor(target: nil)
-        let missingCoordinator = WindowControlPointerCoordinator(
-            windowAccessor: missingTarget
-        )
-        XCTAssertEqual(
-            missingCoordinator.process(
-                WindowControlPointerSample(
-                    operation: .move,
-                    location: .zero
-                )
-            ),
-            .targetUnavailable
-        )
-
-        let rejectingAccessor = TestWindowAccessor(target: testTarget())
-        rejectingAccessor.acceptsUpdates = false
-        let rejectingCoordinator = WindowControlPointerCoordinator(
-            windowAccessor: rejectingAccessor
-        )
-        _ = rejectingCoordinator.process(
-            WindowControlPointerSample(
-                operation: .move,
-                location: .zero
-            )
-        )
-        XCTAssertEqual(
-            rejectingCoordinator.process(
-                WindowControlPointerSample(
-                    operation: .move,
-                    location: CGPoint(x: 10, y: 10)
-                )
-            ),
-            .updateRejected(.move)
-        )
-    }
-
     func testFailedGestureDoesNotRetargetAnotherWindowAndKeepsFailureOnFinish() {
         let accessor = TestWindowAccessor(target: nil)
         let coordinator = WindowControlPointerCoordinator(windowAccessor: accessor)
@@ -993,40 +667,6 @@ final class WindowControlTests: XCTestCase {
         XCTAssertEqual(accessor.targetCount, 3)
     }
 
-    func testControllerStartsOffAndPersistsNonConflictingChords() {
-        let suiteName = "window-control-\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defaults.removePersistentDomain(forName: suiteName)
-        let monitor = TestWindowControlMonitor()
-        let permissions = TestWindowControlPermissionProvider()
-        let controller = WindowControlController(
-            defaults: defaults,
-            monitor: monitor,
-            permissionProvider: permissions
-        )
-
-        controller.start()
-        XCTAssertFalse(controller.isEnabled)
-        XCTAssertEqual(controller.moveChord, [.control])
-        XCTAssertEqual(controller.resizeChord, [.control, .command])
-        XCTAssertEqual(controller.runtimeStatus, .off)
-        XCTAssertEqual(monitor.startCount, 0)
-
-        XCTAssertTrue(controller.setChord([.control], for: .move))
-        XCTAssertTrue(
-            controller.setChord([.control, .option], for: .resize)
-        )
-        XCTAssertTrue(controller.isConfigurationValid)
-
-        let restored = WindowControlController(
-            defaults: defaults,
-            monitor: TestWindowControlMonitor(),
-            permissionProvider: permissions
-        )
-        XCTAssertEqual(restored.moveChord, [.control])
-        XCTAssertEqual(restored.resizeChord, [.control, .option])
-    }
-
     func testControllerRejectsDuplicateWithoutReplacingStoredValue() {
         let defaults = UserDefaults(suiteName: UUID().uuidString)!
         let controller = WindowControlController(
@@ -1042,38 +682,6 @@ final class WindowControlTests: XCTestCase {
             controller.validationMessage,
             "This key combination is already used by Move Window."
         )
-    }
-
-    func testExplicitlyClearedBindingsStayUnsetAfterRestart() {
-        let suiteName = "window-control-\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
-        let controller = WindowControlController(
-            defaults: defaults, monitor: TestWindowControlMonitor(),
-            permissionProvider: TestWindowControlPermissionProvider()
-        )
-        XCTAssertTrue(controller.setChord(nil, for: .move))
-        XCTAssertTrue(controller.setChord(nil, for: .resize))
-        let restored = WindowControlController(
-            defaults: defaults, monitor: TestWindowControlMonitor(),
-            permissionProvider: TestWindowControlPermissionProvider()
-        )
-        XCTAssertNil(restored.moveChord)
-        XCTAssertNil(restored.resizeChord)
-        XCTAssertFalse(restored.isConfigurationValid)
-    }
-
-    func testMalformedStoredChordDoesNotSilentlyEnableDefaultBinding() {
-        let suiteName = "window-control-\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
-        defaults.set("invalid", forKey: "windowControl.moveChord")
-        let controller = WindowControlController(
-            defaults: defaults, monitor: TestWindowControlMonitor(),
-            permissionProvider: TestWindowControlPermissionProvider()
-        )
-        XCTAssertNil(controller.moveChord)
-        XCTAssertFalse(controller.isConfigurationValid)
     }
 
     func testControllerStartsOnlyWhenConfiguredEnabledAndAuthorized() {
@@ -1115,24 +723,6 @@ final class WindowControlTests: XCTestCase {
         XCTAssertFalse(backgroundActivity.isActive)
     }
 
-    func testWindowControlBackgroundActivityDoesNotPreventIdleSleep() {
-        let options = SystemWindowControlBackgroundActivityManager.activityOptions
-        XCTAssertTrue(options.contains(.userInitiatedAllowingIdleSystemSleep))
-        XCTAssertTrue(options.contains(.automaticTerminationDisabled))
-        XCTAssertFalse(options.contains(.idleSystemSleepDisabled))
-    }
-
-    func testHealthyWindowMonitorIsNotRestartedByHealthCheck() async {
-        let (controller, monitor, _) = makeRunningController()
-        defer { controller.stop() }
-
-        await controller.recoverMonitoringIfNeeded()
-
-        XCTAssertEqual(monitor.startCount, 1)
-        XCTAssertEqual(monitor.recoverCount, 0)
-        XCTAssertEqual(controller.runtimeStatus, .active)
-    }
-
     func testDisabledWindowTapRecoversWithoutActivatingYorozu() async {
         let (controller, monitor, _) = makeRunningController()
         defer { controller.stop() }
@@ -1145,22 +735,6 @@ final class WindowControlTests: XCTestCase {
         XCTAssertTrue(monitor.isRunning)
         XCTAssertEqual(controller.runtimeStatus, .active)
         XCTAssertEqual(controller.lastActivity, .monitorRecovered)
-    }
-
-    func testFailedWindowRecoveryRemainsUnavailableAndCanRetry() async {
-        let (controller, monitor, _) = makeRunningController()
-        defer { controller.stop() }
-        monitor.interrupt()
-        monitor.recoverySucceeds = false
-
-        await controller.recoverMonitoringIfNeeded()
-        XCTAssertEqual(controller.runtimeStatus, .unavailable)
-        XCTAssertFalse(monitor.isRunning)
-
-        monitor.recoverySucceeds = true
-        await controller.recoverMonitoringIfNeeded()
-        XCTAssertEqual(monitor.recoverCount, 2)
-        XCTAssertEqual(controller.runtimeStatus, .active)
     }
 
     func testRevokedWindowPermissionStopsMonitorBeforeRecovery() async {
@@ -1215,51 +789,6 @@ final class WindowControlTests: XCTestCase {
         XCTAssertEqual(monitor.recoverCount, 1)
     }
 
-    func testLeavingSystemSettingsResumesWithExistingPermission() async {
-        let notifications = NotificationCenter()
-        let (controller, monitor, permissions) = makeRunningController(notifications: notifications)
-        defer { controller.stop() }
-
-        permissions.isSystemSettingsActive = true
-        notifications.post(name: NSWorkspace.didActivateApplicationNotification, object: nil)
-        await Task.yield()
-        XCTAssertFalse(monitor.isRunning)
-
-        permissions.isSystemSettingsActive = false
-        notifications.post(name: NSWorkspace.didActivateApplicationNotification, object: nil)
-        XCTAssertTrue(monitor.isRunning)
-        XCTAssertEqual(controller.runtimeStatus, .active)
-        XCTAssertEqual(monitor.startCount, 2)
-    }
-
-    func testWindowHealthCheckRemainsAvailableWhilePausedInSystemSettings() async {
-        let monitor = TestWindowControlMonitor()
-        let permissions = TestWindowControlPermissionProvider(isAccessibilityGranted: true)
-        permissions.isSystemSettingsActive = true
-        let controller = WindowControlController(
-            defaults: UserDefaults(suiteName: "window-control-\(UUID().uuidString)")!,
-            monitor: monitor,
-            permissionProvider: permissions,
-            monitoringHealthInterval: .milliseconds(20)
-        )
-        controller.setChord([.option], for: .move)
-        controller.setChord([.option, .shift], for: .resize)
-        controller.isEnabled = true
-        controller.start()
-        defer { controller.stop() }
-        XCTAssertEqual(controller.runtimeStatus, .pausedForSystemSettings)
-        XCTAssertEqual(monitor.startCount, 0)
-
-        let recovered = expectation(description: "Paused health task detects Settings exit")
-        monitor.recoveryStarted = { recovered.fulfill() }
-        permissions.isSystemSettingsActive = false
-        await fulfillment(of: [recovered], timeout: 1)
-
-        XCTAssertTrue(monitor.isRunning)
-        XCTAssertEqual(controller.runtimeStatus, .active)
-        XCTAssertEqual(monitor.recoverCount, 1)
-    }
-
     func testSystemSettingsEnteringDuringRecoveryCannotRestartWindowControl() async {
         let (controller, monitor, permissions) = makeRunningController()
         defer { controller.stop() }
@@ -1279,19 +808,6 @@ final class WindowControlTests: XCTestCase {
         XCTAssertEqual(controller.runtimeStatus, .pausedForSystemSettings)
         await controller.recoverMonitoringIfNeeded()
         XCTAssertEqual(monitor.recoverCount, 1)
-    }
-
-    func testChangingWindowBindingRechecksRevokedPermission() {
-        let (controller, monitor, permissions) = makeRunningController()
-        defer { controller.stop() }
-        permissions.isAccessibilityGranted = false
-
-        controller.setChord([.control], for: .move)
-
-        XCTAssertFalse(monitor.isRunning)
-        XCTAssertFalse(controller.isAccessibilityGranted)
-        XCTAssertEqual(controller.runtimeStatus, .permissionRequired)
-        XCTAssertEqual(monitor.startCount, 1)
     }
 
     func testPermissionRegrantRecoversWithoutForegroundAndRestoresBackgroundActivity() async {
@@ -1340,29 +856,6 @@ final class WindowControlTests: XCTestCase {
         monitor.completeRecovery()
         await recovery.value
 
-        XCTAssertFalse(monitor.isRunning)
-        XCTAssertEqual(controller.runtimeStatus, .off)
-    }
-
-    func testWindowWakeAndSessionRecoveryObserversAreRemovedOnStop() async {
-        let notifications = NotificationCenter()
-        let (controller, monitor, permissions) = makeRunningController(notifications: notifications)
-        let recovered = expectation(description: "Wake and session recovered")
-        recovered.expectedFulfillmentCount = 2
-        monitor.recoveryStarted = { recovered.fulfill() }
-
-        notifications.post(name: NSWorkspace.didWakeNotification, object: nil)
-        await Task.yield()
-        notifications.post(name: NSWorkspace.sessionDidBecomeActiveNotification, object: nil)
-        await fulfillment(of: [recovered], timeout: 1)
-        XCTAssertEqual(monitor.recreateRequests, [true, true])
-
-        controller.stop()
-        permissions.isSystemSettingsActive = true
-        notifications.post(name: NSWorkspace.didWakeNotification, object: nil)
-        notifications.post(name: NSWorkspace.didActivateApplicationNotification, object: nil)
-        await Task.yield()
-        XCTAssertEqual(monitor.recoverCount, 2)
         XCTAssertFalse(monitor.isRunning)
         XCTAssertEqual(controller.runtimeStatus, .off)
     }

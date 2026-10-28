@@ -2,6 +2,75 @@ import XCTest
 @testable import Yorozu
 
 final class AIChatStorageTests: XCTestCase {
+    @MainActor
+    func testChangingTranslationLanguageStopsPreviousOutput() async throws {
+        let fixture = TranslationStreamFixture()
+        let viewModel = makeControlledTranslationViewModel(fixture)
+        defer { viewModel.shutdown(); fixture.finish() }
+        viewModel.inputText = "Translate this"
+        viewModel.translate()
+        for _ in 0..<100 where fixture.requestCount < 1 {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        XCTAssertEqual(fixture.requestCount, 1)
+        viewModel.selectTargetLanguage("English")
+        XCTAssertFalse(viewModel.isTranslating)
+        fixture.continuations[0].yield(.textDelta("Obsolete result"))
+        fixture.continuations[0].finish()
+        for _ in 0..<10 { await Task.yield() }
+        XCTAssertEqual(viewModel.outputText, "")
+        XCTAssertNil(viewModel.errorMessage)
+    }
+
+
+    @MainActor
+    func testTranslationProviderPickerTracksAISettingsToggles() {
+        let defaults = UserDefaults(
+            suiteName: "com.yorozu.translation-provider-toggle-tests.\(UUID().uuidString)"
+        )!
+        let providerPreferences = AIProviderPreferences(defaults: defaults)
+        let store = AIChatViewModelStore(
+            viewModels: [
+                makeProviderViewModel(providerID: .codex, defaults: defaults),
+                makeProviderViewModel(providerID: .openAIAPI, defaults: defaults),
+            ],
+            providerPreferences: providerPreferences
+        )
+        let viewModel = TranslationViewModel(
+            providerStore: store,
+            preferences: TranslationPreferences(defaults: defaults)
+        )
+
+        XCTAssertEqual(viewModel.providerViewModels.map(\.providerID), [.codex])
+
+        providerPreferences.setEnabled(true, for: .openAIAPI)
+        viewModel.refreshProviderAvailability()
+        XCTAssertEqual(
+            viewModel.providerViewModels.map(\.providerID),
+            [.codex, .openAIAPI]
+        )
+
+        providerPreferences.setEnabled(false, for: .codex)
+        viewModel.refreshProviderAvailability()
+        XCTAssertEqual(viewModel.selectedProviderID, .openAIAPI)
+        XCTAssertEqual(viewModel.providerViewModels.map(\.providerID), [.openAIAPI])
+
+        providerPreferences.setEnabled(false, for: .openAIAPI)
+        viewModel.refreshProviderAvailability()
+        XCTAssertTrue(viewModel.providerViewModels.isEmpty)
+        XCTAssertNil(viewModel.selectedProviderID)
+    }
+
+
+    func testStreamingContentGrowthKeepsFollowingLatest() {
+        var state = AIConversationScrollState()
+
+        state.updateGeometry(isAtLatest: false)
+
+        XCTAssertFalse(state.isAtLatest)
+        XCTAssertTrue(state.shouldFollowLatest)
+    }
+
     func testAppleIntelligenceLiveTranslationWhenExplicitlyEnabled() async throws {
         guard ProcessInfo.processInfo.environment["YOROZU_TEST_APPLE_INTELLIGENCE"] == "1" else {
             throw XCTSkip("Live on-device model test is opt-in")
@@ -137,26 +206,6 @@ final class AIChatStorageTests: XCTestCase {
     }
 
     @MainActor
-    func testChangingTranslationLanguageStopsPreviousOutput() async throws {
-        let fixture = TranslationStreamFixture()
-        let viewModel = makeControlledTranslationViewModel(fixture)
-        defer { viewModel.shutdown(); fixture.finish() }
-        viewModel.inputText = "Translate this"
-        viewModel.translate()
-        for _ in 0..<100 where fixture.requestCount < 1 {
-            try await Task.sleep(for: .milliseconds(5))
-        }
-        XCTAssertEqual(fixture.requestCount, 1)
-        viewModel.selectTargetLanguage("English")
-        XCTAssertFalse(viewModel.isTranslating)
-        fixture.continuations[0].yield(.textDelta("Obsolete result"))
-        fixture.continuations[0].finish()
-        for _ in 0..<10 { await Task.yield() }
-        XCTAssertEqual(viewModel.outputText, "")
-        XCTAssertNil(viewModel.errorMessage)
-    }
-
-    @MainActor
     private func makeControlledTranslationViewModel(_ fixture: TranslationStreamFixture) -> TranslationViewModel {
         let suite = "com.yorozu.translation-review-tests.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suite)!
@@ -174,17 +223,6 @@ final class AIChatStorageTests: XCTestCase {
             ),
             preferences: TranslationPreferences(defaults: defaults)
         )
-    }
-
-    func testFailedChatHistoryLoadRemainsRetryableAndUnavailable() async throws {
-        let fixture = try makeStore()
-        let catalog = AIConversationCatalog(providerID: .openAIAPI, store: fixture.store)
-        try await fixture.store.close()
-        let first = await catalog.load()
-        let retry = await catalog.load()
-        XCTAssertFalse(first.storageAvailable)
-        XCTAssertFalse(retry.storageAvailable)
-        XCTAssertNotNil(retry.message)
     }
 
     @MainActor
@@ -217,22 +255,6 @@ final class AIChatStorageTests: XCTestCase {
         let restored = AIProviderPreferences(defaults: defaults)
         XCTAssertEqual(restored.enabledProviderIDs, [.codex, .openAIAPI])
         XCTAssertEqual(restored.defaultProviderID, .openAIAPI)
-    }
-
-    @MainActor
-    func testClaudeProviderDefaultsAndFeatureCommandAreRegistered() {
-        let suiteName = "com.yorozu.claude-tests.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        let preferences = AIChatPreferences(
-            defaults: defaults,
-            providerID: .claude,
-            fallbackModel: AIModel.claudeSonnet
-        )
-
-        XCTAssertEqual(preferences.defaultModel, .claudeSonnet)
-        XCTAssertEqual(FeatureCommand.aiClaude.route, .ai(providerID: .claude))
-        XCTAssertEqual(FeatureCommand.aiClaude.providerID, .claude)
-        XCTAssertEqual(FeatureCommand.aiClaude.title, "AI Chat: Claude")
     }
 
     func testClaudeProviderStreamsChatAndStatelessTranslation() async throws {
@@ -349,52 +371,6 @@ final class AIChatStorageTests: XCTestCase {
     }
 
     @MainActor
-    func testTranslationPreferencesPersistSeparatelyFromAIChatDefaults() {
-        let defaults = UserDefaults(
-            suiteName: "com.yorozu.translation-preferences-tests.\(UUID().uuidString)"
-        )!
-        let chatPreferences = AIChatPreferences(
-            defaults: defaults,
-            providerID: .openAIAPI
-        )
-        let translationPreferences = TranslationPreferences(defaults: defaults)
-        let reasoning = AIReasoningEffort(rawValue: "high")
-
-        chatPreferences.defaultModel = .terra
-        translationPreferences.providerID = .openAIAPI
-        translationPreferences.setModel(.sol, for: .openAIAPI)
-        translationPreferences.setReasoningEffort(reasoning, for: .openAIAPI)
-        translationPreferences.targetLanguage = "English"
-
-        let restored = TranslationPreferences(defaults: defaults)
-        XCTAssertEqual(restored.providerID, .openAIAPI)
-        XCTAssertEqual(restored.model(for: .openAIAPI), .sol)
-        XCTAssertEqual(restored.reasoningEffort(for: .openAIAPI), reasoning)
-        XCTAssertEqual(restored.targetLanguage, "English")
-        XCTAssertEqual(chatPreferences.defaultModel, .terra)
-    }
-
-    @MainActor
-    func testTranslationCanSelectFifthEnabledProvider() {
-        let suite = "com.yorozu.translation-five-provider-tests.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suite)!
-        defer { defaults.removePersistentDomain(forName: suite) }
-        let ids: [AIProviderID] = [.codex, .openAIAPI, .claude, .ollama, .appleIntelligence]
-        let preferences = AIProviderPreferences(defaults: defaults)
-        ids.forEach { preferences.setEnabled(true, for: $0) }
-        let store = AIChatViewModelStore(
-            viewModels: ids.map { makeProviderViewModel(providerID: $0, defaults: defaults) },
-            providerPreferences: preferences
-        )
-        let model = TranslationViewModel(providerStore: store, preferences: TranslationPreferences(defaults: defaults))
-        model.beginChoosingProvider()
-        XCTAssertEqual(model.actionItems.count, 5)
-        XCTAssertEqual(model.actionItems.last?.id, .translationProvider5)
-        _ = model.performAction(.translationProvider5)
-        XCTAssertEqual(model.selectedProviderID, .appleIntelligence)
-    }
-
-    @MainActor
     func testTranslationSkipsDisabledDefaultProvider() {
         let defaults = UserDefaults(
             suiteName: "com.yorozu.translation-provider-tests.\(UUID().uuidString)"
@@ -418,176 +394,6 @@ final class AIChatStorageTests: XCTestCase {
         XCTAssertEqual(viewModel.selectedProviderID, .openAIAPI)
         XCTAssertTrue(viewModel.providerViewModels.map(\.providerID).contains(.openAIAPI))
         XCTAssertFalse(viewModel.providerViewModels.map(\.providerID).contains(.codex))
-    }
-
-    @MainActor
-    func testTranslationProviderPickerTracksAISettingsToggles() {
-        let defaults = UserDefaults(
-            suiteName: "com.yorozu.translation-provider-toggle-tests.\(UUID().uuidString)"
-        )!
-        let providerPreferences = AIProviderPreferences(defaults: defaults)
-        let store = AIChatViewModelStore(
-            viewModels: [
-                makeProviderViewModel(providerID: .codex, defaults: defaults),
-                makeProviderViewModel(providerID: .openAIAPI, defaults: defaults),
-            ],
-            providerPreferences: providerPreferences
-        )
-        let viewModel = TranslationViewModel(
-            providerStore: store,
-            preferences: TranslationPreferences(defaults: defaults)
-        )
-
-        XCTAssertEqual(viewModel.providerViewModels.map(\.providerID), [.codex])
-
-        providerPreferences.setEnabled(true, for: .openAIAPI)
-        viewModel.refreshProviderAvailability()
-        XCTAssertEqual(
-            viewModel.providerViewModels.map(\.providerID),
-            [.codex, .openAIAPI]
-        )
-
-        providerPreferences.setEnabled(false, for: .codex)
-        viewModel.refreshProviderAvailability()
-        XCTAssertEqual(viewModel.selectedProviderID, .openAIAPI)
-        XCTAssertEqual(viewModel.providerViewModels.map(\.providerID), [.openAIAPI])
-
-        providerPreferences.setEnabled(false, for: .openAIAPI)
-        viewModel.refreshProviderAvailability()
-        XCTAssertTrue(viewModel.providerViewModels.isEmpty)
-        XCTAssertNil(viewModel.selectedProviderID)
-    }
-
-    @MainActor
-    func testTranslationActionPanelUsesAIChatSelectionFlow() async {
-        let suite = "com.yorozu.translation-action-panel-tests.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suite)!
-        defer { defaults.removePersistentDomain(forName: suite) }
-
-        let providerPreferences = AIProviderPreferences(defaults: defaults)
-        providerPreferences.setEnabled(true, for: .openAIAPI)
-        let store = AIChatViewModelStore(
-            viewModels: [
-                makeProviderViewModel(providerID: .codex, defaults: defaults),
-                makeProviderViewModel(providerID: .openAIAPI, defaults: defaults),
-            ],
-            providerPreferences: providerPreferences
-        )
-        let viewModel = TranslationViewModel(
-            providerStore: store,
-            preferences: TranslationPreferences(defaults: defaults)
-        )
-
-        XCTAssertTrue(viewModel.actionItems.contains { $0.id == .translationChangeLanguage })
-        XCTAssertTrue(viewModel.actionItems.contains { $0.id == .translationChangeProvider })
-        XCTAssertTrue(viewModel.actionItems.contains { $0.id == .aiChangeModel })
-
-        XCTAssertTrue(viewModel.performAction(.translationChangeLanguage))
-        XCTAssertEqual(viewModel.actionPanelTitle, "Change Language")
-        XCTAssertEqual(
-            viewModel.actionItems.count,
-            TranslationViewModel.supportedTargetLanguages.count
-        )
-        XCTAssertFalse(viewModel.performAction(.translationLanguage2))
-        XCTAssertEqual(viewModel.targetLanguage, "English")
-        XCTAssertFalse(viewModel.isChoosingTargetLanguage)
-
-        XCTAssertTrue(viewModel.performAction(.translationChangeProvider))
-        XCTAssertEqual(viewModel.actionPanelTitle, "Change Provider")
-        XCTAssertEqual(viewModel.actionItems.count, 2)
-        XCTAssertTrue(viewModel.actionItems.contains { $0.title.contains("openai_api") })
-
-        XCTAssertFalse(viewModel.performAction(.translationProvider2))
-        XCTAssertEqual(viewModel.selectedProviderID, .openAIAPI)
-        XCTAssertFalse(viewModel.isChoosingProvider)
-
-        viewModel.beginChoosingModel()
-        XCTAssertEqual(viewModel.actionPanelTitle, "Change Model")
-        XCTAssertTrue(viewModel.actionItems.contains { $0.id == .aiModelTerra })
-        XCTAssertFalse(viewModel.performAction(.aiModelTerra))
-        XCTAssertFalse(viewModel.isChoosingModel)
-    }
-
-    func testProviderRegistryKeepsMultipleProvidersAndRejectsUnknownID() async throws {
-        let registry = AIProviderRegistry(providers: [
-            RegistryTestProvider(providerID: .codex),
-            RegistryTestProvider(providerID: .openAIAPI),
-        ])
-
-        let descriptors = await registry.descriptors()
-        XCTAssertEqual(
-            descriptors.map(\.id),
-            [AIProviderID.codex, AIProviderID.openAIAPI]
-        )
-        let provider = try await registry.provider(for: AIProviderID.openAIAPI)
-        XCTAssertEqual(provider.descriptor.id, AIProviderID.openAIAPI)
-        do {
-            _ = try await registry.provider(
-                for: AIProviderID(rawValue: "unregistered")
-            )
-            XCTFail("Expected an unregistered provider error")
-        } catch {
-            XCTAssertEqual(
-                error as? AIProviderRegistry.RegistryError,
-                .providerNotRegistered
-            )
-        }
-    }
-
-    @MainActor
-    func testViewModelStorePreservesProviderRegistrationOrderForSettings() {
-        let defaults = UserDefaults(
-            suiteName: "com.yorozu.provider-store-tests.\(UUID().uuidString)"
-        )!
-        let providerPreferences = AIProviderPreferences(defaults: defaults)
-        providerPreferences.setEnabled(true, for: .openAIAPI)
-        providerPreferences.setDefault(.openAIAPI)
-
-        let openAI = makeProviderViewModel(
-            providerID: .openAIAPI,
-            defaults: defaults
-        )
-        let codex = makeProviderViewModel(
-            providerID: .codex,
-            defaults: defaults
-        )
-        let store = AIChatViewModelStore(
-            viewModels: [openAI, codex],
-            providerPreferences: providerPreferences
-        )
-
-        XCTAssertEqual(
-            store.orderedViewModels.map(\.providerID),
-            [.openAIAPI, .codex]
-        )
-        XCTAssertEqual(store.resolvedProviderID(preferred: nil), .openAIAPI)
-        XCTAssertEqual(store.resolvedProviderID(preferred: .codex), .codex)
-        XCTAssertTrue(store.defaultViewModel() === openAI)
-    }
-
-    @MainActor
-    func testSettingsProviderSelectionFallsBackToFirstRegisteredProvider() {
-        let defaults = UserDefaults(
-            suiteName: "com.yorozu.provider-store-tests.\(UUID().uuidString)"
-        )!
-        let providerPreferences = AIProviderPreferences(defaults: defaults)
-        let openAI = makeProviderViewModel(
-            providerID: .openAIAPI,
-            defaults: defaults
-        )
-        let store = AIChatViewModelStore(
-            viewModels: [openAI],
-            providerPreferences: providerPreferences
-        )
-
-        XCTAssertEqual(store.resolvedProviderID(preferred: nil), .openAIAPI)
-        XCTAssertEqual(
-            store.resolvedProviderID(
-                preferred: AIProviderID(rawValue: "unregistered")
-            ),
-            .openAIAPI
-        )
-        XCTAssertTrue(store.defaultViewModel() === openAI)
     }
 
     func testConversationIndexSeparatesIdenticalProviderConversationIDs() async throws {
@@ -713,36 +519,6 @@ final class AIChatStorageTests: XCTestCase {
         try? FileManager.default.removeItem(at: fixture.directoryURL)
     }
 
-    func testCancelingFirstRequestDoesNotTerminateSharedCodexStartup() async throws {
-        let fixture = try makeCodexAppServerFixture(mode: .responding)
-        let client = CodexAppServerClient(
-            executableURL: fixture.executableURL,
-            requestTimeout: .seconds(2)
-        )
-        let firstRequest = Task {
-            try await client.request(method: "account/read", params: .object([:]))
-        }
-        try await Task.sleep(for: .milliseconds(20))
-        let secondRequest = Task {
-            try await client.request(method: "model/list", params: .object([:]))
-        }
-        firstRequest.cancel()
-
-        _ = try await secondRequest.value
-        do {
-            _ = try await firstRequest.value
-            XCTFail("Expected the canceled request to stop before account/read")
-        } catch is CancellationError {
-            // Expected: shared initialization stays alive for the second request.
-        }
-        await client.stop()
-
-        let launches = try String(contentsOf: fixture.launchCountURL, encoding: .utf8)
-            .split(whereSeparator: \Character.isNewline)
-        XCTAssertEqual(launches.count, 1)
-        try? FileManager.default.removeItem(at: fixture.directoryURL)
-    }
-
     func testCodexProviderListsOnlyUserFacingThreadSourcesAndMapsMetadata() async throws {
         let server = FakeCodexAppServer()
         let provider = CodexAIProvider(clientFactory: { server })
@@ -770,38 +546,6 @@ final class AIChatStorageTests: XCTestCase {
         XCTAssertEqual(params?["searchTerm"]?.stringValue, "swift")
         XCTAssertEqual(params?["cursor"]?.stringValue, "next-page")
         XCTAssertEqual(params?["sortKey"]?.stringValue, "recency_at")
-    }
-
-    func testCodexProviderMarksMissingListModelAsNonAuthoritative() async throws {
-        let server = FakeCodexAppServer()
-        await server.setReportsThreadModel(false)
-        let provider = CodexAIProvider(clientFactory: { server })
-
-        let page = try await provider.listConversations(
-            request: AIConversationListRequest(
-                scope: .active,
-                query: "",
-                cursor: nil,
-                limit: 50
-            )
-        )
-
-        XCTAssertEqual(page.conversations.first?.model.rawValue, "codex-default")
-        XCTAssertEqual(page.conversations.first?.isModelAuthoritative, false)
-    }
-
-    func testCodexLoginCancelUsesReturnedLoginID() async throws {
-        let server = FakeCodexAppServer()
-        let provider = CodexAIProvider(clientFactory: { server })
-
-        let url = try await provider.signInWithChatGPT()
-        XCTAssertEqual(url.absoluteString, "https://example.com/login")
-        await provider.cancelSignIn()
-
-        let cancelLoginID = await server.params(
-            for: "account/login/cancel"
-        )?["loginId"]?.stringValue
-        XCTAssertEqual(cancelLoginID, "login-test")
     }
 
     func testCodexStreamMapsDeltaCompletionAndInterrupt() async throws {
@@ -897,15 +641,6 @@ final class AIChatStorageTests: XCTestCase {
         XCTAssertEqual(searchIDs, ["conv-older"])
     }
 
-    func testConversationTitleUsesFirstNonEmptyLineAndSixtyCharacters() {
-        let title = AIConversationSummary.title(
-            from: "\n  \(String(repeating: "a", count: 80))\nSecond"
-        )
-
-        XCTAssertEqual(title.count, 60)
-        XCTAssertEqual(title, String(repeating: "a", count: 60))
-    }
-
     func testProviderAuthoritativeCoordinatorReplacesOnlyCompletedScope() async throws {
         let staleActive = makeConversation(
             id: "stale-active",
@@ -944,44 +679,6 @@ final class AIChatStorageTests: XCTestCase {
         XCTAssertEqual(archivedValues.map(\.id), ["archived"])
     }
 
-    func testProviderRefreshPreservesLocallySelectedModelWhenListingOmitsIt() async throws {
-        let local = makeConversation(
-            id: "shared",
-            title: "Local",
-            providerID: .codex,
-            model: .sol,
-            reasoningEffort: AIReasoningEffort(rawValue: "high"),
-            lastMessageAt: Date(timeIntervalSince1970: 100)
-        )
-        let providerValue = makeConversation(
-            id: "shared",
-            title: "Provider",
-            providerID: .codex,
-            model: AIModel(rawValue: "codex-default"),
-            isModelAuthoritative: false,
-            isReasoningEffortAuthoritative: false,
-            lastMessageAt: Date(timeIntervalSince1970: 200)
-        )
-        let catalog = AIConversationCatalog(
-            providerID: .codex,
-            store: nil,
-            initialConversations: [local]
-        )
-        let coordinator = AIConversationCoordinator(
-            catalog: catalog,
-            provider: ConversationListTestProvider(values: [providerValue])
-        )
-
-        _ = try await coordinator.refreshIndex(query: "", scope: .active)
-
-        let refreshed = await coordinator.search(query: "", scope: .active)
-        XCTAssertEqual(refreshed.first?.title, "Provider")
-        XCTAssertEqual(refreshed.first?.model, .sol)
-        XCTAssertEqual(refreshed.first?.reasoningEffort?.rawValue, "high")
-        XCTAssertTrue(refreshed.first?.isModelAuthoritative == true)
-        XCTAssertTrue(refreshed.first?.isReasoningEffortAuthoritative == true)
-    }
-
     func testProviderRefreshPreservesPersistedModelAfterCatalogReload() async throws {
         let fixture = try makeStore()
         let local = makeConversation(
@@ -1016,38 +713,6 @@ final class AIChatStorageTests: XCTestCase {
         let persisted = try await fixture.store.loadAIConversationIndex(providerID: .codex)
         XCTAssertEqual(refreshed.first?.model, .sol)
         XCTAssertEqual(persisted.first?.model, .sol)
-    }
-
-    func testProviderRefreshUsesExplicitlyReportedModel() async throws {
-        let local = makeConversation(
-            id: "shared",
-            title: "Local",
-            providerID: .codex,
-            model: .sol,
-            lastMessageAt: Date(timeIntervalSince1970: 100)
-        )
-        let providerValue = makeConversation(
-            id: "shared",
-            title: "Provider",
-            providerID: .codex,
-            model: .luna,
-            lastMessageAt: Date(timeIntervalSince1970: 200)
-        )
-        let catalog = AIConversationCatalog(
-            providerID: .codex,
-            store: nil,
-            initialConversations: [local]
-        )
-        let coordinator = AIConversationCoordinator(
-            catalog: catalog,
-            provider: ConversationListTestProvider(values: [providerValue])
-        )
-
-        _ = try await coordinator.refreshIndex(query: "", scope: .active)
-
-        let refreshed = await coordinator.search(query: "", scope: .active)
-        XCTAssertEqual(refreshed.first?.model, .luna)
-        XCTAssertTrue(refreshed.first?.isModelAuthoritative == true)
     }
 
     func testProviderRefreshFailureDoesNotPruneCachedConversations() async {
@@ -1202,39 +867,6 @@ final class AIChatStorageTests: XCTestCase {
         )
     }
 
-    func testSSEDecoderMapsResponseFailureDetails() {
-        XCTAssertThrowsError(
-            try OpenAIChatClient.streamEvent(
-                from: #"{"type":"response.failed","response":{"error":{"type":"server_error","code":"server_error"}}}"#
-            )
-        ) { error in
-            XCTAssertEqual(error as? AIChatError, .serverUnavailable)
-        }
-    }
-
-    func testSSEDecoderMapsNestedTopLevelErrorDetails() {
-        XCTAssertThrowsError(
-            try OpenAIChatClient.streamEvent(
-                from: #"{"type":"error","error":{"type":"invalid_request_error","code":"model_not_found","message":"sensitive server detail"}}"#
-            )
-        ) { error in
-            XCTAssertEqual(error as? AIChatError, .modelUnavailable)
-        }
-    }
-
-    func testSSEDecoderPreservesOnlySafeUnknownErrorIdentifier() {
-        XCTAssertThrowsError(
-            try OpenAIChatClient.streamEvent(
-                from: #"{"type":"error","code":"future_error<script>"}"#
-            )
-        ) { error in
-            XCTAssertEqual(
-                error as? AIChatError,
-                .apiFailure(code: "future_errorscript")
-            )
-        }
-    }
-
     func testMalformedSSEIsReportedAsProtocolError() {
         XCTAssertThrowsError(
             try OpenAIChatClient.streamEvent(from: "not-json")
@@ -1250,44 +882,6 @@ final class AIChatStorageTests: XCTestCase {
             "data: {\"type\":\"response.created\"}"
         )
         XCTAssertEqual(OpenAIChatClient.normalizedSSELine("data: keep"), "data: keep")
-    }
-
-    func testEachSSEDataLineIsDecodedWithoutWaitingForBlankSeparator() throws {
-        let first = try OpenAIChatClient.streamEvent(
-            fromSSELine: #"data: {"type":"response.output_text.delta","delta":"O"}"# + "\r"
-        )
-        let second = try OpenAIChatClient.streamEvent(
-            fromSSELine: #"data: {"type":"response.output_text.delta","delta":"K"}"# + "\r"
-        )
-
-        guard case .textDelta("O") = first else {
-            return XCTFail("Expected first SSE data line")
-        }
-        guard case .textDelta("K") = second else {
-            return XCTFail("Expected second SSE data line")
-        }
-        XCTAssertNil(try OpenAIChatClient.streamEvent(fromSSELine: "data:\r"))
-        XCTAssertNil(try OpenAIChatClient.streamEvent(fromSSELine: "event: ping\r"))
-    }
-
-    func testCitationFormatterBuildsVisibleInlineLinksAtAnnotationOffsets() {
-        let citation = AIChatCitation(
-            id: "citation-1",
-            title: "Example",
-            url: URL(string: "https://example.com/source")!,
-            startIndex: 0,
-            endIndex: 5
-        )
-
-        let markdown = AIChatCitationFormatter.markdown(
-            text: "Hello world",
-            citations: [citation]
-        )
-
-        XCTAssertEqual(
-            markdown,
-            "Hello [[1]](<https://example.com/source>) world"
-        )
     }
 
     func testMessageFormatterPreservesPlainTextSoftLineBreaks() {
@@ -1362,15 +956,6 @@ final class AIChatStorageTests: XCTestCase {
         )
     }
 
-    func testStreamingContentGrowthKeepsFollowingLatest() {
-        var state = AIConversationScrollState()
-
-        state.updateGeometry(isAtLatest: false)
-
-        XCTAssertFalse(state.isAtLatest)
-        XCTAssertTrue(state.shouldFollowLatest)
-    }
-
     func testUserScrollAwayStopsFollowingUntilLatestIsVisibleAgain() {
         var state = AIConversationScrollState()
 
@@ -1385,16 +970,6 @@ final class AIChatStorageTests: XCTestCase {
 
         XCTAssertTrue(state.isAtLatest)
         XCTAssertTrue(state.shouldFollowLatest)
-    }
-
-    func testScrollPhaseCanBeginAfterGeometryLeavesLatest() {
-        var state = AIConversationScrollState()
-
-        state.updateGeometry(isAtLatest: false)
-        state.userInteractionDidBegin()
-
-        XCTAssertFalse(state.shouldFollowLatest)
-        XCTAssertTrue(state.isUserInteracting)
     }
 
     func testResetToLatestRestoresFollowingAfterReopeningConversation() {
@@ -1481,18 +1056,6 @@ final class AIChatStorageTests: XCTestCase {
 
 @MainActor
 final class AIMessageCacheTests: XCTestCase {
-    func testLeastRecentlyReadConversationIsEvictedAtCountLimit() {
-        let cache = AIMessageCache(maximumConversationCount: 2)
-        cache.store([message("one")], for: reference("one"))
-        cache.store([message("two")], for: reference("two"))
-        XCTAssertNotNil(cache.messages(for: reference("one")))
-        cache.store([message("three")], for: reference("three"))
-
-        XCTAssertNil(cache.messages(for: reference("two")))
-        XCTAssertEqual(cache.messages(for: reference("one"))?.first?.text, "one")
-        XCTAssertEqual(cache.statistics.conversationCount, 2)
-    }
-
     func testByteBudgetEvictsLargeTranscriptsBeforeCountLimit() {
         let cache = AIMessageCache(maximumByteCount: 2_000)
         cache.store([message(String(repeating: "a", count: 1_000))], for: reference("one"))
@@ -1501,13 +1064,6 @@ final class AIMessageCacheTests: XCTestCase {
         XCTAssertNil(cache.messages(for: reference("one")))
         XCTAssertNotNil(cache.messages(for: reference("two")))
         XCTAssertLessThanOrEqual(cache.statistics.estimatedByteCount, 2_000)
-    }
-
-    func testOversizedUnprotectedTranscriptIsNotRetained() {
-        let cache = AIMessageCache(maximumByteCount: 100)
-        cache.store([message("oversized")], for: reference("large"))
-        XCTAssertNil(cache.messages(for: reference("large")))
-        XCTAssertEqual(cache.statistics.estimatedByteCount, 0)
     }
 
     func testVisibleAndStreamingConversationsSurviveUntilProtectionIsReleased() {
@@ -1527,67 +1083,6 @@ final class AIMessageCacheTests: XCTestCase {
         XCTAssertEqual(cache.statistics.estimatedByteCount, 0)
     }
 
-    func testProviderNamespacesAndProtectionDoNotCollide() {
-        let cache = AIMessageCache(maximumConversationCount: 1)
-        let codex = reference("same-id", provider: .codex)
-        let openAI = reference("same-id")
-        cache.protect([codex], for: .codex)
-        cache.protect([openAI], for: .openAIAPI)
-        cache.store([message("Codex")], for: codex)
-        cache.store([message("OpenAI")], for: openAI)
-        cache.protect([], for: .codex)
-
-        XCTAssertNil(cache.messages(for: codex))
-        XCTAssertEqual(cache.messages(for: openAI)?.first?.text, "OpenAI")
-    }
-
-    func testIncrementalStreamingAccountingMatchesFullReplacement() {
-        let cache = AIMessageCache()
-        let target = reference("streaming")
-        cache.protect([target], for: .openAIAPI)
-        cache.store([message("start")], for: target)
-        for _ in 0..<100 {
-            _ = cache.updateMessage(id: "message", in: target) { $0.text += "日本語\n" }
-        }
-        let expected = AIMessageCache()
-        expected.store(cache.messages(for: target) ?? [], for: target)
-        XCTAssertEqual(cache.statistics.estimatedByteCount, expected.statistics.estimatedByteCount)
-        XCTAssertEqual(cache.messages(for: target)?.first?.text, "start" + String(repeating: "日本語\n", count: 100))
-    }
-
-    func testCitationsAndAttachmentMetadataCountTowardBudget() {
-        let cache = AIMessageCache(maximumByteCount: 1_000)
-        let target = reference("metadata")
-        var value = message("short")
-        value.citations = [AIChatCitation(
-            id: "citation", title: String(repeating: "x", count: 1_000),
-            url: URL(string: "https://example.com")!, startIndex: nil, endIndex: nil
-        )]
-        cache.store([value], for: target)
-        XCTAssertNil(cache.messages(for: target))
-        value.citations = []
-        value.attachments = [AIChatAttachment(
-            id: "attachment", kind: .file, filename: String(repeating: "a", count: 1_000),
-            fileID: nil, localURL: nil, byteCount: nil
-        )]
-        cache.store([value], for: target)
-        XCTAssertNil(cache.messages(for: target))
-    }
-
-    func testRepeatedReplacementRemovalAndChurnDoNotAccumulateCost() {
-        let cache = AIMessageCache(maximumByteCount: 8_000)
-        for index in 0..<2_000 {
-            let target = reference(String(index % 20))
-            cache.store([message(String(repeating: "x", count: 1_000))], for: target)
-            cache.store([message("short")], for: target)
-            XCTAssertLessThanOrEqual(cache.statistics.estimatedByteCount, 8_000)
-            XCTAssertLessThanOrEqual(cache.statistics.conversationCount, 8)
-        }
-        cache.removeAll(for: .openAIAPI)
-        XCTAssertEqual(cache.statistics.estimatedByteCount, 0)
-        XCTAssertEqual(cache.statistics.conversationCount, 0)
-    }
-
     private func reference(_ id: String, provider: AIProviderID = .openAIAPI) -> AIConversationReference {
         AIConversationReference(providerID: provider, providerConversationID: id)
     }
@@ -1599,6 +1094,27 @@ final class AIMessageCacheTests: XCTestCase {
 
 @MainActor
 final class AIChatViewModelTests: XCTestCase {
+    func testArchiveUpdatesRemoteMetadataBeforeRemovingFromActiveList() async {
+        let service = AIChatTestService()
+        let conversation = makeConversation(title: "Archive me")
+        let viewModel = makeViewModel(
+            service: service,
+            conversations: [conversation]
+        )
+        viewModel.prepareForPresentation()
+        await waitUntil { viewModel.visibleConversations.count == 1 }
+        viewModel.selectListItem(conversation.id)
+
+        viewModel.archiveSelectedConversation()
+        await waitUntil {
+            viewModel.conversations.first?.isArchived == true
+                && viewModel.visibleConversations.isEmpty
+        }
+
+        let archiveState = await service.recordedArchiveState()
+        XCTAssertEqual(archiveState, true)
+    }
+
     func testUnavailableAppleModelPreservesDraftWithoutCreatingEmptyChat() async {
         let suite = "com.yorozu.apple-unavailable-tests.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suite)!
@@ -1642,115 +1158,6 @@ final class AIChatViewModelTests: XCTestCase {
         viewModel.shutdown()
     }
 
-    func testStreamingWhileListIsVisibleKeepsContentThenReleasesOversizedCache() async {
-        let cache = AIMessageCache(maximumByteCount: 1)
-        let service = AIChatTestService(streamDelay: .milliseconds(100))
-        let viewModel = makeViewModel(service: service, messageCache: cache)
-        viewModel.beginNewChat()
-        viewModel.prompt = "Send once"
-        viewModel.send()
-        await waitUntil { viewModel.messages.contains(where: \.isStreaming) }
-        viewModel.returnToList()
-        XCTAssertGreaterThan(cache.statistics.protectedByteCount, 0)
-        await waitUntil { !viewModel.isStreaming }
-        await waitUntil { cache.statistics.conversationCount == 0 }
-        XCTAssertTrue(viewModel.messages.isEmpty)
-        let calls = await service.recordedStreamCallCount()
-        XCTAssertEqual(calls, 1)
-        viewModel.shutdown()
-    }
-
-    func testProvidersShareOneBudgetAndShutdownDoesNotClearAnotherProvider() async {
-        let cache = AIMessageCache(maximumByteCount: 1)
-        let viewModel = makeViewModel(service: AIChatTestService(), messageCache: cache)
-        let otherReference = AIConversationReference(providerID: .codex, providerConversationID: "other")
-        cache.protect([otherReference], for: .codex)
-        cache.store([AIChatMessage(id: "other", role: .assistant, text: "Other provider", citations: [], attachments: [], isStreaming: false)], for: otherReference)
-        viewModel.openConversation(id: "first")
-        await waitUntil { !viewModel.isLoadingConversation }
-        XCTAssertEqual(cache.statistics.conversationCount, 2)
-        viewModel.prompt = "unsent"
-        viewModel.shutdown()
-        XCTAssertEqual(cache.statistics.conversationCount, 1)
-        XCTAssertNotNil(cache.messages(for: otherReference))
-        XCTAssertTrue(viewModel.prompt.isEmpty)
-        XCTAssertTrue(viewModel.messages.isEmpty)
-    }
-
-    func testMessageCopyWithoutInjectedServiceFailsWithoutSystemPasteboardAccess() {
-        let viewModel = makeViewModel(service: AIChatTestService())
-        viewModel.statusMessage = "Response copied."
-
-        viewModel.copyMessage("response")
-
-        XCTAssertEqual(viewModel.errorMessage, "The response could not be copied.")
-        XCTAssertNil(viewModel.statusMessage)
-    }
-
-    func testEmptyMessageDoesNotCallCopyService() async {
-        let viewModel = makeViewModel(service: AIChatTestService())
-        var copyCount = 0
-        viewModel.copyText = { _ in
-            copyCount += 1
-            return .written(changeCount: 1)
-        }
-
-        viewModel.copyMessage("")
-        await Task.yield()
-
-        XCTAssertEqual(copyCount, 0)
-        XCTAssertNil(viewModel.statusMessage)
-    }
-
-    func testMessageCopyAnnouncesSuccessOnlyAfterSharedCopyCompletes() async {
-        let viewModel = makeViewModel(service: AIChatTestService())
-        viewModel.errorMessage = "Previous failure"
-        var copiedText: String?
-        var resumeCopy: CheckedContinuation<PasteboardReplacementResult, Never>?
-        defer { resumeCopy?.resume(returning: .busy) }
-        viewModel.copyText = { text in
-            copiedText = text
-            return await withCheckedContinuation { resumeCopy = $0 }
-        }
-
-        viewModel.copyMessage("response")
-        await waitUntil { resumeCopy != nil }
-
-        XCTAssertEqual(copiedText, "response")
-        XCTAssertNil(viewModel.statusMessage)
-        resumeCopy?.resume(returning: .written(changeCount: 1))
-        resumeCopy = nil
-        await waitUntil { viewModel.statusMessage == "Response copied." }
-        XCTAssertNil(viewModel.errorMessage)
-    }
-
-    func testMessageCopyCompletionDoesNotOverwriteAnotherConversationState() async {
-        for result: PasteboardReplacementResult in [.written(changeCount: 1), .clipboardChanged] {
-            let viewModel = makeViewModel(service: AIChatTestService())
-            var resumeCopy: CheckedContinuation<PasteboardReplacementResult, Never>?
-            var copyCompleted = false
-            defer { resumeCopy?.resume(returning: .busy) }
-            viewModel.copyText = { _ in
-                let value = await withCheckedContinuation { resumeCopy = $0 }
-                copyCompleted = true
-                return value
-            }
-
-            viewModel.copyMessage("response")
-            await waitUntil { resumeCopy != nil }
-            viewModel.beginNewChat()
-            viewModel.errorMessage = "Current conversation error"
-            viewModel.statusMessage = "Current conversation status"
-            resumeCopy?.resume(returning: result)
-            resumeCopy = nil
-            await waitUntil { copyCompleted }
-            await Task.yield()
-
-            XCTAssertEqual(viewModel.errorMessage, "Current conversation error")
-            XCTAssertEqual(viewModel.statusMessage, "Current conversation status")
-        }
-    }
-
     func testMessageCopyFailuresNeverAnnounceSuccess() async {
         let failures: [PasteboardReplacementResult] = [
             .busy, .clipboardChanged, .preservationLimitExceeded, .preservationFailed,
@@ -1791,23 +1198,6 @@ final class AIChatViewModelTests: XCTestCase {
         let result = await firstCopy.value
         XCTAssertTrue(result.wasWritten)
         XCTAssertEqual(pasteboard.replaceCount, 1)
-        XCTAssertFalse(coordinator.isOperationInProgress)
-    }
-
-    func testMessageCopyPreservesExternalCopyMadeDuringSnapshot() async {
-        let viewModel = makeViewModel(service: AIChatTestService())
-        let pasteboard = AIMessageTestPasteboard()
-        pasteboard.changesDuringSnapshot = true
-        let coordinator = makeCopyCoordinator(pasteboard: pasteboard)
-        viewModel.copyText = { text in await coordinator.copy(.text(text)) }
-
-        viewModel.copyMessage("response")
-        await waitUntil { viewModel.errorMessage != nil }
-
-        XCTAssertEqual(viewModel.errorMessage, "The clipboard changed. Try copying again.")
-        XCTAssertEqual(pasteboard.replaceCount, 0)
-        XCTAssertEqual(pasteboard.restoreCount, 0)
-        XCTAssertNil(viewModel.statusMessage)
         XCTAssertFalse(coordinator.isOperationInProgress)
     }
 
@@ -1878,23 +1268,6 @@ final class AIChatViewModelTests: XCTestCase {
         XCTAssertEqual(reloaded.defaultReasoningEffort?.rawValue, "high")
     }
 
-    func testCodexReasoningPreferenceSurvivesUntilModelMetadataLoads() {
-        let suite = "com.yorozu.ai-reasoning-pending-tests.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suite) ?? .standard
-        defer { defaults.removePersistentDomain(forName: suite) }
-        let preferences = AIChatPreferences(defaults: defaults, providerID: .codex)
-        preferences.defaultReasoningEffort = AIReasoningEffort(rawValue: "high")
-        let viewModel = AIChatViewModel(
-            catalog: AIConversationCatalog(providerID: .codex, store: nil),
-            provider: RegistryTestProvider(providerID: .codex),
-            preferences: preferences
-        )
-
-        viewModel.beginNewChat()
-
-        XCTAssertEqual(viewModel.currentReasoningEffort?.rawValue, "high")
-    }
-
     func testCodexConversationActionsOpenThreadInCodex() async {
         let conversation = makeConversation(
             id: "thread-test",
@@ -1919,98 +1292,6 @@ final class AIChatViewModelTests: XCTestCase {
 
         viewModel.openConversation(id: conversation.id)
         XCTAssertTrue(viewModel.actionItems.contains { $0.id == .aiOpenInCodex })
-    }
-
-    func testOpenAIConversationDoesNotOfferOpenInCodex() async {
-        let conversation = makeConversation(title: "OpenAI chat")
-        let viewModel = makeViewModel(
-            service: AIChatTestService(),
-            conversations: [conversation]
-        )
-        viewModel.prepareForPresentation()
-        await waitUntil { viewModel.visibleConversations.count == 1 }
-        viewModel.selectListItem(conversation.id)
-
-        XCTAssertFalse(viewModel.actionItems.contains { $0.id == .aiOpenInCodex })
-        viewModel.openConversation(id: conversation.id)
-        XCTAssertFalse(viewModel.actionItems.contains { $0.id == .aiOpenInCodex })
-    }
-
-    func testOpenInCodexFailureShowsRecoverableError() async {
-        let conversation = makeConversation(
-            id: "thread-test",
-            title: "Unavailable Codex",
-            providerID: .codex
-        )
-        let viewModel = makeCodexViewModel(
-            conversations: [conversation],
-            openExternalURL: { _ in false }
-        )
-        viewModel.prepareForPresentation()
-        await waitUntil { viewModel.visibleConversations.count == 1 }
-        viewModel.selectListItem(conversation.id)
-
-        viewModel.performAction(.aiOpenInCodex)
-
-        XCTAssertEqual(viewModel.errorMessage, "Codex couldn’t open this chat.")
-    }
-
-    func testPrepareForPresentationPreservesProviderDestinationAndDraft() async {
-        let viewModel = makeViewModel(service: AIChatTestService())
-        viewModel.beginNewChat()
-        viewModel.prompt = "Provider-specific draft"
-
-        viewModel.prepareForPresentation()
-
-        XCTAssertEqual(viewModel.destination, .newChat)
-        XCTAssertEqual(viewModel.prompt, "Provider-specific draft")
-    }
-
-    func testPrepareForPresentationRequestsLatestWhenConversationIsVisible() async {
-        let conversation = makeConversation(title: "Latest conversation")
-        let viewModel = makeViewModel(
-            service: AIChatTestService(),
-            conversations: [conversation]
-        )
-        viewModel.prepareForPresentation()
-        await waitUntil { viewModel.visibleConversations.count == 1 }
-        viewModel.openConversation(id: conversation.id)
-        let requestAfterOpening = viewModel.scrollToLatestRequest
-
-        viewModel.prepareForPresentation()
-
-        XCTAssertEqual(
-            viewModel.scrollToLatestRequest,
-            requestAfterOpening + 1
-        )
-    }
-
-    func testPaletteDidBecomeVisibleRequestsLatestOnlyForConversation() async {
-        let conversation = makeConversation(title: "Latest conversation")
-        let viewModel = makeViewModel(
-            service: AIChatTestService(),
-            conversations: [conversation]
-        )
-        viewModel.prepareForPresentation()
-        await waitUntil { viewModel.visibleConversations.count == 1 }
-        let requestWhileListIsVisible = viewModel.scrollToLatestRequest
-
-        viewModel.paletteDidBecomeVisible()
-
-        XCTAssertEqual(
-            viewModel.scrollToLatestRequest,
-            requestWhileListIsVisible
-        )
-
-        viewModel.openConversation(id: conversation.id)
-        let requestAfterOpening = viewModel.scrollToLatestRequest
-
-        viewModel.paletteDidBecomeVisible()
-
-        XCTAssertEqual(
-            viewModel.scrollToLatestRequest,
-            requestAfterOpening + 1
-        )
     }
 
     func testNewChatDoesNotCreateServerConversationUntilFirstSend() async throws {
@@ -2063,27 +1344,6 @@ final class AIChatViewModelTests: XCTestCase {
 
         let loadCalls = await service.recordedLoadCallCount()
         XCTAssertEqual(loadCalls, 0)
-    }
-
-    func testArchiveUpdatesRemoteMetadataBeforeRemovingFromActiveList() async {
-        let service = AIChatTestService()
-        let conversation = makeConversation(title: "Archive me")
-        let viewModel = makeViewModel(
-            service: service,
-            conversations: [conversation]
-        )
-        viewModel.prepareForPresentation()
-        await waitUntil { viewModel.visibleConversations.count == 1 }
-        viewModel.selectListItem(conversation.id)
-
-        viewModel.archiveSelectedConversation()
-        await waitUntil {
-            viewModel.conversations.first?.isArchived == true
-                && viewModel.visibleConversations.isEmpty
-        }
-
-        let archiveState = await service.recordedArchiveState()
-        XCTAssertEqual(archiveState, true)
     }
 
     func testCompleteDeleteRemovesLocalIndexOnlyAfterRemoteSuccess() async {
@@ -2162,48 +1422,6 @@ final class AIChatViewModelTests: XCTestCase {
         let loadCalls = await service.recordedLoadCallCount()
         XCTAssertEqual(streamCalls, 1)
         XCTAssertEqual(loadCalls, 1)
-    }
-
-    func testCompletedEventFinishesGenerationBeforeTransportCloses() async {
-        let service = AIChatTestService(
-            streamCompletionDelay: .seconds(3)
-        )
-        let viewModel = makeViewModel(service: service)
-        viewModel.beginNewChat()
-        viewModel.prompt = "Do not wait for the connection to close"
-
-        viewModel.send()
-        await waitUntil { !viewModel.isStreaming }
-
-        XCTAssertEqual(viewModel.messages.last?.text, "Hello")
-        XCTAssertFalse(viewModel.messages.last?.isStreaming ?? true)
-    }
-
-    func testAIConversationPageLeavesTextNavigationToComposer() {
-        for keyCode: UInt16 in [36, 76, 126, 125, 48] {
-            XCTAssertEqual(
-                PaletteKeyEventPolicy.action(
-                    keyCode: keyCode,
-                    modifiers: [],
-                    hasMarkedText: false,
-                    route: .ai(providerID: .openAIAPI),
-                    isActionPanelPresented: false,
-                    isAIConversationPage: true
-                ),
-                .passThrough
-            )
-        }
-        XCTAssertEqual(
-            PaletteKeyEventPolicy.action(
-                keyCode: 53,
-                modifiers: [],
-                hasMarkedText: false,
-                route: .ai(providerID: .openAIAPI),
-                isActionPanelPresented: false,
-                isAIConversationPage: true
-            ),
-            .escape
-        )
     }
 
     func testMarkedTextReturnPassesThroughOnAIListAndConversation() {

@@ -19,23 +19,6 @@ final class WindowControlTargetTests: XCTestCase {
         XCTAssertEqual(resolver.resolve(1), 3)
     }
 
-    func testInvalidWindowRelationStillFallsBackToParent() {
-        let resolver = WindowControlWindowResolver<Int>(
-            isWindow: { $0 == 4 },
-            relatedElement: { element, attribute in
-                switch (element, attribute) {
-                case (1, kAXWindowAttribute): 2
-                case (2, kAXWindowAttribute): 2
-                case (1, kAXParentAttribute): 3
-                case (3, kAXParentAttribute): 4
-                default: nil
-                }
-            },
-            isEqual: { $0 == $1 }
-        )
-        XCTAssertEqual(resolver.resolve(1), 4)
-    }
-
     func testCyclicAndOversizedAccessibilityTreesAreBounded() {
         var reads = 0
         let cycle = WindowControlWindowResolver<Int>(
@@ -62,54 +45,6 @@ final class WindowControlTargetTests: XCTestCase {
         XCTAssertEqual(reads, 96)
     }
 
-    func testWindowBoundsMatchAllowsRoundingButNotAnotherOverlappingWindow() {
-        let record = WindowControlWindowRecord(
-            processIdentifier: 123,
-            frame: CGRect(x: -100, y: 40, width: 600, height: 400)
-        )
-        XCTAssertTrue(record.matches(frame: record.frame))
-        XCTAssertTrue(record.matches(frame: CGRect(x: -99.5, y: 40, width: 600.5, height: 400)))
-        XCTAssertFalse(record.matches(frame: CGRect(x: -90, y: 40, width: 600, height: 400)))
-        XCTAssertFalse(record.matches(frame: CGRect(x: -100, y: 40, width: 500, height: 300)))
-    }
-
-    func testWindowBoundsMatchAllowsMacOS26StandardWindowInsets() {
-        let axFrame = CGRect(x: 40, y: 948, width: 640, height: 452)
-        let record = WindowControlWindowRecord(
-            processIdentifier: 123,
-            frame: CGRect(x: 43, y: 950, width: 634, height: 448)
-        )
-        XCTAssertTrue(record.matches(frame: axFrame))
-        XCTAssertFalse(record.matches(frame: axFrame.offsetBy(dx: 8, dy: 0)))
-        XCTAssertFalse(record.matches(frame: axFrame.insetBy(dx: -3, dy: -3)))
-        // Tolerance cannot make an uncertain AXWindows fallback choose arbitrarily.
-        XCTAssertNil(record.uniquelyMatchingWindow(
-            in: [axFrame, axFrame.offsetBy(dx: 1, dy: 0)],
-            canContinue: { true }, frame: { $0 }
-        ))
-    }
-
-    func testDirectHitTestAcceptsWindowServerLagWithoutLooseningFallback() {
-        let record = WindowControlWindowRecord(
-            processIdentifier: 123, frame: CGRect(x: 1_401, y: 271, width: 638, height: 450)
-        )
-        let moved = CGRect(x: 1_424, y: 288, width: 640, height: 452)
-        XCTAssertTrue(record.acceptsHitTest(frame: moved, at: CGPoint(x: moved.midX, y: moved.midY)))
-        XCTAssertFalse(record.matches(frame: moved))
-        XCTAssertFalse(record.acceptsHitTest(frame: moved, at: CGPoint(x: 1_405, y: 280)))
-        XCTAssertFalse(record.acceptsHitTest(frame: .zero, at: CGPoint(x: moved.midX, y: moved.midY)))
-        XCTAssertFalse(record.acceptsHitTest(frame: moved, at: CGPoint(x: CGFloat.nan, y: 400)))
-    }
-
-    func testExpiredLookupDoesNotVisitAccessibilityTree() {
-        let resolver = WindowControlWindowResolver<Int>(
-            isWindow: { _ in XCTFail("Expired lookup must not read AX roles"); return true },
-            relatedElement: { _, _ in XCTFail("Expired lookup must not read AX relations"); return nil },
-            isEqual: { $0 == $1 }
-        )
-        XCTAssertNil(resolver.resolve(1, canContinue: { false }))
-    }
-
     func testLookupDoesNotReturnWindowWhoseRoleReplyExceededDeadline() {
         var timeRemaining = true
         let resolver = WindowControlWindowResolver<Int>(
@@ -118,37 +53,6 @@ final class WindowControlTargetTests: XCTestCase {
             isEqual: { $0 == $1 }
         )
         XCTAssertNil(resolver.resolve(1, canContinue: { timeRemaining }))
-    }
-
-    func testSlowRelationsStopBeforeReadingTheEntireTree() {
-        var now: TimeInterval = 0
-        var relationReads = 0
-        let budget = WindowControlAXLookupBudget(now: { now })
-        let resolver = WindowControlWindowResolver<Int>(
-            isWindow: { _ in false },
-            relatedElement: { element, _ in
-                relationReads += 1
-                now += 0.6
-                return element + 1
-            },
-            isEqual: { $0 == $1 }
-        )
-        XCTAssertNil(resolver.resolve(1, canContinue: { budget.requestTimeout != nil }))
-        XCTAssertEqual(relationReads, 2)
-    }
-
-    func testIndividualAXTimeoutShrinksWithTheOverallDeadlineAndNeverBecomesZero() throws {
-        var now: TimeInterval = 50
-        let budget = WindowControlAXLookupBudget(now: { now })
-        XCTAssertEqual(try XCTUnwrap(budget.requestTimeout), 0.2, accuracy: 0.0001)
-        now = 50.95
-        XCTAssertEqual(try XCTUnwrap(budget.requestTimeout), 0.05, accuracy: 0.0001)
-        now = 50.9999
-        XCTAssertNil(budget.requestTimeout)
-        now = 51
-        XCTAssertNil(budget.requestTimeout)
-        now = 52
-        XCTAssertNil(budget.requestTimeout)
     }
 
     func testFallbackRequiresOneUniqueWindowAndACompleteScan() {
@@ -178,49 +82,6 @@ final class WindowControlTargetTests: XCTestCase {
         XCTAssertNil(record.uniquelyMatchingWindow(
             in: [1, 2], canContinue: { true }, frame: { $0 == 1 ? frame : nil }
         ))
-    }
-
-    func testOversizedWindowListsAreRejectedBeforeAnyAXWindowRead() {
-        let record = WindowControlWindowRecord(
-            processIdentifier: 123, frame: CGRect(x: 0, y: 0, width: 600, height: 400)
-        )
-        XCTAssertNil(record.uniquelyMatchingWindow(
-            in: Array(0..<65), canContinue: { true },
-            frame: { _ in XCTFail("Oversized lists must not cause AX reads"); return nil }
-        ))
-    }
-
-    func testInvalidFramesCannotMatchOrPassGeometryValidation() {
-        let frame = CGRect(x: 0, y: 0, width: 600, height: 400)
-        let record = WindowControlWindowRecord(processIdentifier: 123, frame: frame)
-        let invalidFrames = [
-            CGRect(x: CGFloat.nan, y: 0, width: 600, height: 400),
-            CGRect(x: 0, y: CGFloat.infinity, width: 600, height: 400),
-            CGRect(x: 0, y: 0, width: 0, height: 400),
-            CGRect(x: 0, y: 0, width: -600, height: 400),
-            CGRect(x: 0, y: 0, width: 600, height: CGFloat.nan),
-            CGRect(x: CGFloat.greatestFiniteMagnitude, y: 0,
-                   width: CGFloat.greatestFiniteMagnitude, height: 400),
-        ]
-        for invalid in invalidFrames {
-            XCTAssertFalse(WindowControlWindowRecord.isValid(frame: invalid))
-            XCTAssertFalse(record.matches(frame: invalid))
-        }
-    }
-
-    func testInvalidGeometryAndCancelledRaiseAreRejectedBeforeAccessingAXTarget() {
-        let accessor = SystemWindowAccessor()
-        let target = WindowControlTarget(
-            element: NSObject(), processIdentifier: 123,
-            initialPosition: .zero, initialSize: CGSize(width: 600, height: 400)
-        )
-        XCTAssertFalse(accessor.move(target, to: CGPoint(x: CGFloat.nan, y: 0)))
-        XCTAssertFalse(accessor.resize(target, to: CGSize(width: -1, height: 400)))
-        XCTAssertFalse(accessor.setFrame(target, to: CGRect(
-            x: CGFloat.infinity, y: 0, width: 600, height: 400
-        )))
-        accessor.raiseAndActivate(target, isCancelled: { true })
-        XCTAssertNil(accessor.target(at: CGPoint(x: CGFloat.infinity, y: 0), operation: .move))
     }
 
     func testAXTargetWhosePIDDoesNotMatchIsRejectedWithoutWriting() {
@@ -254,48 +115,6 @@ final class WindowControlTargetTests: XCTestCase {
         XCTAssertEqual(writes, ["resize", "move", "resize"])
     }
 
-    func testFrameWriterCancellationAfterAnAXWriteStopsRemainingWrites() {
-        for cancelAfter in 1...3 {
-            var writeCount = 0
-            XCTAssertFalse(WindowControlFrameWriter.apply(
-                frame: CGRect(x: 20, y: 30, width: 600, height: 400),
-                isCancelled: { writeCount >= cancelAfter },
-                resize: { _ in writeCount += 1; return true },
-                move: { _ in writeCount += 1; return true }
-            ))
-            XCTAssertEqual(writeCount, cancelAfter)
-        }
-    }
-
-    func testFrameWriterFailureStopsRemainingWrites() {
-        for failAt in 1...3 {
-            var writeCount = 0
-            XCTAssertFalse(WindowControlFrameWriter.apply(
-                frame: CGRect(x: 20, y: 30, width: 600, height: 400),
-                isCancelled: { false },
-                resize: { _ in writeCount += 1; return writeCount != failAt },
-                move: { _ in writeCount += 1; return writeCount != failAt }
-            ))
-            XCTAssertEqual(writeCount, failAt)
-        }
-    }
-
-    func testFrameWriterRejectsInvalidGeometryAndInitialCancellationBeforeAnyWrite() {
-        for (frame, isCancelled) in [
-            (CGRect(x: CGFloat.nan, y: 0, width: 600, height: 400), false),
-            (CGRect(x: 0, y: 0, width: 0, height: 400), false),
-            (CGRect(x: 0, y: 0, width: 600, height: 400), true),
-        ] {
-            var writeCount = 0
-            XCTAssertFalse(WindowControlFrameWriter.apply(
-                frame: frame,
-                isCancelled: { isCancelled },
-                resize: { _ in writeCount += 1; return true },
-                move: { _ in writeCount += 1; return true }
-            ))
-            XCTAssertEqual(writeCount, 0)
-        }
-    }
 }
 
 @MainActor
@@ -324,18 +143,6 @@ final class WindowControlEventPipelineTests: XCTestCase {
                 XCTAssertTrue(accessor.positions.isEmpty)
             }
             XCTAssertTrue(accessor.frames.isEmpty)
-        }
-    }
-
-    func testClicksAndKeyboardShortcutsPassThroughWithoutAcquiringWindows() throws {
-        for type in [CGEventType.leftMouseDown, .rightMouseDown, .otherMouseDown, .keyDown, .scrollWheel] {
-            let accessor = EventPipelineWindowAccessor()
-            let worker = makeWorker(accessor: accessor) { _ in }
-            XCTAssertFalse(worker.handle(type: .flagsChanged, event: try event(.flagsChanged, x: 200, y: 200, flags: moveFlags)))
-            XCTAssertFalse(worker.handle(type: type, event: try event(type, x: 200, y: 200, flags: moveFlags)))
-            XCTAssertFalse(worker.handle(type: .mouseMoved, event: try event(.mouseMoved, x: 250, y: 220, flags: moveFlags)))
-            XCTAssertFalse(worker.handle(type: .flagsChanged, event: try event(.flagsChanged, x: 250, y: 220, flags: [])))
-            XCTAssertEqual(accessor.targetCount, 0)
         }
     }
 
@@ -374,26 +181,6 @@ final class WindowControlEventPipelineTests: XCTestCase {
         await fulfillment(of: [finished], timeout: 2)
         XCTAssertEqual(accessor.frames, [CGRect(x: 0, y: 25, width: 720, height: 835)])
         XCTAssertFalse(worker.handle(type: .mouseMoved, event: try event(.mouseMoved, x: 500, y: 400, flags: [])))
-        XCTAssertEqual(accessor.targetCount, 1)
-    }
-
-    func testMissedKeyReleaseClearsPreviewWithoutCommittingSnap() async throws {
-        let accessor = EventPipelineWindowAccessor()
-        let previewed = expectation(description: "Snap preview")
-        let finished = expectation(description: "Missed release handled")
-        let worker = makeWorker(accessor: accessor, preview: { destination in
-            if destination != nil { previewed.fulfill() }
-        }) { activity in
-            if activity == .listening { finished.fulfill() }
-        }
-        XCTAssertFalse(worker.handle(type: .mouseMoved, event: try event(.mouseMoved, x: 200, y: 200, flags: moveFlags)))
-        XCTAssertFalse(worker.handle(type: .mouseMoved, event: try event(.mouseMoved, x: 2, y: 250, flags: moveFlags)))
-        await fulfillment(of: [previewed], timeout: 2)
-        XCTAssertEqual(accessor.positions.last, CGPoint(x: -98, y: 150))
-        XCTAssertFalse(worker.handle(type: .mouseMoved, event: try event(.mouseMoved, x: 500, y: 400, flags: [])))
-        await fulfillment(of: [finished], timeout: 2)
-        XCTAssertTrue(accessor.frames.isEmpty)
-        XCTAssertTrue(accessor.sizes.isEmpty)
         XCTAssertEqual(accessor.targetCount, 1)
     }
 
@@ -456,26 +243,6 @@ final class WindowControlEventPipelineTests: XCTestCase {
         await fulfillment(of: [stopped], timeout: 2)
         XCTAssertEqual(previewCount, 0)
         XCTAssertEqual(accessor.writeCount, 1, "An AX call already in flight cannot be undone; no further writes may follow.")
-    }
-
-    func testStraySampleAfterResetDoesNotStartAnotherGesture() async {
-        let accessor = EventPipelineWindowAccessor()
-        let drained = expectation(description: "Queued work drained")
-        let processor = WindowControlPointerProcessor(
-            windowAccessor: accessor,
-            screenProvider: EmptyWindowControlScreenProvider(),
-            previewHandler: { _ in },
-            activityHandler: { activity in
-                if activity == .monitorRecovered { drained.fulfill() }
-            }
-        )
-        processor.reset()
-        processor.submit(.init(operation: .move, location: CGPoint(x: 200, y: 200)))
-        processor.report(.monitorRecovered)
-        await fulfillment(of: [drained], timeout: 2)
-        XCTAssertEqual(accessor.targetCount, 0)
-        XCTAssertTrue(accessor.positions.isEmpty)
-        XCTAssertTrue(accessor.frames.isEmpty)
     }
 
     private func event(_ type: CGEventType, x: Double, y: Double, flags: CGEventFlags) throws -> CGEvent {

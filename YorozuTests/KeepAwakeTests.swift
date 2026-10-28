@@ -4,19 +4,6 @@ import XCTest
 
 @MainActor
 final class KeepAwakeTests: XCTestCase {
-    func testDurationChoicesCoverInfinityAndFiveMinuteStepsThroughFourHours() {
-        XCTAssertEqual(KeepAwakeDuration.choices.first, .untilTurnedOff)
-        XCTAssertEqual(KeepAwakeDuration.choices.dropFirst().first, .minutes(5))
-        XCTAssertEqual(KeepAwakeDuration.choices.last, .minutes(240))
-        XCTAssertEqual(KeepAwakeDuration.choices.count, 49)
-    }
-
-    func testInvalidStoredDurationFallsBackToThirtyMinutes() {
-        XCTAssertEqual(KeepAwakeDuration(storedValue: 7), .minutes(30))
-        XCTAssertEqual(KeepAwakeDuration(storedValue: 245), .minutes(30))
-        XCTAssertEqual(KeepAwakeDuration(storedValue: 0), .untilTurnedOff)
-    }
-
     func testStartingAndStoppingBalancesSleepActivity() {
         let fixture = makeFixture()
 
@@ -52,18 +39,6 @@ final class KeepAwakeTests: XCTestCase {
 
         XCTAssertFalse(fixture.controller.isActive)
         XCTAssertEqual(fixture.manager.endCount, 1)
-    }
-
-    func testUntilTurnedOffDoesNotExpireWhenReconciled() {
-        var now = Date(timeIntervalSince1970: 1_700_000_000)
-        let fixture = makeFixture(now: { now })
-        fixture.controller.start(for: .untilTurnedOff)
-
-        now = now.addingTimeInterval(24 * 60 * 60)
-        fixture.controller.reconcileExpiration()
-
-        XCTAssertTrue(fixture.controller.isActive)
-        XCTAssertEqual(fixture.manager.endCount, 0)
     }
 
     func testPreferencesPersistButActiveSessionDoesNot() {

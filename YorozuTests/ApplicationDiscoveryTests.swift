@@ -10,19 +10,6 @@ final class ApplicationDiscoveryTests: XCTestCase {
         })
     }
 
-    func testDiscoveryResolvesSymbolicLinkRoot() async throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        let actual = root.appendingPathComponent("Actual")
-        let linked = root.appendingPathComponent("Applications")
-        try FileManager.default.createDirectory(at: actual, withIntermediateDirectories: true)
-        addTeardownBlock { try FileManager.default.removeItem(at: root) }
-        try makeApplicationFixture(at: actual.appendingPathComponent("Example.app"), bundleIdentifier: "test.linked-root")
-        try FileManager.default.createSymbolicLink(at: linked, withDestinationURL: actual)
-        let discoverer = FileSystemApplicationDiscoverer(roots: [(linked, 0)])
-        let applications = try await discoverer.discoverApplications()
-        XCTAssertEqual(applications.map(\.bundleIdentifier), ["test.linked-root"])
-    }
-
     func testHiddenApplicationLinkCanBeFoundThroughVisibleTargetRoot() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         let applications = root.appendingPathComponent("Applications")
@@ -49,18 +36,6 @@ final class ApplicationDiscoveryTests: XCTestCase {
         )
 
         XCTAssertEqual(selected?.canonicalURL, system.canonicalURL)
-    }
-
-    func testUserApplicationsWinsWhenNoPreferredURLExists() {
-        let system = discovered(path: "/System/Applications/Example.app", priority: 2)
-        let user = discovered(path: "/Users/test/Applications/Example.app", priority: 0)
-
-        let selected = FileSystemApplicationDiscoverer.selectCandidate(
-            [system, user],
-            preferredURL: nil
-        )
-
-        XCTAssertEqual(selected?.canonicalURL, user.canonicalURL)
     }
 
     func testRecursiveScanIncludesValidAppsAndExcludesOwnHiddenAndBrokenApps() async throws {

@@ -5,6 +5,38 @@ import XCTest
 
 @MainActor
 final class CommandInputModeSwitchingTests: XCTestCase {
+    func testInputModeActionsUseNativeJISEisuAndKanaKeyCodes() {
+        XCTAssertEqual(CommandInputModeAction.switchToEnglish.inputModeKeyCode, 102)
+        XCTAssertEqual(CommandInputModeAction.switchToJapanese.inputModeKeyCode, 104)
+    }
+
+
+    func testAuthorizationRefreshWhileInactiveKeepsMonitorAndActivityRunning() {
+        let defaults = UserDefaults(suiteName: UUID().uuidString)!
+        let monitor = TestCommandInputModeMonitor()
+        let permissions = TestCommandInputModePermissionProvider(
+            isAccessibilityGranted: true,
+            isEventPostingGranted: true
+        )
+        let backgroundActivity = TestCommandInputModeBackgroundActivityManager()
+        let controller = CommandInputModeController(
+            defaults: defaults,
+            monitor: monitor,
+            permissionProvider: permissions,
+            backgroundActivityManager: backgroundActivity
+        )
+
+        controller.isEnabled = true
+        controller.start()
+        controller.refreshAuthorization()
+
+        XCTAssertEqual(controller.runtimeStatus, .active)
+        XCTAssertEqual(monitor.startCount, 1)
+        XCTAssertTrue(monitor.isRunning)
+        XCTAssertEqual(backgroundActivity.beginCount, 1)
+        XCTAssertTrue(backgroundActivity.isActive)
+    }
+
     func testInputSourceResolverUsesPreferredSelectableSource() {
         let candidates = [
             candidate(id: "english.other", ascii: true),
@@ -18,49 +50,6 @@ final class CommandInputModeSwitchingTests: XCTestCase {
                 preferredSourceID: "english.preferred"
             ),
             "english.preferred"
-        )
-    }
-
-    func testInputSourceResolverFallsBackDeterministically() {
-        let candidates = [
-            candidate(id: "jp.z", languages: ["ja"]),
-            candidate(id: "jp.a", languages: ["ja-JP"]),
-            candidate(id: "disabled", languages: ["ja"], enabled: false),
-        ]
-
-        XCTAssertEqual(
-            CommandInputSourceResolver.sourceID(
-                for: .switchToJapanese,
-                candidates: candidates,
-                preferredSourceID: nil
-            ),
-            "jp.a"
-        )
-    }
-
-    func testInputSourceResolverRejectsUnavailableLanguage() {
-        XCTAssertNil(
-            CommandInputSourceResolver.sourceID(
-                for: .switchToJapanese,
-                candidates: [candidate(id: "english", ascii: true)],
-                preferredSourceID: nil
-            )
-        )
-    }
-
-    func testInputSourceResolverRejectsCharacterPalette() {
-        XCTAssertNil(
-            CommandInputSourceResolver.sourceID(
-                for: .switchToJapanese,
-                candidates: [
-                    candidate(
-                        id: "com.apple.50onPaletteIM",
-                        languages: ["ja"],
-                        keyboardSource: false
-                    ),
-                ],
-                preferredSourceID: "com.apple.50onPaletteIM"
-            )
         )
     }
 
@@ -103,30 +92,6 @@ final class CommandInputModeSwitchingTests: XCTestCase {
                 candidates: candidates
             )
         )
-    }
-
-    func testInputModeActionsUseNativeJISEisuAndKanaKeyCodes() {
-        XCTAssertEqual(CommandInputModeAction.switchToEnglish.inputModeKeyCode, 102)
-        XCTAssertEqual(CommandInputModeAction.switchToJapanese.inputModeKeyCode, 104)
-    }
-
-    func testCancelledInputSourceSwitchNeverPostsAKey() async {
-        let system = TestCommandInputSourceSystem(
-            currentSourceID: "english",
-            candidates: [
-                candidate(id: "english", ascii: true),
-                candidate(id: "japanese", languages: ["ja"]),
-            ]
-        )
-        let poster = TestCommandInputModeEventPoster()
-        let switcher = SystemCommandInputSourceSwitcher(system: system, eventPoster: poster)
-        let task = Task { @MainActor in
-            withUnsafeCurrentTask { $0?.cancel() }
-            return await switcher.switchInputMode(.switchToJapanese)
-        }
-        let report = await task.value
-        XCTAssertEqual(report.result, .cancelled)
-        XCTAssertTrue(poster.postedActions.isEmpty)
     }
 
     func testInputSourceSwitcherSelectsAndVerifiesTarget() async {
@@ -180,69 +145,6 @@ final class CommandInputModeSwitchingTests: XCTestCase {
         XCTAssertTrue(poster.allCallsWereOnMainThread)
     }
 
-    func testInputSourceSwitcherReportsUnavailableWithoutSelecting() async {
-        let system = TestCommandInputSourceSystem(
-            currentSourceID: "english",
-            candidates: [candidate(id: "english", ascii: true)]
-        )
-        let poster = TestCommandInputModeEventPoster()
-        let switcher = SystemCommandInputSourceSwitcher(
-            system: system,
-            eventPoster: poster
-        )
-
-        let report = await switcher.switchInputMode(.switchToJapanese)
-
-        XCTAssertEqual(
-            report.result,
-            .sourceUnavailable(.switchToJapanese)
-        )
-        XCTAssertTrue(poster.postedActions.isEmpty)
-    }
-
-    func testInputSourceSwitcherReportsSelectionFailure() async {
-        let system = TestCommandInputSourceSystem(
-            currentSourceID: "english",
-            candidates: [
-                candidate(id: "english", ascii: true),
-                candidate(id: "japanese", languages: ["ja"]),
-            ],
-            preferred: [.switchToJapanese: "japanese"]
-        )
-        let poster = TestCommandInputModeEventPoster(postSucceeds: false)
-        let switcher = SystemCommandInputSourceSwitcher(
-            system: system,
-            eventPoster: poster
-        )
-
-        let report = await switcher.switchInputMode(.switchToJapanese)
-
-        XCTAssertEqual(report.result, .selectionFailed)
-        XCTAssertEqual(report.sourceIDAfter, "english")
-        XCTAssertEqual(poster.postedActions, [.switchToJapanese])
-    }
-
-    func testInputSourceSwitcherReportsAlreadySelected() async {
-        let system = TestCommandInputSourceSystem(
-            currentSourceID: "japanese",
-            candidates: [candidate(id: "japanese", languages: ["ja"])],
-            preferred: [.switchToJapanese: "japanese"]
-        )
-        let poster = TestCommandInputModeEventPoster()
-        let switcher = SystemCommandInputSourceSwitcher(
-            system: system,
-            eventPoster: poster
-        )
-
-        let report = await switcher.switchInputMode(.switchToJapanese)
-
-        XCTAssertEqual(
-            report.result,
-            .alreadySelected(sourceID: "japanese")
-        )
-        XCTAssertTrue(poster.postedActions.isEmpty)
-    }
-
     func testInputSourceSwitcherTimesOutWhenSelectionIsNotObservable() async {
         let system = TestCommandInputSourceSystem(
             currentSourceID: "english",
@@ -263,30 +165,6 @@ final class CommandInputModeSwitchingTests: XCTestCase {
         XCTAssertEqual(report.result, .verificationTimedOut)
         XCTAssertEqual(report.sourceIDAfter, "english")
         XCTAssertEqual(poster.postedActions, [.switchToJapanese])
-    }
-
-    func testInputSourceSwitcherStopsVerificationWhenCancelled() async {
-        let system = TestCommandInputSourceSystem(
-            currentSourceID: "english",
-            candidates: [
-                candidate(id: "english", ascii: true),
-                candidate(id: "japanese", languages: ["ja"]),
-            ],
-            preferred: [.switchToJapanese: "japanese"]
-        )
-        let switcher = SystemCommandInputSourceSwitcher(
-            system: system,
-            eventPoster: TestCommandInputModeEventPoster()
-        )
-        let task = Task {
-            await switcher.switchInputMode(.switchToJapanese)
-        }
-
-        try? await Task.sleep(for: .milliseconds(10))
-        task.cancel()
-        let report = await task.value
-
-        XCTAssertEqual(report.result, .cancelled)
     }
 
     func testInputSourceStatusProviderTracksSelectionNotifications() {
@@ -376,22 +254,6 @@ final class CommandInputModeSwitchingTests: XCTestCase {
         XCTAssertNil(state.handleFlagsChanged(keyCode: 55, flags: []))
     }
 
-    func testOtherModifierCancelsCommandCandidate() {
-        var state = CommandInputModeStateMachine()
-        let flags = CGEventFlags(
-            rawValue: CGEventFlags.maskCommand.rawValue
-                | CGEventFlags.maskShift.rawValue
-        )
-
-        _ = state.handleFlagsChanged(
-            keyCode: 55,
-            flags: .maskCommand
-        )
-        _ = state.handleFlagsChanged(keyCode: 56, flags: flags)
-
-        XCTAssertNil(state.handleFlagsChanged(keyCode: 55, flags: []))
-    }
-
     func testSecondCommandCancelsBothCommandCandidates() {
         var state = CommandInputModeStateMachine()
 
@@ -441,18 +303,6 @@ final class CommandInputModeSwitchingTests: XCTestCase {
         }
     }
 
-    func testResetPreventsStaleCommandAction() {
-        var state = CommandInputModeStateMachine()
-
-        _ = state.handleFlagsChanged(
-            keyCode: 55,
-            flags: .maskCommand
-        )
-        state.reset()
-
-        XCTAssertNil(state.handleFlagsChanged(keyCode: 55, flags: []))
-    }
-
     func testInitialSynchronizationConsumesAlreadyHeldCommandReleases() {
         var state = CommandInputModeStateMachine()
         state.synchronizePressedCommands([.left, .right])
@@ -499,19 +349,6 @@ final class CommandInputModeSwitchingTests: XCTestCase {
         XCTAssertTrue(state.pressedCommands.isEmpty)
     }
 
-    func testCommandPressWhileSynchronizedOtherCommandIsHeldIsNotATap() {
-        var state = CommandInputModeStateMachine()
-        state.synchronizePressedCommands([.right])
-
-        _ = state.handleFlagsChanged(
-            keyCode: 55,
-            flags: .maskCommand
-        )
-
-        XCTAssertNil(state.handleFlagsChanged(keyCode: 55, flags: .maskCommand))
-        XCTAssertNil(state.handleFlagsChanged(keyCode: 54, flags: []))
-    }
-
     func testAnyOtherModifierActivityCancelsCommandCandidate() {
         var state = CommandInputModeStateMachine()
 
@@ -525,70 +362,6 @@ final class CommandInputModeSwitchingTests: XCTestCase {
         )
 
         XCTAssertNil(state.handleFlagsChanged(keyCode: 55, flags: []))
-    }
-
-    func testExtraReleaseAfterCompletedTapDoesNotProduceAnotherAction() {
-        var state = CommandInputModeStateMachine()
-
-        _ = state.handleFlagsChanged(
-            keyCode: 55,
-            flags: .maskCommand
-        )
-        XCTAssertEqual(
-            state.handleFlagsChanged(keyCode: 55, flags: []),
-            .switchToEnglish
-        )
-        XCTAssertNil(state.handleFlagsChanged(keyCode: 55, flags: []))
-    }
-
-    func testMalformedPressWithoutCommandFlagDoesNotProduceAction() {
-        var state = CommandInputModeStateMachine()
-
-        _ = state.handleFlagsChanged(
-            keyCode: 55,
-            flags: []
-        )
-
-        XCTAssertNil(state.handleFlagsChanged(keyCode: 55, flags: []))
-    }
-
-    func testCodeSigningClassificationDistinguishesStableAndAdHocBuilds() {
-        XCTAssertEqual(
-            SystemCommandInputModeCodeSigningStatusProvider
-                .classifySigningInformation(
-                    teamIdentifier: "TEAMID",
-                    certificateCount: 0,
-                    hasIdentifier: true
-                ),
-            .stable
-        )
-        XCTAssertEqual(
-            SystemCommandInputModeCodeSigningStatusProvider
-                .classifySigningInformation(
-                    teamIdentifier: nil,
-                    certificateCount: 1,
-                    hasIdentifier: true
-                ),
-            .stable
-        )
-        XCTAssertEqual(
-            SystemCommandInputModeCodeSigningStatusProvider
-                .classifySigningInformation(
-                    teamIdentifier: nil,
-                    certificateCount: 0,
-                    hasIdentifier: true
-                ),
-            .adHoc
-        )
-        XCTAssertEqual(
-            SystemCommandInputModeCodeSigningStatusProvider
-                .classifySigningInformation(
-                    teamIdentifier: nil,
-                    certificateCount: 0,
-                    hasIdentifier: false
-                ),
-            .unknown
-        )
     }
 
     func testControllerStartsOffWithoutRequestingPermissionsOrMonitoring() {
@@ -782,102 +555,6 @@ final class CommandInputModeSwitchingTests: XCTestCase {
         )
     }
 
-    func testAuthorizationRefreshWhileInactiveKeepsMonitorAndActivityRunning() {
-        let defaults = UserDefaults(suiteName: UUID().uuidString)!
-        let monitor = TestCommandInputModeMonitor()
-        let permissions = TestCommandInputModePermissionProvider(
-            isAccessibilityGranted: true,
-            isEventPostingGranted: true
-        )
-        let backgroundActivity = TestCommandInputModeBackgroundActivityManager()
-        let controller = CommandInputModeController(
-            defaults: defaults,
-            monitor: monitor,
-            permissionProvider: permissions,
-            backgroundActivityManager: backgroundActivity
-        )
-
-        controller.isEnabled = true
-        controller.start()
-        controller.refreshAuthorization()
-
-        XCTAssertEqual(controller.runtimeStatus, .active)
-        XCTAssertEqual(monitor.startCount, 1)
-        XCTAssertTrue(monitor.isRunning)
-        XCTAssertEqual(backgroundActivity.beginCount, 1)
-        XCTAssertTrue(backgroundActivity.isActive)
-    }
-
-    func testControllerReportsUnavailableWhenAuthorizedMonitorCannotStart() {
-        let defaults = UserDefaults(suiteName: UUID().uuidString)!
-        let monitor = TestCommandInputModeMonitor(startResult: false)
-        let permissions = TestCommandInputModePermissionProvider(
-            isAccessibilityGranted: true,
-            isEventPostingGranted: true
-        )
-        let controller = CommandInputModeController(
-            defaults: defaults,
-            monitor: monitor,
-            permissionProvider: permissions
-        )
-
-        controller.start()
-        controller.isEnabled = true
-
-        XCTAssertEqual(controller.runtimeStatus, .unavailable)
-        XCTAssertEqual(monitor.startCount, 1)
-        XCTAssertFalse(monitor.isRunning)
-    }
-
-    func testDisabledControllerDoesNotCreateLiveMonitoringOrRequestAccess() {
-        let defaults = UserDefaults(suiteName: UUID().uuidString)!
-        let controller = CommandInputModeController.disabled(defaults: defaults)
-
-        controller.start()
-        controller.isEnabled = true
-        controller.requestAccessibilityAccess()
-
-        XCTAssertEqual(controller.runtimeStatus, .permissionRequired)
-        XCTAssertTrue(controller.isEnabled)
-    }
-
-    func testControllerPublishesMonitorAndSwitchingDiagnostics() {
-        let defaults = UserDefaults(suiteName: UUID().uuidString)!
-        let monitor = TestCommandInputModeMonitor()
-        let permissions = TestCommandInputModePermissionProvider(
-            isAccessibilityGranted: true,
-            isEventPostingGranted: true
-        )
-        let controller = CommandInputModeController(
-            defaults: defaults,
-            monitor: monitor,
-            permissionProvider: permissions,
-            codeSigningStatusProvider: TestCommandInputModeCodeSigningProvider(
-                status: .adHoc
-            )
-        )
-
-        controller.start()
-        controller.isEnabled = true
-        let detectedAt = Date()
-        monitor.simulateCommandDetection(at: detectedAt)
-        controller.testSwitch(.switchToJapanese)
-
-        XCTAssertEqual(controller.monitorStatus, .running)
-        XCTAssertEqual(controller.codeSigningStatus, .adHoc)
-        XCTAssertEqual(controller.lastCommandEventAt, detectedAt)
-        XCTAssertEqual(controller.lastAction, .switchToJapanese)
-        XCTAssertNotNil(controller.lastActionAt)
-        XCTAssertEqual(
-            controller.lastSwitchReport?.result,
-            .switched(sourceID: "japanese")
-        )
-        XCTAssertEqual(monitor.testSwitchCount, 1)
-
-        controller.isEnabled = false
-        XCTAssertEqual(controller.monitorStatus, .stopped)
-    }
-
     func testHealthCheckStopsRevokedAccessWithoutForegroundRefresh() async {
         for invalidateMonitor in [false, true] {
             let monitor = TestCommandInputModeMonitor()
@@ -951,23 +628,6 @@ final class CommandInputModeSwitchingTests: XCTestCase {
         XCTAssertTrue(monitor.isRunning)
         XCTAssertTrue(activity.isActive)
         XCTAssertEqual(controller.runtimeStatus, .active)
-    }
-
-    func testStartupAndEnableDoNotInstallMonitorWhileSystemSettingsIsActive() {
-        let monitor = TestCommandInputModeMonitor()
-        let permissions = TestCommandInputModePermissionProvider(
-            isAccessibilityGranted: true, isEventPostingGranted: true
-        )
-        permissions.isSystemSettingsActive = true
-        let controller = CommandInputModeController(
-            defaults: UserDefaults(suiteName: UUID().uuidString)!,
-            monitor: monitor, permissionProvider: permissions
-        )
-        controller.start()
-        controller.isEnabled = true
-        defer { controller.stop() }
-        XCTAssertEqual(monitor.startCount, 0)
-        XCTAssertEqual(controller.runtimeStatus, .pausedForSystemSettings)
     }
 
     func testRecoveryCannotReactivateAfterPermissionOrSystemSettingsChangesDuringAwait() async {

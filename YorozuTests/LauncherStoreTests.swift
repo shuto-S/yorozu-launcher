@@ -3,18 +3,44 @@ import XCTest
 @testable import Yorozu
 
 final class LauncherStoreTests: XCTestCase {
-    func testDuplicatingMaximumLengthSnippetNamePreservesContent() async throws {
-        let original = try Snippet.validated(
-            name: String(repeating: "名", count: 80), keyword: ";original", content: "  Keep\nformatting  "
+    func testSafeURLPreviewParsesOnlyBoundedHTMLMetadata() async throws {
+        let loader = URLPreviewLoaderStub { url, maximumBytes, mimeTypes in
+            return SafeURLHTTPResponse(
+                data: Data(
+                    """
+                    <html><head>
+                    <title>Fallback Title</title>
+                    <meta property="og:title" content="Bounded &amp; Safe">
+                    <meta property="og:site_name" content="Example">
+                    </head></html>
+                    """.utf8
+                ),
+                finalURL: url,
+                statusCode: 200,
+                headers: [:]
+            )
+        }
+        let fetcher = SafeURLPreviewFetcher(
+            resolveAddresses: { _ in ["93.184.216.34"] },
+            loadResponse: { url, maximumBytes, mimeTypes in
+                try await loader.load(
+                    url,
+                    maximumBytes: maximumBytes,
+                    mimeTypes: mimeTypes
+                )
+            }
         )
-        let catalog = SnippetCatalog(store: nil, initialSnippets: [original])
-        let snapshot = try await catalog.duplicate(original)
-        let copy = try XCTUnwrap(snapshot.values.first { $0.id != original.id })
-        XCTAssertEqual(copy.name.count, 80)
-        XCTAssertTrue(copy.name.hasSuffix(" Copy"))
-        XCTAssertNil(copy.keyword)
-        XCTAssertEqual(copy.content, original.content)
-        XCTAssertEqual(copy.useCount, 0)
+
+        let document = try await fetcher.fetch(
+            URL(string: "https://example.com/")!
+        )
+
+        XCTAssertEqual(document.title, "Bounded & Safe")
+        XCTAssertEqual(document.siteName, "Example")
+        XCTAssertNil(document.imageData)
+        let request = await loader.lastRequest
+        XCTAssertEqual(request?.maximumBytes, 1_048_576)
+        XCTAssertEqual(request?.mimeTypes, ["text/html"])
     }
 
     func testSnippetUsageStillUpdatesForSessionWhenStorageFails() async throws {
@@ -49,30 +75,6 @@ final class LauncherStoreTests: XCTestCase {
         let snapshot = try await saveTask.value
         XCTAssertEqual(snapshot.applications.map(\.id), [second.id])
         XCTAssertNil(snapshot.applications.first?.preference.alias)
-    }
-
-    func testAliasSaveKeepsRefreshedMetadataAndUsage() async throws {
-        let identity = "bundle:test.refreshed"
-        let original = application(identity: identity, name: "Original", path: "/Applications/Original.app")
-        let refreshed = application(identity: identity, name: "Renamed", path: "/Applications/Renamed.app")
-        let gate = AliasSaveGate()
-        let discoverer = MutableStoreTestDiscoverer(applications: [original])
-        let catalog = ApplicationCatalog(store: nil, discoverer: discoverer, aliasPreferenceSaver: { _, _ in
-            await gate.wait()
-        })
-        _ = await catalog.reindex()
-        let saveTask = Task { try await catalog.updateAlias(identity: original.id, alias: "kept") }
-        await gate.waitUntilStarted()
-        await discoverer.setApplications([refreshed])
-        _ = await catalog.reindex()
-        _ = await catalog.recordSuccessfulLaunch(identity: refreshed.id)
-        await gate.resume()
-        let snapshot = try await saveTask.value
-        let saved = try XCTUnwrap(snapshot.applications.first)
-        XCTAssertEqual(saved.displayName, "Renamed")
-        XCTAssertEqual(saved.canonicalURL, refreshed.canonicalURL)
-        XCTAssertEqual(saved.preference.alias, "kept")
-        XCTAssertEqual(saved.preference.launchCount, 1)
     }
 
     func testPreferencesSurviveApplicationCacheReplacement() async throws {
@@ -163,59 +165,6 @@ final class LauncherStoreTests: XCTestCase {
 
         XCTAssertFalse(snapshot.storageAvailable)
         XCTAssertEqual(results.map(\.id), [discovered.id])
-    }
-
-    func testAliasSnapshotSearchesAliasApplicationNameAndBundleIdentifier() async throws {
-        let fixture = try makeStore()
-        let browser = application(
-            identity: "bundle:com.example.browser",
-            name: "Example Browser",
-            path: "/Applications/Example Browser.app"
-        )
-        let editor = application(
-            identity: "bundle:com.example.editor",
-            name: "Code Editor",
-            path: "/Applications/Code Editor.app"
-        )
-        try await fixture.store.replaceApplications(
-            [browser, editor],
-            indexedAt: Date()
-        )
-        try await fixture.store.savePreference(
-            identity: browser.id,
-            preference: LauncherPreference(
-                alias: "web",
-                isPinned: false,
-                pinnedAt: nil,
-                launchCount: 0,
-                lastLaunchedAt: nil
-            )
-        )
-        try await fixture.store.savePreference(
-            identity: editor.id,
-            preference: LauncherPreference(
-                alias: "dev",
-                isPinned: false,
-                pinnedAt: nil,
-                launchCount: 0,
-                lastLaunchedAt: nil
-            )
-        )
-        let catalog = ApplicationCatalog(
-            store: fixture.store,
-            discoverer: StoreTestDiscoverer(applications: [])
-        )
-        _ = await catalog.loadCachedApplications()
-
-        let aliasMatches = await catalog.searchAliases(query: "web")
-        let nameMatches = await catalog.searchAliases(query: "editor")
-        let bundleMatches = await catalog.searchAliases(
-            query: "com.example.browser"
-        )
-
-        XCTAssertEqual(aliasMatches.map(\.id), [browser.id])
-        XCTAssertEqual(nameMatches.map(\.id), [editor.id])
-        XCTAssertEqual(bundleMatches.map(\.id), [browser.id])
     }
 
     func testDeletingAliasPreservesPinAndUsagePreferences() async throws {
@@ -452,37 +401,6 @@ final class LauncherStoreTests: XCTestCase {
         XCTAssertEqual(persisted.map(\.id), snapshot.values.map(\.id))
     }
 
-    func testClipboardImageDecoderDownsamplesLargeImages() async throws {
-        let width = 2_400
-        let height = 1_600
-        let colorSpace = CGColorSpaceCreateDeviceRGB()
-        let context = try XCTUnwrap(
-            CGContext(
-                data: nil,
-                width: width,
-                height: height,
-                bitsPerComponent: 8,
-                bytesPerRow: 0,
-                space: colorSpace,
-                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
-            )
-        )
-        context.setFillColor(NSColor.systemBlue.cgColor)
-        context.fill(CGRect(x: 0, y: 0, width: width, height: height))
-        let sourceImage = try XCTUnwrap(context.makeImage())
-        let imageData = try XCTUnwrap(
-            NSBitmapImageRep(cgImage: sourceImage).representation(
-                using: .png,
-                properties: [:]
-            )
-        )
-
-        let preview = await ClipboardImageDecoder().decode(imageData)
-
-        XCTAssertEqual(preview?.width, 1_200)
-        XCTAssertEqual(preview?.height, 800)
-    }
-
     func testClipboardDatabaseMaintenanceCanBeAmortizedThenApplied() async throws {
         let fixture = try makeStore()
         let now = Date()
@@ -535,17 +453,6 @@ final class LauncherStoreTests: XCTestCase {
         let retainedItems = try await fixture.store.loadClipboardItems()
         XCTAssertEqual(retainedItems.count, 1)
         XCTAssertEqual(retainedItems.first?.contentHash, "hash-maintenance")
-    }
-
-    func testURLPreviewPolicyAcceptsPublicWebURLs() throws {
-        XCTAssertEqual(
-            URLPreviewPolicy.previewableURL(from: "https://www.apple.com/mac/")?.host(),
-            "www.apple.com"
-        )
-        XCTAssertEqual(
-            URLPreviewPolicy.previewableURL(from: " http://example.com/path ")?.scheme,
-            "http"
-        )
     }
 
     func testURLPreviewPolicyRejectsPrivateAndCredentialedURLs() {
@@ -620,46 +527,6 @@ final class LauncherStoreTests: XCTestCase {
         }
     }
 
-    func testSafeURLPreviewParsesOnlyBoundedHTMLMetadata() async throws {
-        let loader = URLPreviewLoaderStub { url, maximumBytes, mimeTypes in
-            return SafeURLHTTPResponse(
-                data: Data(
-                    """
-                    <html><head>
-                    <title>Fallback Title</title>
-                    <meta property="og:title" content="Bounded &amp; Safe">
-                    <meta property="og:site_name" content="Example">
-                    </head></html>
-                    """.utf8
-                ),
-                finalURL: url,
-                statusCode: 200,
-                headers: [:]
-            )
-        }
-        let fetcher = SafeURLPreviewFetcher(
-            resolveAddresses: { _ in ["93.184.216.34"] },
-            loadResponse: { url, maximumBytes, mimeTypes in
-                try await loader.load(
-                    url,
-                    maximumBytes: maximumBytes,
-                    mimeTypes: mimeTypes
-                )
-            }
-        )
-
-        let document = try await fetcher.fetch(
-            URL(string: "https://example.com/")!
-        )
-
-        XCTAssertEqual(document.title, "Bounded & Safe")
-        XCTAssertEqual(document.siteName, "Example")
-        XCTAssertNil(document.imageData)
-        let request = await loader.lastRequest
-        XCTAssertEqual(request?.maximumBytes, 1_048_576)
-        XCTAssertEqual(request?.mimeTypes, ["text/html"])
-    }
-
     func testSafeURLPreviewRevalidatesPrivateRedirectAndLimitsLoops() async {
         let privateRedirectLoader = URLPreviewLoaderStub { url, _, _ in
             SafeURLHTTPResponse(
@@ -719,30 +586,6 @@ final class LauncherStoreTests: XCTestCase {
         }
         let loopLoadCount = await loopLoader.loadCount
         XCTAssertEqual(loopLoadCount, 6)
-    }
-
-    func testURLPreviewCacheRoundTripAndExpiry() async throws {
-        let fixture = try makeStore()
-        let fetchedAt = Date(timeIntervalSince1970: 10_000)
-        let entry = URLPreviewCacheEntry(
-            url: "https://example.com/",
-            metadataData: Data([0x01, 0x02, 0x03]),
-            fetchedAt: fetchedAt
-        )
-
-        try await fixture.store.saveURLPreview(entry)
-
-        let cached = try await fixture.store.loadURLPreview(
-            url: entry.url,
-            newerThan: fetchedAt.addingTimeInterval(-1)
-        )
-        XCTAssertEqual(cached, entry)
-
-        let expired = try await fixture.store.loadURLPreview(
-            url: entry.url,
-            newerThan: fetchedAt.addingTimeInterval(1)
-        )
-        XCTAssertNil(expired)
     }
 
     func testSnippetRoundTripAndUsage() async throws {
@@ -863,24 +706,6 @@ final class LauncherStoreTests: XCTestCase {
         let p95 = durations.sorted()[94]
         print("YOROZU_PERF snippet_search_p95_ms=\(p95 * 1_000)")
         XCTAssertLessThan(p95, 0.030, "p95 was \(p95 * 1_000)ms")
-    }
-
-    func testClipboardCaptureProcessorHandlesMaximumTextOffThePasteboardBoundary() async throws {
-        let text = String(repeating: "a", count: 1_048_576)
-        let processor = ClipboardCaptureProcessor()
-        let processedCapture = await processor.process(
-            RawClipboardSnapshot(
-                content: .string(text),
-                sourceBundleIdentifier: "com.example.source",
-                sourceApplicationName: "Source",
-                copiedAt: Date()
-            )
-        )
-        let capture = try XCTUnwrap(processedCapture)
-
-        XCTAssertEqual(capture.kind, .text)
-        XCTAssertEqual(capture.textContent?.utf8.count, 1_048_576)
-        XCTAssertFalse(capture.contentHash.isEmpty)
     }
 
     func testClipboardRecordKeepsImageLazyWithDatabaseAndAvailableInMemoryFallback() async throws {

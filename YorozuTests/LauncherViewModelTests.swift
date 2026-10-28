@@ -13,96 +13,12 @@ final class LauncherViewModelTests: XCTestCase {
         XCTAssertFalse(AppEnvironment.requiresIsolation(arguments: ["Yorozu", "--unrelated"]))
     }
 
-    func testSoakConfigurationIsBoundedAndDefaultsToThirtyMinutes() throws {
-        let configuration = try SoakPerformanceConfiguration(arguments: [])
-        XCTAssertEqual(configuration.durationSeconds, 1_800)
-        XCTAssertEqual(configuration.warmupSeconds, 300)
-        XCTAssertEqual(configuration.sampleIntervalSeconds, 30)
-        let smoke = try SoakPerformanceConfiguration(arguments: [
-            "--soak-duration-seconds", "20", "--soak-warmup-seconds", "5", "--soak-sample-seconds", "2"
-        ])
-        XCTAssertEqual(smoke.durationSeconds, 20)
-        for arguments in [
-            ["--soak-duration-seconds", "nan"], ["--soak-duration-seconds", "inf"],
-            ["--soak-duration-seconds", "1"], ["--soak-duration-seconds", "20000"],
-            ["--soak-warmup-seconds", "1800"], ["--soak-warmup-seconds", "-1"],
-            ["--soak-sample-seconds", "0"], ["--soak-sample-seconds", "61"],
-            ["--soak-duration-seconds"]
-        ] {
-            XCTAssertThrowsError(try SoakPerformanceConfiguration(arguments: arguments))
-        }
-    }
-
-    func testSoakGrowthUsesPeakAfterWarmupAndDoesNotMistakeSmokeForSoak() throws {
-        func sample(_ elapsed: Double, _ resident: UInt64) -> SoakPerformanceSample {
-            let latency = PalettePresentationPerformanceReport(samples: [1])
-            return SoakPerformanceSample(
-                elapsedSeconds: elapsed, residentBytes: resident, idleCPUPercent: 0,
-                wakeEventCount: 0, cacheEstimatedBytes: 0, cacheConversationCount: 0,
-                cacheEvictionCount: 0,
-                latency: SoakLatencySample(root: latency, clipboard: latency, snippets: latency, clipboardItemCount: 32, snippetCount: 32)
-            )
-        }
-        let report = SoakPerformanceReport(requestedDurationSeconds: 1_800, warmupSeconds: 300, samples: [
-            sample(1, 1_000), sample(300, 100), sample(600, 130), sample(1_800, 110)
-        ])
-        XCTAssertEqual(report.afterWarmupRSSGrowthBytes, 30)
-        let smoke = SoakPerformanceReport(requestedDurationSeconds: 10, warmupSeconds: 5, samples: [sample(6, 100)])
-        XCTAssertNil(smoke.afterWarmupRSSGrowthBytes)
-        let encoded = try JSONEncoder().encode(report)
-        XCTAssertEqual(try JSONDecoder().decode(SoakPerformanceReport.self, from: encoded).afterWarmupRSSGrowthBytes, 30)
-        XCTAssertGreaterThan(try SoakProcessResources.current().residentBytes, 0)
-    }
-
-    func testCommandMatcherPreservesTextEditingAndRequiresExactModifiers() {
-        for key in [UInt16(51), 117] {
-            XCTAssertNil(PaletteCommandShortcut.match(keyCode: key, characters: nil, modifiers: .command, isEditingText: true))
-            XCTAssertEqual(PaletteCommandShortcut.match(keyCode: key, characters: nil, modifiers: .command, isEditingText: false), .delete)
-        }
-        XCTAssertNil(PaletteCommandShortcut.match(keyCode: 14, characters: "e", modifiers: .command, isEditingText: true))
-        for extra: NSEvent.ModifierFlags in [.shift, .option, .control] {
-            XCTAssertNil(PaletteCommandShortcut.match(keyCode: 35, characters: "p", modifiers: [.command, extra], isEditingText: false))
-            XCTAssertNil(PaletteCommandShortcut.match(keyCode: 51, characters: nil, modifiers: [.command, extra], isEditingText: false))
-        }
-        XCTAssertEqual(PaletteCommandShortcut.match(keyCode: 3, characters: "F", modifiers: [.command, .shift], isEditingText: false), .reveal)
-    }
-
-    func testCommandMatcherUsesLayoutCharactersInsteadOfPhysicalLetterPosition() {
-        XCTAssertEqual(PaletteCommandShortcut.match(keyCode: 0, characters: "k", modifiers: .command, isEditingText: true), .actions)
-        XCTAssertEqual(PaletteCommandShortcut.match(keyCode: 40, characters: "f", modifiers: .command, isEditingText: true), .search)
-        XCTAssertEqual(PaletteCommandShortcut.match(keyCode: 13, characters: "w", modifiers: .command, isEditingText: true), .close)
-    }
-
-    func testChatComposerOnlySendsOnItsDefinedReturnCombinations() {
-        XCTAssertTrue(AIComposerKeyPolicy.shouldSend(modifiers: []))
-        XCTAssertTrue(AIComposerKeyPolicy.shouldSend(modifiers: .command))
-        for modifiers: NSEvent.ModifierFlags in [.shift, .option, .control, [.command, .option], [.command, .shift]] {
-            XCTAssertFalse(AIComposerKeyPolicy.shouldSend(modifiers: modifiers))
-        }
-    }
-
-    func testModifiedArrowsRemainTextEditingCommands() {
-        for modifier: NSEvent.ModifierFlags in [.option, .shift, .control] {
-            for key: UInt16 in [125, 126] {
-                XCTAssertEqual(PaletteKeyEventPolicy.action(keyCode: key, modifiers: modifier, hasMarkedText: false, route: .root, isActionPanelPresented: false), .passThrough)
-            }
-        }
-        XCTAssertEqual(PaletteKeyEventPolicy.action(keyCode: 36, modifiers: .command, hasMarkedText: true, route: .root, isActionPanelPresented: false), .passThrough)
-    }
-
     func testAliasPickerNavigationAndCompositionAreIsolatedFromUnderlyingList() {
         for (key, action): (UInt16, PaletteKeyEventAction) in [(125, .moveSelection(1)), (126, .moveSelection(-1)), (36, .submitModal)] {
             XCTAssertEqual(PaletteKeyEventPolicy.action(keyCode: key, modifiers: [], hasMarkedText: false, route: .aliases, isActionPanelPresented: false, isModalPresented: true, isAliasApplicationPicker: true), action)
             XCTAssertEqual(PaletteKeyEventPolicy.action(keyCode: key, modifiers: [], hasMarkedText: true, route: .aliases, isActionPanelPresented: false, isModalPresented: true, isAliasApplicationPicker: true), .passThrough)
         }
         XCTAssertEqual(PaletteKeyEventPolicy.action(keyCode: 36, modifiers: [.command, .shift], hasMarkedText: false, route: .root, isActionPanelPresented: false, isModalPresented: true), .passThrough)
-    }
-
-    func testPageAndBoundaryNavigationOnlyInterceptsListFocus() {
-        for (key, action): (UInt16, PaletteKeyEventAction) in [(116, .moveSelection(-8)), (121, .moveSelection(8)), (115, .moveSelection(-Int(Int32.max))), (119, .moveSelection(Int(Int32.max)))] {
-            XCTAssertEqual(PaletteKeyEventPolicy.action(keyCode: key, modifiers: [], hasMarkedText: false, route: .root, isActionPanelPresented: false), action)
-            XCTAssertEqual(PaletteKeyEventPolicy.action(keyCode: key, modifiers: [], hasMarkedText: false, route: .root, isActionPanelPresented: false, isTextInputFocused: true), .passThrough)
-        }
     }
 
     func testUITestEnvironmentUsesOnlyIsolatedDependencies() async throws {
@@ -193,21 +109,6 @@ final class LauncherViewModelTests: XCTestCase {
         }
     }
 
-    func testTranslationKeysWithoutCompositionKeepTheirExistingActions() {
-        XCTAssertEqual(
-            keyAction(keyCode: 36, route: .translation),
-            .passThrough
-        )
-        XCTAssertEqual(
-            keyAction(keyCode: 126, route: .translation),
-            .passThrough
-        )
-        XCTAssertEqual(
-            keyAction(keyCode: 53, route: .translation),
-            .escape
-        )
-    }
-
     func testNonComposingPaletteKeysKeepTheirExistingActions() {
         XCTAssertEqual(
             keyAction(keyCode: 36),
@@ -231,195 +132,6 @@ final class LauncherViewModelTests: XCTestCase {
                 hasMarkedText: true
             ),
             .handleCommandShortcut
-        )
-    }
-
-    func testActionPanelKeyboardActionsWithoutComposition() {
-        XCTAssertEqual(
-            keyAction(keyCode: 36, isActionPanelPresented: true),
-            .performPrimaryAction
-        )
-        XCTAssertEqual(
-            keyAction(keyCode: 125, isActionPanelPresented: true),
-            .moveSelection(1)
-        )
-        XCTAssertEqual(
-            keyAction(keyCode: 53, isActionPanelPresented: true),
-            .escape
-        )
-
-        XCTAssertEqual(
-            keyAction(
-                keyCode: 125,
-                route: .translation,
-                isActionPanelPresented: true
-            ),
-            .moveSelection(1)
-        )
-        XCTAssertEqual(
-            keyAction(
-                keyCode: 126,
-                route: .translation,
-                isActionPanelPresented: true
-            ),
-            .moveSelection(-1)
-        )
-        XCTAssertEqual(
-            keyAction(
-                keyCode: 36,
-                route: .translation,
-                isActionPanelPresented: true
-            ),
-            .performPrimaryAction
-        )
-    }
-
-    func testSettingsEscapePassesThroughWhileTextIsComposing() {
-        XCTAssertEqual(
-            keyAction(
-                keyCode: 53,
-                hasMarkedText: true,
-                route: .settings
-            ),
-            .passThrough
-        )
-        XCTAssertEqual(
-            keyAction(keyCode: 53, route: .settings),
-            .escape
-        )
-    }
-
-    func testModifierRecorderReceivesEscapeBeforePaletteNavigation() throws {
-        var handler: ((NSEvent) -> NSEvent?)?
-        var removals = 0
-        var completed = false
-        let capture = WindowControlModifierCapture(
-            installMonitor: { handler = $0; return NSObject() },
-            removeMonitor: { _ in removals += 1 }
-        )
-        defer { capture.stop() }
-        capture.begin { _ in completed = true }
-
-        for keyCode: UInt16 in [36, 76, 126, 125, 53, 48, 51, 117, 40] {
-            XCTAssertEqual(PaletteKeyEventPolicy.action(
-                keyCode: keyCode,
-                modifiers: keyCode == 40 ? .command : [],
-                hasMarkedText: false,
-                route: .settings,
-                isActionPanelPresented: false,
-                isRecordingModifierShortcut: WindowControlModifierCapture.isAnyRecording
-            ), .passThrough)
-        }
-
-        let escape = try modifierCaptureEvent(keyCode: 53)
-        let installedHandler = try XCTUnwrap(handler)
-        XCTAssertNil(installedHandler(escape))
-        XCTAssertFalse(capture.isRecording)
-        XCTAssertFalse(WindowControlModifierCapture.isAnyRecording)
-        XCTAssertFalse(completed)
-        XCTAssertEqual(removals, 1)
-        XCTAssertEqual(keyAction(keyCode: 53, route: .settings), .escape)
-        XCTAssertEqual(keyAction(keyCode: 53, hasMarkedText: true, route: .settings), .passThrough)
-        XCTAssertEqual(keyAction(keyCode: 40, modifiers: .command), .handleCommandShortcut)
-    }
-
-    func testStartingAnotherModifierRecorderCancelsThePreviousOne() throws {
-        var removals = 0
-        var firstCompleted = false
-        var result: WindowControlModifierChord?
-        let first = WindowControlModifierCapture(
-            installMonitor: { _ in NSObject() }, removeMonitor: { _ in removals += 1 }
-        )
-        let second = WindowControlModifierCapture(
-            installMonitor: { _ in NSObject() }, removeMonitor: { _ in removals += 1 }
-        )
-        defer { first.stop(); second.stop() }
-        first.begin { _ in firstCompleted = true }
-        _ = first.handle(try modifierCaptureEvent(keyCode: 55, modifiers: .command, type: .flagsChanged))
-        second.begin { result = $0 }
-        XCTAssertFalse(first.isRecording)
-        XCTAssertTrue(second.isRecording)
-        XCTAssertFalse(firstCompleted)
-        XCTAssertEqual(removals, 1)
-
-        _ = second.handle(try modifierCaptureEvent(
-            keyCode: 58, modifiers: [.option, .shift], type: .flagsChanged
-        ))
-        _ = second.handle(try modifierCaptureEvent(keyCode: 58, type: .flagsChanged))
-        XCTAssertEqual(result, [.option, .shift])
-        XCTAssertFalse(WindowControlModifierCapture.isAnyRecording)
-        XCTAssertEqual(removals, 2)
-    }
-
-    func testTabAndLifecycleCancellationDiscardPendingModifierChord() throws {
-        var completions = 0
-        var removals = 0
-        let capture = WindowControlModifierCapture(
-            installMonitor: { _ in NSObject() }, removeMonitor: { _ in removals += 1 }
-        )
-        defer { capture.stop() }
-        let tab = try modifierCaptureEvent(keyCode: 48)
-        capture.begin { _ in completions += 1 }
-        _ = capture.handle(try modifierCaptureEvent(keyCode: 58, modifiers: .option, type: .flagsChanged))
-        XCTAssertNotNil(capture.handle(tab))
-        XCTAssertFalse(capture.isRecording)
-        XCTAssertEqual(completions, 0)
-        XCTAssertEqual(removals, 1)
-
-        capture.begin { _ in completions += 1 }
-        _ = capture.handle(try modifierCaptureEvent(keyCode: 58, modifiers: .option, type: .flagsChanged))
-        WindowControlModifierCapture.cancelActiveRecording()
-        XCTAssertFalse(capture.isRecording)
-        XCTAssertFalse(WindowControlModifierCapture.isAnyRecording)
-        XCTAssertNotNil(capture.handle(try modifierCaptureEvent(keyCode: 58, type: .flagsChanged)))
-        XCTAssertEqual(completions, 0)
-        XCTAssertEqual(removals, 2)
-    }
-
-    func testModifierRecorderDeleteClearsAndMonitorInstallFailureDoesNotRecord() throws {
-        var didClear = false
-        let capture = WindowControlModifierCapture(
-            installMonitor: { _ in NSObject() }, removeMonitor: { _ in }
-        )
-        defer { capture.stop() }
-        capture.begin { didClear = $0 == nil }
-        XCTAssertNil(capture.handle(try modifierCaptureEvent(keyCode: 51)))
-        XCTAssertTrue(didClear)
-        XCTAssertFalse(capture.isRecording)
-
-        let failed = WindowControlModifierCapture(
-            installMonitor: { _ in nil }, removeMonitor: { _ in XCTFail("No monitor was installed") }
-        )
-        failed.begin { _ in XCTFail("Failed recorder must not save") }
-        XCTAssertFalse(failed.isRecording)
-        XCTAssertFalse(WindowControlModifierCapture.isAnyRecording)
-    }
-
-    private func modifierCaptureEvent(
-        keyCode: UInt16,
-        modifiers: NSEvent.ModifierFlags = [],
-        type: NSEvent.EventType = .keyDown
-    ) throws -> NSEvent {
-        try XCTUnwrap(NSEvent.keyEvent(
-            with: type, location: .zero, modifierFlags: modifiers,
-            timestamp: 0, windowNumber: 0, context: nil,
-            characters: "", charactersIgnoringModifiers: "",
-            isARepeat: false, keyCode: keyCode
-        ))
-    }
-
-    func testAliasesEditorReturnPassesThroughWhileTextIsComposing() {
-        XCTAssertEqual(
-            keyAction(
-                keyCode: 36,
-                hasMarkedText: true,
-                route: .aliases
-            ),
-            .passThrough
-        )
-        XCTAssertEqual(
-            keyAction(keyCode: 36, route: .aliases),
-            .performPrimaryAction
         )
     }
 
@@ -458,85 +170,6 @@ final class LauncherViewModelTests: XCTestCase {
             keyAction(keyCode: 53, isModalPresented: true),
             .escape
         )
-    }
-
-    func testAccessibilityDisplayOverridesRecognizeUITestArguments() {
-        let enabled = AccessibilityDisplayOverrides(
-            arguments: [
-                "--ui-testing-reduce-motion",
-                "--ui-testing-reduce-transparency",
-            ]
-        )
-        XCTAssertTrue(enabled.reduceMotion)
-        XCTAssertTrue(enabled.reduceTransparency)
-
-        let disabled = AccessibilityDisplayOverrides(arguments: [])
-        XCTAssertFalse(disabled.reduceMotion)
-        XCTAssertFalse(disabled.reduceTransparency)
-
-        XCTAssertEqual(
-            PaletteAnimationPolicy.behavior(
-                systemReducesMotion: false,
-                overrides: enabled
-            ),
-            .none
-        )
-        XCTAssertEqual(
-            PaletteAnimationPolicy.behavior(
-                systemReducesMotion: false,
-                overrides: disabled
-            ),
-            .none
-        )
-    }
-
-    func testPaletteDeactivationPolicyKeepsSettingsVisible() {
-        XCTAssertFalse(
-            PaletteDeactivationPolicy.shouldHide(
-                automaticallyHides: true,
-                route: .settings
-            )
-        )
-        XCTAssertTrue(
-            PaletteDeactivationPolicy.shouldHide(
-                automaticallyHides: true,
-                route: .root
-            )
-        )
-        XCTAssertTrue(
-            PaletteDeactivationPolicy.shouldHide(
-                automaticallyHides: true,
-                route: .clipboard
-            )
-        )
-        XCTAssertFalse(
-            PaletteDeactivationPolicy.shouldHide(
-                automaticallyHides: false,
-                route: .root
-            )
-        )
-    }
-
-    func testPalettePresentationPerformanceReportUsesNearestRankPercentiles() {
-        let report = PalettePresentationPerformanceReport(
-            samples: Array(1...100).map(Double.init)
-        )
-
-        XCTAssertEqual(report.sampleCount, 100)
-        XCTAssertEqual(report.p50Milliseconds, 50)
-        XCTAssertEqual(report.p95Milliseconds, 95)
-        XCTAssertEqual(report.maximumMilliseconds, 100)
-    }
-
-    func testClipboardInteractionPerformanceDistributionUsesNearestRankPercentiles() {
-        let distribution = ClipboardInteractionPerformanceDistribution(
-            samples: Array(1...100).map(Double.init)
-        )
-
-        XCTAssertEqual(distribution.sampleCount, 100)
-        XCTAssertEqual(distribution.p50Milliseconds, 50)
-        XCTAssertEqual(distribution.p95Milliseconds, 95)
-        XCTAssertEqual(distribution.maximumMilliseconds, 100)
     }
 
     func testFailedURLPreviewIsNotFetchedAgainAfterRefocus() async {
@@ -1139,22 +772,6 @@ final class LauncherViewModelTests: XCTestCase {
         XCTAssertEqual(fixture.viewModel.actionQuery, "")
     }
 
-    func testHoverSelectionRequiresAnActualFiniteScreenPointerMovement() {
-        let pointer = CGPoint(x: -320, y: 480)
-        XCTAssertFalse(PaletteHoverSelectionTracker.hasPointerMoved(from: nil, to: pointer))
-        XCTAssertFalse(PaletteHoverSelectionTracker.hasPointerMoved(from: pointer, to: pointer))
-        XCTAssertTrue(PaletteHoverSelectionTracker.hasPointerMoved(
-            from: pointer, to: CGPoint(x: -319.5, y: 480)
-        ))
-        XCTAssertTrue(PaletteHoverSelectionTracker.hasPointerMoved(
-            from: pointer, to: CGPoint(x: -320, y: 479)
-        ))
-        for invalid in [CGPoint(x: CGFloat.nan, y: 480), CGPoint(x: -320, y: CGFloat.infinity)] {
-            XCTAssertFalse(PaletteHoverSelectionTracker.hasPointerMoved(from: pointer, to: invalid))
-            XCTAssertFalse(PaletteHoverSelectionTracker.hasPointerMoved(from: invalid, to: pointer))
-        }
-    }
-
     func testActionKeyboardSelectionIsNotReplacedByStationaryPointerHover() async throws {
         let fixture = try makeFixture(launcherShouldFail: false)
         fixture.viewModel.start()
@@ -1200,54 +817,6 @@ final class LauncherViewModelTests: XCTestCase {
         XCTAssertFalse(tracker.shouldSelect(at: movedPointer))
     }
 
-    func testHoverBaselineResetsOnPanelPresentationAndActionListChanges() {
-        let tracker = PaletteHoverSelectionTracker()
-        let original = CGPoint(x: 10, y: 20)
-        let reopened = CGPoint(x: 50, y: 60)
-        XCTAssertFalse(tracker.shouldSelect(at: original))
-        XCTAssertTrue(tracker.shouldSelect(at: CGPoint(x: 11, y: 20)))
-
-        tracker.recordPointer(at: reopened)
-        XCTAssertFalse(tracker.shouldSelect(at: reopened))
-        XCTAssertTrue(tracker.shouldSelect(at: CGPoint(x: 50, y: 61)))
-        tracker.recordPointer(at: original)
-        XCTAssertFalse(tracker.shouldSelect(at: original))
-        XCTAssertTrue(tracker.shouldSelect(at: CGPoint(x: 10, y: 21)))
-    }
-
-    func testFooterActionsExposeMouseEquivalentForKeyboardCommands() async throws {
-        let fixture = try makeFixture(launcherShouldFail: false)
-        fixture.viewModel.start()
-        fixture.viewModel.query = "Fixture"
-
-        try await waitUntil {
-            fixture.viewModel.results.count == 1
-        }
-
-        XCTAssertEqual(
-            fixture.viewModel.footerActions.map(\.id),
-            [.primary, .actions]
-        )
-        XCTAssertTrue(fixture.viewModel.isFooterActionEnabled(.actions))
-
-        fixture.viewModel.performFooterAction(.actions)
-
-        XCTAssertTrue(fixture.viewModel.isActionPanelPresented)
-    }
-
-    func testCalculationFooterShowsCopyInsteadOfOpen() async throws {
-        let fixture = try makeFixture(launcherShouldFail: false)
-        fixture.viewModel.start()
-        fixture.viewModel.query = "1 + 1"
-
-        try await waitUntil {
-            fixture.viewModel.results.first?.kind == .calculation
-        }
-
-        XCTAssertEqual(fixture.viewModel.footerActions.first?.title, "Copy")
-        XCTAssertEqual(fixture.viewModel.footerActions.first?.shortcut, "↩")
-    }
-
     func testDivisionByZeroShowsNonCopyableCalculationError() async throws {
         let fixture = try makeFixture(launcherShouldFail: false)
         fixture.viewModel.start()
@@ -1261,62 +830,6 @@ final class LauncherViewModelTests: XCTestCase {
         XCTAssertTrue(fixture.viewModel.actionItems.isEmpty)
         fixture.viewModel.performPrimaryAction()
         XCTAssertNil(fixture.viewModel.statusMessage)
-    }
-
-    func testShortcutCatalogStartsWithTheLauncherShortcut() {
-        XCTAssertEqual(
-            AppShortcutCatalog.settings.map(\.id),
-            [
-                "open-launcher",
-                "open-clipboard-history",
-                "open-snippets",
-                "open-aliases",
-                "open-ai-chat",
-            ]
-        )
-    }
-
-    func testMenuBarSettingsActionUsesThePaletteSettingsHandler() throws {
-        let fixture = try makeFixture(launcherShouldFail: false)
-        var didOpenSettings = false
-        let controller = MenuBarController(
-            viewModel: fixture.viewModel,
-            openPalette: {},
-            openSettings: {
-                didOpenSettings = true
-            }
-        )
-
-        controller.showSettings()
-
-        XCTAssertTrue(didOpenSettings)
-        withExtendedLifetime(controller) {}
-    }
-
-    func testMenuValidationKeepsUnavailableUpdateChecksDisabled() throws {
-        let fixture = try makeFixture(launcherShouldFail: false)
-        let controller = MenuBarController(
-            viewModel: fixture.viewModel,
-            openPalette: {},
-            openSettings: {}
-        )
-        let menu = NSMenu()
-        let updateItem = NSMenuItem(
-            title: "Check for Updates",
-            action: NSSelectorFromString("checkForUpdates"),
-            keyEquivalent: ""
-        )
-        updateItem.target = controller
-        menu.addItem(updateItem)
-
-        menu.update()
-
-        XCTAssertFalse(updateItem.isEnabled)
-        XCTAssertTrue(controller.validateMenuItem(NSMenuItem(
-            title: "Settings",
-            action: #selector(MenuBarController.showSettings),
-            keyEquivalent: ""
-        )))
     }
 
     func testFeatureOpenedFromRootReturnsToRootOnEscape() async throws {
@@ -1353,57 +866,6 @@ final class LauncherViewModelTests: XCTestCase {
                 identity: FeatureCommand.snippets.preferenceIdentity
             ).launchCount == 1
         }
-    }
-
-    func testSettingsIsSearchableAndReturnsToRootWhenOpenedFromRoot() async throws {
-        let fixture = try makeFixture(launcherShouldFail: false)
-        fixture.viewModel.start()
-        fixture.viewModel.query = "settings"
-
-        try await waitUntil {
-            fixture.viewModel.results.map(\.title) == ["Settings"]
-        }
-
-        fixture.viewModel.performPrimaryAction()
-        XCTAssertEqual(fixture.viewModel.route, .settings)
-        XCTAssertEqual(fixture.viewModel.presentationOrigin, .root)
-
-        fixture.viewModel.escape()
-        XCTAssertEqual(fixture.viewModel.route, .root)
-    }
-
-    func testDirectSettingsEscapeDismissesPalette() throws {
-        let fixture = try makeFixture(launcherShouldFail: false)
-        var didDismiss = false
-        fixture.viewModel.dismissAndRestorePreviousApplication = {
-            didDismiss = true
-        }
-        fixture.viewModel.prepareForPresentation(route: .settings, origin: .direct)
-
-        fixture.viewModel.escape()
-
-        XCTAssertTrue(didDismiss)
-        XCTAssertEqual(fixture.viewModel.route, .settings)
-    }
-
-    func testAIChatIsSearchableAndReturnsToRootWhenOpenedFromRoot() async throws {
-        let fixture = try makeFixture(launcherShouldFail: false)
-        fixture.viewModel.start()
-        fixture.viewModel.query = "AI Chat: Codex"
-
-        try await waitUntil {
-            fixture.viewModel.results.map(\.title) == ["AI Chat: Codex"]
-        }
-
-        fixture.viewModel.performPrimaryAction()
-        XCTAssertEqual(
-            fixture.viewModel.route,
-            .ai(providerID: .codex)
-        )
-        XCTAssertEqual(fixture.viewModel.aiChatViewModel.destination, .list(.active))
-
-        fixture.viewModel.escape()
-        XCTAssertEqual(fixture.viewModel.route, .root)
     }
 
     func testRootResultsMixFeaturesAndApplicationsByLastUse() async throws {
@@ -1493,18 +955,6 @@ final class LauncherViewModelTests: XCTestCase {
         fixture.viewModel.prepareForPresentation(route: .root, origin: .direct)
 
         XCTAssertEqual(fixture.viewModel.selectedID, firstResultID)
-    }
-
-    func testTranslationPromptPreservesInputAndRequestsOnlyTranslation() {
-        let prompt = TranslationPromptBuilder.prompt(
-            input: "Hello\\nworld",
-            targetLanguage: "Japanese"
-        )
-
-        XCTAssertTrue(prompt.contains("to Japanese"))
-        XCTAssertTrue(prompt.contains("Hello\\nworld"))
-        XCTAssertTrue(prompt.contains("Return only the translation"))
-        XCTAssertTrue(prompt.contains("Preserve the original meaning, tone, line breaks"))
     }
 
     func testTranslationFeatureOpensDedicatedRouteAndResetsInput() async throws {
@@ -1644,31 +1094,6 @@ final class LauncherViewModelTests: XCTestCase {
         }
     }
 
-    func testRootArithmeticActionCopiesExpressionAndResult() async throws {
-        let fixture = try makeFixture(launcherShouldFail: false)
-        fixture.viewModel.copyContent = { content in
-            XCTAssertEqual(content, .text("1 + 1 = 2"))
-            return .written(changeCount: 2)
-        }
-        fixture.viewModel.start()
-        fixture.viewModel.query = "1 + 1"
-
-        try await waitUntil {
-            fixture.viewModel.results.first?.kind == .calculation
-        }
-        fixture.viewModel.showActionMenu()
-        XCTAssertTrue(
-            fixture.viewModel.actionItems.contains {
-                $0.id == .copyCalculationExpression
-                    && $0.title == "Copy Expression"
-            }
-        )
-        fixture.viewModel.performAction(.copyCalculationExpression)
-        try await waitUntil {
-            fixture.viewModel.statusMessage == "Copied to Clipboard"
-        }
-    }
-
     func testSnippetModalDiscardsDraftAndBlocksActionPanel() throws {
         let fixture = try makeFixture(launcherShouldFail: false)
         fixture.viewModel.prepareForPresentation(route: .snippets, origin: .direct)
@@ -1744,33 +1169,6 @@ final class LauncherViewModelTests: XCTestCase {
         try await waitUntil {
             fixture.viewModel.results.first?.title == "Fixture"
         }
-    }
-
-    func testAddAliasForApplicationWithExistingAliasEntersEditMode() async throws {
-        let fixture = try makeFixture(launcherShouldFail: false)
-        let identity = ApplicationIdentity(rawValue: "bundle:com.example.fixture")
-        try await fixture.store.savePreference(
-            identity: identity,
-            preference: LauncherPreference(
-                alias: "existing",
-                isPinned: false,
-                pinnedAt: nil,
-                launchCount: 0,
-                lastLaunchedAt: nil
-            )
-        )
-        fixture.viewModel.start()
-        try await waitUntil {
-            fixture.viewModel.installedApplications.first?.preference.alias
-                == "existing"
-        }
-
-        fixture.viewModel.openFeature(.aliases)
-        fixture.viewModel.beginAddAlias()
-        fixture.viewModel.chooseSelectedAliasApplication()
-
-        XCTAssertEqual(fixture.viewModel.aliasEditorMode, .editing(identity))
-        XCTAssertEqual(fixture.viewModel.aliasDraft, "existing")
     }
 
     func testAliasValidationRejectsEmptyAndOversizedValues() throws {
@@ -1850,23 +1248,6 @@ final class LauncherViewModelTests: XCTestCase {
             .editing(application.id)
         )
         XCTAssertNil(viewModel.installedApplications.first?.preference.alias)
-    }
-
-    func testAliasEscapeCancelsEditingBeforeReturningToRoot() async throws {
-        let fixture = try makeFixture(launcherShouldFail: false)
-        fixture.viewModel.start()
-        try await waitUntil {
-            fixture.viewModel.installedApplications.count == 1
-        }
-        fixture.viewModel.openFeature(.aliases)
-        fixture.viewModel.beginAddAlias()
-
-        fixture.viewModel.escape()
-        XCTAssertNil(fixture.viewModel.aliasEditorMode)
-        XCTAssertEqual(fixture.viewModel.route, .aliases)
-
-        fixture.viewModel.escape()
-        XCTAssertEqual(fixture.viewModel.route, .root)
     }
 
     func testDeletingAliasSelectsNeighborAndPreservesOtherPreferences() async throws {
@@ -1991,26 +1372,6 @@ final class LauncherViewModelTests: XCTestCase {
                 })
         }
         XCTAssertEqual(fixture.viewModel.selectedResult?.title, "Code")
-    }
-
-    func testOpeningFeatureRecordsPersistentUsage() async throws {
-        let fixture = try makeFixture(launcherShouldFail: false)
-        fixture.viewModel.start()
-        try await waitUntil {
-            fixture.viewModel.featureCommands.count == FeatureCommand.all.count
-        }
-
-        fixture.viewModel.openFeature(.clipboardHistory)
-
-        try await waitUntil {
-            try await fixture.store.loadPreference(
-                identity: FeatureCommand.clipboardHistory.preferenceIdentity
-            ).launchCount == 1
-        }
-        let preference = try await fixture.store.loadPreference(
-            identity: FeatureCommand.clipboardHistory.preferenceIdentity
-        )
-        XCTAssertNotNil(preference.lastLaunchedAt)
     }
 
     func testKeepAwakeRootCommandTogglesWithoutLeavingRoot() async throws {

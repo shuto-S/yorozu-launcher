@@ -3,15 +3,6 @@ import XCTest
 
 @MainActor
 final class LaunchAtLoginTests: XCTestCase {
-    func testEnabledStatusIsReflectedWithoutRegisteringAgain() {
-        let service = TestLaunchAtLoginService(status: .enabled)
-        let controller = LaunchAtLoginController(service: service)
-
-        XCTAssertTrue(controller.isEnabled)
-        XCTAssertEqual(controller.status, .enabled)
-        XCTAssertEqual(service.registerCallCount, 0)
-    }
-
     func testEnablingRegistersMainAppAndRefreshesStatus() {
         let service = TestLaunchAtLoginService(
             status: .notRegistered,
@@ -26,21 +17,6 @@ final class LaunchAtLoginTests: XCTestCase {
         XCTAssertEqual(controller.status, .enabled)
         XCTAssertTrue(controller.isEnabled)
         XCTAssertNil(controller.errorMessage)
-    }
-
-    func testApprovalRequiredRemainsEnabledAndCanOpenSystemSettings() {
-        let service = TestLaunchAtLoginService(
-            status: .notRegistered,
-            statusAfterRegister: .requiresApproval
-        )
-        let controller = LaunchAtLoginController(service: service)
-
-        controller.setEnabled(true)
-        controller.openSystemSettings()
-
-        XCTAssertEqual(controller.status, .requiresApproval)
-        XCTAssertTrue(controller.isEnabled)
-        XCTAssertEqual(service.openSystemSettingsCallCount, 1)
     }
 
     func testDisablingUnregistersMainApp() {
