@@ -58,6 +58,7 @@ struct AppleIntelligenceService: OllamaChatServing {
                 } catch is CancellationError {
                     continuation.finish()
                 } catch {
+                    #if compiler(>=6.4)
                     if #available(macOS 27.0, *), let modelError = error as? LanguageModelError {
                         switch modelError {
                         case .contextSizeExceeded:
@@ -67,7 +68,10 @@ struct AppleIntelligenceService: OllamaChatServing {
                         default:
                             continuation.finish(throwing: AppleIntelligenceError.unavailable("Apple Intelligence could not complete the request. Try again."))
                         }
-                    } else if let modelError = error as? LanguageModelSession.GenerationError {
+                        return
+                    }
+                    #endif
+                    if let modelError = error as? LanguageModelSession.GenerationError {
                         switch modelError {
                         case .exceededContextWindowSize:
                             continuation.finish(throwing: AppleIntelligenceError.unavailable("This chat is too long for the on-device model. Start a new chat or shorten the text."))
